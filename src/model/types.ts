@@ -41,7 +41,7 @@ export interface ExtrudeFeature {
   sketchId: FeatureId;
   distance: number;
   direction: 1 | -1;
-  operation: "newBody" | "cut";
+  operation: "newBody" | "cut" | "add";
 }
 
 /** フィーチャー(履歴列の1要素)。 */

@@ -322,6 +322,47 @@ describe("validateFeature / validateDocument", () => {
     expect(errors.some((e) => e.message.includes("存在しません"))).toBe(true);
   });
 
+  it("operationが\"add\"でもエラーにならない", () => {
+    const { doc, sketch } = makeRectSketchDoc();
+    const { doc: doc2 } = addExtrudeFeature(doc, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+    const { doc: doc3, feature: addSketch } = addSketchFeature(doc2, {
+      name: "Sketch2",
+      plane: { kind: "world", plane: "XY" },
+      entities: [createCircleEntity({ radius: 5 })],
+    });
+    const { doc: doc4 } = addExtrudeFeature(doc3, {
+      name: "Add1",
+      sketchId: addSketch.id,
+      distance: 10,
+      direction: 1,
+      operation: "add",
+    });
+    expect(validateDocument(doc4)).toEqual([]);
+    expect(isDocumentValid(doc4)).toBe(true);
+  });
+
+  it("operationが不正な文字列だとエラー", () => {
+    const errors = validateFeature(
+      {
+        type: "extrude",
+        id: "e1",
+        name: "E",
+        sketchId: "s1",
+        distance: 10,
+        direction: 1,
+        operation: "invalidOp" as unknown as ExtrudeFeature["operation"],
+      },
+      [{ type: "sketch", id: "s1", name: "S", plane: { kind: "world", plane: "XY" }, entities: [] }],
+    );
+    expect(errors.some((e) => e.message.includes("対応していない押し出し操作"))).toBe(true);
+  });
+
   it("extrudeのsketchIdがsketch以外を指しているとエラー", () => {
     const otherExtrude: ExtrudeFeature = {
       type: "extrude",

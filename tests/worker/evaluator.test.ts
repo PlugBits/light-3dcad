@@ -239,6 +239,29 @@ describe("evaluateDocument (WASM統合)", () => {
     expect(result.message).toContain("カット対象");
   });
 
+  it("ボディが無い状態でのaddはエラーになる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [createCircleEntity({ radius: 5 })],
+    });
+    const { doc, feature: add } = addExtrudeFeature(doc1, {
+      name: "Add1",
+      sketchId: sketch.id,
+      distance: 10,
+      direction: 1,
+      operation: "add",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.featureId).toBe(add.id);
+    expect(result.message).toContain("追加対象");
+  });
+
   it("2回目のnewBodyはエラーになる(単一ボディのみ対応)", (ctx) => {
     ctx.skip(!wasmLoaded, SKIP_NOTE);
     const empty = createEmptyDocument();
@@ -361,6 +384,57 @@ describe("evaluateDocument (WASM統合): スケッチ・オン・フェイス", 
     if (!result.ok) return;
     const faceCount = countFaces(result.shape);
     expect(faceCount).toBeGreaterThan(boxFaceCount);
+    result.shape.delete();
+  });
+
+  it("箱の上面へのfaceスケッチ+円でAdd(材料追加)するとボスが乗り、バウンディングボックスの高さが増える", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const rect = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: doc1, feature: boxSketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+    });
+    const { doc: doc2, feature: boxExtrude } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: boxSketch.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const boxResult = evaluateDocument(doc2);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const boxBbox = boxResult.shape.boundingBox;
+    expect(boxBbox.depth).toBeCloseTo(20, 6);
+    boxBbox.delete();
+    const top = findTopFace(boxResult.shape);
+    boxResult.shape.delete();
+
+    const circle = createCircleEntity({ radius: 10 });
+    const { doc: doc3, feature: faceSketch } = addSketchFeature(doc2, {
+      name: "FaceSketch1",
+      plane: { kind: "face", featureId: boxExtrude.id, faceId: top.faceId, center: top.center, normal: top.normal },
+      entities: [circle],
+    });
+    // 上面の法線は+Z(外向き)なので、外側に盛り上げるaddはdirection:+1にする。
+    const { doc: addDoc } = addExtrudeFeature(doc3, {
+      name: "Add1",
+      sketchId: faceSketch.id,
+      distance: 10,
+      direction: 1,
+      operation: "add",
+    });
+
+    const result = evaluateDocument(addDoc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const bbox = result.shape.boundingBox;
+    // 箱の高さ20 + ボスの高さ10 = 30程度になる(境界ボックスの深さがZ方向の全高に相当)。
+    expect(bbox.depth).toBeCloseTo(30, 6);
+    bbox.delete();
     result.shape.delete();
   });
 

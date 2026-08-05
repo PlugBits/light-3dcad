@@ -61,7 +61,7 @@ export function validateFeature(feature: Feature, allFeatures: readonly Feature[
     if (feature.direction !== 1 && feature.direction !== -1) {
       errors.push({ featureId: feature.id, message: "押し出し方向は1または-1である必要があります" });
     }
-    if (feature.operation !== "newBody" && feature.operation !== "cut") {
+    if (feature.operation !== "newBody" && feature.operation !== "cut" && feature.operation !== "add") {
       errors.push({ featureId: feature.id, message: "対応していない押し出し操作です" });
     }
     const referenced = allFeatures.find((f) => f.id === feature.sketchId);

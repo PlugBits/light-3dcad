@@ -9,7 +9,7 @@
 //          中心距離が最も近い(バウンディングボックス対角長の50%以内)面
 //       3. どちらも失敗したらエラー(featureId付き。UIで再選択を促す)
 //   - entities: rectangle / circle
-//   - extrude: operation "newBody"(最初の1回のみ) / "cut"(既存ボディが必要)
+//   - extrude: operation "newBody"(最初の1回のみ) / "cut"(既存ボディが必要) / "add"(既存ボディが必要。fuseで結合)
 //   - direction: -1 は逆向き押し出し(面参照の場合は面法線の逆方向)
 import { Plane, drawCircle, drawRectangle, type Drawing, type Face, type Shape3D } from "replicad";
 
@@ -238,7 +238,7 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
           throw new Error("単一ボディのみ対応です(既にボディが存在します)");
         }
         body = extrudeSketchFeature(sketch, feature.distance, feature.direction, resolvedFacePlanes);
-      } else {
+      } else if (feature.operation === "cut") {
         if (!body) {
           throw new Error("カット対象のボディがありません");
         }
@@ -251,6 +251,20 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
         }
         body.delete();
         body = cutResult;
+      } else {
+        // feature.operation === "add"
+        if (!body) {
+          throw new Error("追加対象のボディがありません");
+        }
+        const tool = extrudeSketchFeature(sketch, feature.distance, feature.direction, resolvedFacePlanes);
+        let fuseResult: Shape3D;
+        try {
+          fuseResult = body.fuse(tool);
+        } finally {
+          tool.delete();
+        }
+        body.delete();
+        body = fuseResult;
       }
 
       snapshots.set(feature.id, body.clone());
