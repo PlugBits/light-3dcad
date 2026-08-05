@@ -16,3 +16,9 @@ body {
 button {
   cursor: pointer;
 }
+
+@keyframes cad-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

@@ -40,6 +40,7 @@ export function FeatureTree({ doc, selectedFeatureId, errorFeatureId, onSelect, 
         return (
           <li key={feature.id}>
             <div
+              data-testid={`feature-item-${feature.name}`}
               onClick={() => onSelect(feature.id)}
               style={{
                 display: "flex",
@@ -65,6 +66,7 @@ export function FeatureTree({ doc, selectedFeatureId, errorFeatureId, onSelect, 
               <button
                 type="button"
                 title="削除"
+                data-testid={`feature-delete-${feature.name}`}
                 onClick={(e) => {
                   e.stopPropagation();
                   onDelete(feature.id);

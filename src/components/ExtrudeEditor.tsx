@@ -22,7 +22,11 @@ export function ExtrudeEditor({ extrude, doc }: { extrude: ExtrudeFeature; doc: 
 
       <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
         対象スケッチ
-        <select value={extrude.sketchId} onChange={(e) => patch({ sketchId: e.target.value })}>
+        <select
+          value={extrude.sketchId}
+          data-testid="extrude-sketch-select"
+          onChange={(e) => patch({ sketchId: e.target.value })}
+        >
           {sketches.length === 0 && <option value="">(スケッチがありません)</option>}
           {sketches.map((s) => (
             <option key={s.id} value={s.id}>
@@ -37,6 +41,7 @@ export function ExtrudeEditor({ extrude, doc }: { extrude: ExtrudeFeature; doc: 
         <input
           type="number"
           value={extrude.distance}
+          data-testid="extrude-distance-input"
           onChange={(e) => {
             const num = Number(e.target.value);
             if (Number.isNaN(num)) return;
@@ -49,6 +54,7 @@ export function ExtrudeEditor({ extrude, doc }: { extrude: ExtrudeFeature; doc: 
         方向
         <select
           value={extrude.direction}
+          data-testid="extrude-direction-select"
           onChange={(e) => patch({ direction: Number(e.target.value) === -1 ? -1 : 1 })}
         >
           <option value={1}>順方向</option>
@@ -60,6 +66,7 @@ export function ExtrudeEditor({ extrude, doc }: { extrude: ExtrudeFeature; doc: 
         操作
         <select
           value={extrude.operation}
+          data-testid="extrude-operation-select"
           onChange={(e) => patch({ operation: e.target.value === "cut" ? "cut" : "newBody" })}
         >
           <option value="newBody">New Body</option>

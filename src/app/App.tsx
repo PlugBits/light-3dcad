@@ -112,20 +112,30 @@ export default function App() {
           borderBottom: "1px solid #444",
         }}
       >
-        <h1 style={{ fontSize: 16, margin: 0 }}>light-3dcad — Phase 3</h1>
-        <button type="button" onClick={addSketch}>
+        <h1 style={{ fontSize: 16, margin: 0 }}>light-3dcad — Phase 5</h1>
+        <button type="button" data-testid="btn-add-sketch" onClick={addSketch}>
           スケッチ追加
         </button>
-        <button type="button" onClick={handleAddExtrude} disabled={sketches.length === 0}>
+        <button
+          type="button"
+          data-testid="btn-add-extrude"
+          onClick={handleAddExtrude}
+          disabled={sketches.length === 0}
+        >
           押し出し追加
         </button>
-        <button type="button" onClick={addFaceSketch} disabled={!selectedFace?.isPlanar}>
+        <button
+          type="button"
+          data-testid="btn-add-face-sketch"
+          onClick={addFaceSketch}
+          disabled={!selectedFace?.isPlanar}
+        >
           選択面にスケッチ
         </button>
-        <button type="button" onClick={handleDownloadStl} disabled={busy || exporting}>
+        <button type="button" data-testid="btn-download-stl" onClick={handleDownloadStl} disabled={busy || exporting}>
           {exporting ? "STL出力中…" : "STLダウンロード"}
         </button>
-        <span style={{ fontSize: 12, opacity: 0.8, marginLeft: "auto" }}>
+        <span data-testid="status-text" style={{ fontSize: 12, opacity: 0.8, marginLeft: "auto" }}>
           状態: {status}
           {status === "initializing" && " (WASM初期化中…)"}
           {status === "evaluating" && " (形状計算中…)"}
@@ -157,6 +167,7 @@ export default function App() {
 
           {selectedFace && (
             <div
+              data-testid="selected-face-panel"
               style={{
                 borderTop: "1px solid #444",
                 paddingTop: 12,
@@ -167,8 +178,12 @@ export default function App() {
               }}
             >
               <strong>選択中の面</strong>
-              <span>中心: {selectedFace.center.map((v) => v.toFixed(2)).join(", ")}</span>
-              <span>法線: {selectedFace.normal.map((v) => v.toFixed(2)).join(", ")}</span>
+              <span data-testid="selected-face-center">
+                中心: {selectedFace.center.map((v) => v.toFixed(2)).join(", ")}
+              </span>
+              <span data-testid="selected-face-normal">
+                法線: {selectedFace.normal.map((v) => v.toFixed(2)).join(", ")}
+              </span>
               {!selectedFace.isPlanar && (
                 <span style={{ color: "#ff6b6b" }}>
                   この面は平面ではないため、スケッチ平面にできません。
@@ -178,12 +193,20 @@ export default function App() {
           )}
 
           {errorMessage && (
-            <p style={{ color: "#ff6b6b", fontSize: 12, whiteSpace: "pre-wrap", margin: 0 }}>
+            <p
+              data-testid="eval-error"
+              role="alert"
+              style={{ color: "#ff6b6b", fontSize: 12, whiteSpace: "pre-wrap", margin: 0 }}
+            >
               評価エラー: {errorMessage}
             </p>
           )}
           {exportError && (
-            <p style={{ color: "#ff6b6b", fontSize: 12, whiteSpace: "pre-wrap", margin: 0 }}>
+            <p
+              data-testid="export-error"
+              role="alert"
+              style={{ color: "#ff6b6b", fontSize: 12, whiteSpace: "pre-wrap", margin: 0 }}
+            >
               STL出力エラー: {exportError}
             </p>
           )}
@@ -200,8 +223,57 @@ export default function App() {
           </p>
         </aside>
 
-        <main style={{ flex: 1 }}>
-          <div ref={viewerContainerRef} style={{ width: "100%", height: "100%" }} />
+        <main style={{ flex: 1, position: "relative" }}>
+          <div ref={viewerContainerRef} data-testid="viewer-container" style={{ width: "100%", height: "100%" }} />
+          {status === "initializing" && (
+            <div
+              data-testid="init-overlay"
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 12,
+                background: "rgba(34, 38, 48, 0.85)",
+                color: "#fff",
+                fontSize: 14,
+                pointerEvents: "none",
+              }}
+            >
+              <div
+                aria-hidden="true"
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: "50%",
+                  border: "3px solid rgba(255,255,255,0.25)",
+                  borderTopColor: "#5b8def",
+                  animation: "cad-spin 0.8s linear infinite",
+                }}
+              />
+              <span>CADカーネルを初期化中…(初回は数秒〜数十秒かかります)</span>
+            </div>
+          )}
+          {status === "evaluating" && (
+            <div
+              data-testid="evaluating-overlay"
+              style={{
+                position: "absolute",
+                top: 12,
+                right: 12,
+                padding: "6px 12px",
+                borderRadius: 4,
+                background: "rgba(91, 141, 239, 0.9)",
+                color: "#fff",
+                fontSize: 12,
+                pointerEvents: "none",
+              }}
+            >
+              形状を再計算中…
+            </div>
+          )}
         </main>
       </div>
     </div>
