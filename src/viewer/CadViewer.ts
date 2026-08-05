@@ -356,6 +356,24 @@ export class CadViewer {
   private drawingPreviewMaterials: THREE.Material[] = [];
   /** 描画モード中、カーソル付近に現在のローカル座標・長さ・角度を表示するHTMLオーバーレイ。 */
   private coordOverlayEl: HTMLDivElement;
+  /**
+   * 描画モード中の数値長さ入力オーバーレイ(Phase 10)。数字キーを押すと表示され、入力中の
+   * 文字列(lengthInputValue)を表示する。Enterで直前頂点から現在のカーソル方向(スナップ・
+   * 軸ロック適用後)へその長さの頂点を確定する。
+   */
+  private lengthInputEl: HTMLDivElement;
+  private lengthInputActive = false;
+  private lengthInputValue = "";
+  /** 直近のマウス移動で解決した(スナップ・軸ロック適用後の)カーソルのローカル2D座標。数値長さ入力の方向決定に使う。 */
+  private lastHoverLocal: [number, number] | null = null;
+  /** 直近のマウス位置(canvas内px)。数値長さ入力オーバーレイの位置決めに使う。 */
+  private lastMousePx = 0;
+  private lastMousePy = 0;
+  /**
+   * 毎フレーム(render後)呼ばれるコールバック群。寸法ラベル等、カメラ変更に追従して画面座標を
+   * 再計算したいHTMLオーバーレイの位置更新に使う(Phase 10)。
+   */
+  private frameCallbacks = new Set<() => void>();
 
   constructor(container: HTMLElement, onFaceSelect?: (face: FaceInfo | null) => void) {
     this.container = container;
@@ -421,6 +439,24 @@ export class CadViewer {
     });
     container.appendChild(this.coordOverlayEl);
 
+    this.lengthInputEl = document.createElement("div");
+    this.lengthInputEl.setAttribute("data-testid", "drawing-length-input");
+    Object.assign(this.lengthInputEl.style, {
+      position: "absolute",
+      pointerEvents: "none",
+      background: "rgba(41, 182, 246, 0.9)",
+      color: "#00202b",
+      padding: "2px 6px",
+      borderRadius: "3px",
+      fontSize: "11px",
+      fontFamily: "monospace",
+      fontWeight: "bold",
+      whiteSpace: "nowrap",
+      display: "none",
+      zIndex: "11",
+    });
+    container.appendChild(this.lengthInputEl);
+
     this.renderer.domElement.addEventListener("click", this.handleClick);
     this.renderer.domElement.addEventListener("mousemove", this.handleDrawingMouseMove);
     window.addEventListener("keydown", this.handleKeyDown);
@@ -444,7 +480,27 @@ export class CadViewer {
     this.animationFrameId = requestAnimationFrame(this.animate);
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
+    // render()内でcamera.matrixWorldが最新化されるため、その後にフレームコールバックを呼ぶ
+    // (寸法ラベルのprojectPoint()等が常に最新のカメラ状態を参照できるようにするため)。
+    this.frameCallbacks.forEach((callback) => callback());
   };
+
+  /**
+   * 毎フレーム(render後)呼ばれるコールバックを登録する。寸法ラベル等、カメラ変更(orbit操作等)
+   * に追従して画面座標を再計算したいHTMLオーバーレイの位置更新に使う想定。登録解除関数を返す。
+   * コールバックは軽量に保つこと(このビューアのrAFループに同期して毎フレーム呼ばれるため)。
+   */
+  onFrame(callback: () => void): () => void {
+    this.frameCallbacks.add(callback);
+    return () => {
+      this.frameCallbacks.delete(callback);
+    };
+  }
+
+  /** 平面基底(basis)上のローカル2D座標(u, v)をワールド座標に変換する(オフセットなし)。 */
+  localToWorld(basis: PlaneBasis, u: number, v: number): [number, number, number] {
+    return planeLocalToWorld(basis, u, v);
+  }
 
   private handleResize() {
     const { clientWidth, clientHeight } = this.container;
@@ -454,12 +510,41 @@ export class CadViewer {
     this.renderer.setSize(clientWidth, clientHeight);
   }
 
+  /**
+   * 描画モード中のキー入力。数字/ピリオドキーで長さ数値入力を開始し(直前頂点が1つ以上必要)、
+   * Enterで確定、Backspaceで1文字削除、Escapeで入力のみ取消す(既存のEscape=描画中断とは
+   * 衝突しないよう、入力欄が開いている間はEscapeを入力キャンセルに限定する)。
+   */
   private handleKeyDown = (event: KeyboardEvent) => {
     if (this.drawingActive) {
       if (event.key === "Escape") {
+        if (this.lengthInputActive) {
+          this.resetLengthInput();
+          return;
+        }
         this.cancelPolygonDrawing();
-      } else if (event.key === "Enter") {
+        return;
+      }
+      if (event.key === "Enter") {
+        if (this.lengthInputActive) {
+          this.commitLengthInput();
+          return;
+        }
         this.finishPolygonDrawing();
+        return;
+      }
+      if (event.key === "Backspace" && this.lengthInputActive) {
+        this.lengthInputValue = this.lengthInputValue.slice(0, -1);
+        if (this.lengthInputValue === "") {
+          this.lengthInputActive = false;
+        }
+        this.updateLengthInputOverlay();
+        return;
+      }
+      if (this.drawingPoints.length > 0 && /^[0-9.]$/.test(event.key)) {
+        this.lengthInputActive = true;
+        this.lengthInputValue += event.key;
+        this.updateLengthInputOverlay();
       }
       return;
     }
@@ -467,6 +552,48 @@ export class CadViewer {
       this.clearSelection();
     }
   };
+
+  /**
+   * 数値長さ入力を確定する。直前頂点から直近のカーソル方向(スナップ・軸ロック適用後、
+   * lastHoverLocal)へ、入力された長さぶん進めた点を新しい頂点として追加する。
+   * 入力値が不正、方向が定まらない(マウス未移動等)場合は何もしない(入力欄のみリセットする)。
+   */
+  private commitLengthInput() {
+    const value = Number.parseFloat(this.lengthInputValue);
+    this.resetLengthInput();
+    if (!Number.isFinite(value) || value <= 0) return;
+    if (!this.drawingBasis || this.drawingPoints.length === 0 || !this.lastHoverLocal) return;
+
+    const from = this.drawingPoints[this.drawingPoints.length - 1];
+    const dx = this.lastHoverLocal[0] - from[0];
+    const dy = this.lastHoverLocal[1] - from[1];
+    const dist = Math.hypot(dx, dy);
+    if (dist === 0) return;
+    const next: [number, number] = [from[0] + (dx / dist) * value, from[1] + (dy / dist) * value];
+
+    this.drawingPoints.push(next);
+    this.updateDrawingPreview();
+    this.updateCoordOverlay(this.lastMousePx, this.lastMousePy, next);
+  }
+
+  /** 数値長さ入力の状態(入力中文字列)をリセットし、オーバーレイを隠す。 */
+  private resetLengthInput() {
+    this.lengthInputActive = false;
+    this.lengthInputValue = "";
+    this.updateLengthInputOverlay();
+  }
+
+  /** 数値長さ入力オーバーレイの表示/非表示・文言・位置(直近マウス位置基準)を更新する。 */
+  private updateLengthInputOverlay() {
+    if (!this.lengthInputActive) {
+      this.lengthInputEl.style.display = "none";
+      return;
+    }
+    this.lengthInputEl.textContent = `L入力: ${this.lengthInputValue}mm (Enterで確定/Escで取消)`;
+    this.lengthInputEl.style.left = `${this.lastMousePx + 14}px`;
+    this.lengthInputEl.style.top = `${this.lastMousePy + 32}px`;
+    this.lengthInputEl.style.display = "block";
+  }
 
   private handleClick = (event: MouseEvent) => {
     if (this.drawingActive) {
@@ -722,14 +849,18 @@ export class CadViewer {
     this.drawingEntities = [];
     this.drawingPoints = [];
     this.drawingCallbacks = null;
+    this.lastHoverLocal = null;
     this.renderer.domElement.style.cursor = "";
     this.clearDrawingPreview();
     this.coordOverlayEl.style.display = "none";
+    this.resetLengthInput();
   }
 
   /** 描画モード中のクリックをレイキャストしてスケッチ平面上のローカル2D座標に変換し、頂点を追加する。 */
   private handlePolygonClick(event: MouseEvent) {
     if (!this.drawingBasis) return;
+    // マウスクリックによる頂点確定は、入力中だった数値長さ(未確定)を破棄する。
+    this.resetLengthInput();
     const basis = this.drawingBasis;
     const rect = this.renderer.domElement.getBoundingClientRect();
     const px = event.clientX - rect.left;
@@ -765,6 +896,8 @@ export class CadViewer {
     const rect = this.renderer.domElement.getBoundingClientRect();
     const px = event.clientX - rect.left;
     const py = event.clientY - rect.top;
+    this.lastMousePx = px;
+    this.lastMousePy = py;
 
     const hit = this.raycastDrawingPlane(basis, px, py, rect);
     if (!hit) {
@@ -773,8 +906,11 @@ export class CadViewer {
       return;
     }
     const resolved = this.resolveDrawingCursor(basis, hit, event.shiftKey);
+    this.lastHoverLocal = resolved.point;
     this.updateDrawingPreview({ local: resolved.point, snapKind: resolved.snapKind, axis: resolved.axis });
     this.updateCoordOverlay(px, py, resolved.point);
+    // 数値長さ入力中はカーソル追従で位置を再計算する(内容は変わらない)。
+    this.updateLengthInputOverlay();
   };
 
   /**
@@ -958,6 +1094,7 @@ export class CadViewer {
     this.renderer.domElement.removeEventListener("click", this.handleClick);
     this.renderer.domElement.removeEventListener("mousemove", this.handleDrawingMouseMove);
     window.removeEventListener("keydown", this.handleKeyDown);
+    this.frameCallbacks.clear();
     this.controls.dispose();
     if (this.mesh) {
       this.mesh.geometry.dispose();
@@ -974,6 +1111,7 @@ export class CadViewer {
       delete window.__cadViewerDebug;
     }
     this.container.removeChild(this.coordOverlayEl);
+    this.container.removeChild(this.lengthInputEl);
     this.renderer.dispose();
     this.container.removeChild(this.renderer.domElement);
   }

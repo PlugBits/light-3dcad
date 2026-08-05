@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { DimensionOverlay } from "../components/DimensionOverlay";
 import { ExtrudeEditor } from "../components/ExtrudeEditor";
 import { FeatureTree } from "../components/FeatureTree";
 import { SketchEditor } from "../components/SketchEditor";
@@ -361,6 +362,14 @@ export default function App() {
 
         <main style={{ flex: 1, position: "relative" }}>
           <div ref={viewerContainerRef} data-testid="viewer-container" style={{ width: "100%", height: "100%" }} />
+          {selectedFeature?.type === "sketch" && selectedSketchPlane && (
+            <DimensionOverlay
+              sketch={selectedFeature}
+              basis={selectedSketchPlane}
+              viewerRef={viewerRef}
+              visible={showSketches && !drawingMode}
+            />
+          )}
           {showInitOverlay && (
             <div
               data-testid="init-overlay"
