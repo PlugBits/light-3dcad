@@ -62,6 +62,54 @@ test("線描画モードでクリックして矩形を描き、閉じて押し�
   expect(pageErrors).toEqual([]);
 });
 
+test("多角形の頂点にフィレットを設定すると、エラーなく再評価できる(Phase 11)", async ({ page }) => {
+  const pageErrors = collectPageErrors(page);
+
+  await page.goto("/");
+  await waitForReady(page);
+
+  await page.getByTestId("btn-add-sketch").click();
+  await expect(page.getByTestId("feature-item-Sketch2")).toBeVisible();
+  await waitForReady(page);
+
+  await page.getByTestId("btn-align-to-plane").click();
+  await page.getByTestId("btn-draw-polygon").click();
+  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("線描画キャンセル(Esc)");
+
+  // 一辺20mmの正方形(4頂点)をクリックで描く。
+  const corners: [number, number, number][] = [
+    [-10, -10, 0],
+    [10, -10, 0],
+    [10, 10, 0],
+    [-10, 10, 0],
+  ];
+  for (const corner of corners) {
+    const pt = await screenPointForWorld(page, corner);
+    await page.mouse.click(pt.x, pt.y);
+  }
+  const start = await screenPointForWorld(page, corners[0]);
+  await page.mouse.click(start.x + 2, start.y + 2);
+  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("線描画");
+  await expect(page.getByTestId("entity-polygon-0-vertex-0-x")).toHaveValue("-10");
+
+  // 頂点0にフィレット(サイズ5)を設定する。
+  await page.getByTestId("entity-polygon-0-vertex-0-corner-kind").selectOption("fillet");
+  await page.getByTestId("entity-polygon-0-vertex-0-corner-size").fill("5");
+  await waitForReady(page);
+  await expect(page.getByTestId("eval-error")).toHaveCount(0);
+
+  // Cutに変更して押し出し(貫通)し、フィレット付きプロファイルの押し出しが成功することを確認する。
+  await page.getByTestId("btn-add-extrude").click();
+  await waitForStatus(page, "error");
+  await page.getByTestId("extrude-operation-select").selectOption("cut");
+  await page.getByTestId("extrude-distance-input").fill("25");
+  await waitForReady(page);
+  await expect(page.getByTestId("eval-error")).toHaveCount(0);
+  await expect(page.getByTestId("status-text")).toContainText("状態: ready");
+
+  expect(pageErrors).toEqual([]);
+});
+
 test("Escキーで描画中の頂点列を破棄してモードを終了できる", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
 

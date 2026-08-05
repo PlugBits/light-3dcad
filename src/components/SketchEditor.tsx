@@ -1,8 +1,8 @@
 // スケッチフィーチャー選択時の編集パネル。矩形/円/多角形エンティティの追加(多角形は描画モード)・
-// 数値編集・削除を行う。
-import { addSketchEntity, patchSketchFeature, removeSketchEntity, updateSketchEntity } from "../model/document";
+// 数値編集・削除を行う。多角形は頂点ごとのフィレット/面取り(コーナー)編集も提供する(Phase 11)。
+import { addSketchEntity, patchSketchFeature, removeSketchEntity, setPolygonVertexCorner, updateSketchEntity } from "../model/document";
 import { createCircleEntity, createRectangleEntity } from "../model/entity";
-import type { FeatureId, SketchEntity, SketchFeature } from "../model/types";
+import type { FeatureId, PolygonCorner, SketchEntity, SketchFeature } from "../model/types";
 import { useCadStore } from "../state/store";
 
 function NumberField({
@@ -10,11 +10,13 @@ function NumberField({
   value,
   onChange,
   testId,
+  disabled,
 }: {
   label: string;
   value: number;
   onChange: (value: number) => void;
   testId?: string;
+  disabled?: boolean;
 }) {
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
@@ -23,6 +25,7 @@ function NumberField({
         type="number"
         value={value}
         data-testid={testId}
+        disabled={disabled}
         onChange={(e) => {
           const num = Number(e.target.value);
           if (Number.isNaN(num)) return;
@@ -192,40 +195,87 @@ function PolygonVertexEditor({
   function handleRemoveVertex(vertexIndex: number) {
     if (entity.points.length <= 3) return;
     const nextPoints = entity.points.filter((_, i) => i !== vertexIndex);
-    updateDocument((doc) => updateSketchEntity(doc, sketchId, entity.id, { points: nextPoints }));
+    updateDocument((doc) => {
+      const withPoints = updateSketchEntity(doc, sketchId, entity.id, { points: nextPoints });
+      // corners配列も頂点削除に合わせてインデックスを詰める(既存指定があれば維持する)。
+      if (!entity.corners) return withPoints;
+      const nextCorners = entity.corners.filter((_, i) => i !== vertexIndex);
+      return updateSketchEntity(withPoints, sketchId, entity.id, { corners: nextCorners });
+    });
+  }
+
+  function handleCornerKindChange(vertexIndex: number, kind: "" | "fillet" | "chamfer") {
+    const current = entity.corners?.[vertexIndex];
+    const size = current?.size ?? 5;
+    const next: PolygonCorner = kind === "" ? null : { kind, size };
+    updateDocument((doc) => setPolygonVertexCorner(doc, sketchId, entity.id, vertexIndex, next));
+  }
+
+  function handleCornerSizeChange(vertexIndex: number, size: number) {
+    const current = entity.corners?.[vertexIndex];
+    if (!current) return;
+    updateDocument((doc) =>
+      setPolygonVertexCorner(doc, sketchId, entity.id, vertexIndex, { kind: current.kind, size }),
+    );
   }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      {entity.points.map(([x, y], vertexIndex) => (
-        <div
-          key={vertexIndex}
-          style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 6, alignItems: "end" }}
-        >
-          <NumberField
-            label={`頂点${vertexIndex + 1} X`}
-            value={x}
-            testId={`entity-polygon-${entityIndex}-vertex-${vertexIndex}-x`}
-            onChange={(v) => handlePointChange(vertexIndex, 0, v)}
-          />
-          <NumberField
-            label={`頂点${vertexIndex + 1} Y`}
-            value={y}
-            testId={`entity-polygon-${entityIndex}-vertex-${vertexIndex}-y`}
-            onChange={(v) => handlePointChange(vertexIndex, 1, v)}
-          />
-          <button
-            type="button"
-            title="頂点を削除"
-            data-testid={`entity-polygon-${entityIndex}-vertex-${vertexIndex}-delete`}
-            disabled={entity.points.length <= 3}
-            onClick={() => handleRemoveVertex(vertexIndex)}
-            style={{ fontSize: 11 }}
+      {entity.points.map(([x, y], vertexIndex) => {
+        const corner = entity.corners?.[vertexIndex] ?? null;
+        return (
+          <div
+            key={vertexIndex}
+            style={{ display: "flex", flexDirection: "column", gap: 4, border: "1px solid #333", borderRadius: 4, padding: 6 }}
           >
-            削除
-          </button>
-        </div>
-      ))}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 6, alignItems: "end" }}>
+              <NumberField
+                label={`頂点${vertexIndex + 1} X`}
+                value={x}
+                testId={`entity-polygon-${entityIndex}-vertex-${vertexIndex}-x`}
+                onChange={(v) => handlePointChange(vertexIndex, 0, v)}
+              />
+              <NumberField
+                label={`頂点${vertexIndex + 1} Y`}
+                value={y}
+                testId={`entity-polygon-${entityIndex}-vertex-${vertexIndex}-y`}
+                onChange={(v) => handlePointChange(vertexIndex, 1, v)}
+              />
+              <button
+                type="button"
+                title="頂点を削除"
+                data-testid={`entity-polygon-${entityIndex}-vertex-${vertexIndex}-delete`}
+                disabled={entity.points.length <= 3}
+                onClick={() => handleRemoveVertex(vertexIndex)}
+                style={{ fontSize: 11 }}
+              >
+                削除
+              </button>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, alignItems: "end" }}>
+              <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
+                コーナー
+                <select
+                  value={corner?.kind ?? ""}
+                  data-testid={`entity-polygon-${entityIndex}-vertex-${vertexIndex}-corner-kind`}
+                  onChange={(e) => handleCornerKindChange(vertexIndex, e.target.value as "" | "fillet" | "chamfer")}
+                >
+                  <option value="">なし</option>
+                  <option value="fillet">フィレット</option>
+                  <option value="chamfer">面取り</option>
+                </select>
+              </label>
+              <NumberField
+                label="サイズ (mm)"
+                value={corner?.size ?? 5}
+                testId={`entity-polygon-${entityIndex}-vertex-${vertexIndex}-corner-size`}
+                disabled={!corner}
+                onChange={(v) => handleCornerSizeChange(vertexIndex, v)}
+              />
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }

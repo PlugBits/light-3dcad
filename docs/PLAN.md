@@ -259,10 +259,55 @@ Phase 6〜8(上記)の完了後に追加されたフェーズ。スケッチ拘�
   - 実機確認(ブラウザ、`npm run dev`+プリインストールChromiumをPlaywright経由で操作)で、
     寸法ラベルの表示・クリックでの編集ポップアップ表示・長さ変更後のラベル/形状の再描画・
     描画モード中の数値長さ入力オーバーレイの表示、をスクリーンショットで確認した。
-- **Phase 11 – 頂点フィレット/面取り(計画中)**: `polygon`エンティティの頂点を選択してフィレット
-  (丸め)・面取り(角の斜めカット)を適用できるようにする。replicadの`customCorner`系API
-  (`Drawing`/`Sketcher`のcorner操作、例: `customCorner(radius)`や`chamfer`相当)を利用する想定。
-  半径・角度をエンティティのパラメータとして`model/`に保持し、evaluatorでの再構築時に反映する。
+- **Phase 11 – 頂点フィレット/面取り**: 完了。新規依存を追加せず実装した。
+  - **ミニスパイク結果**: replicadの`DrawingPen`は`customCorner(radius, mode?)`
+    (`mode`は`"fillet" | "chamfer" | "dogbone"`、既定`"fillet"`)を持ち、「直前に描いた曲線」と
+    「次に描く曲線」の間のコーナーに**遅延適用**される(呼んだ時点では確定せず、次の
+    `lineTo()`/`close()`でその頂点のコーナーとして実際に処理される。実装は`pendingCurves`への
+    `saveCurve()`内で処理)。そのため`points[i]`(i≥1)にコーナーを付けるには、`lineTo(points[i])`の
+    直後・次の`lineTo()`より前に`customCorner()`を呼ぶ。
+    **頂点0(始点)は`closeWithCustomCorner(radius, mode?)`という専用APIで対応可能**と判明した
+    (`_closeSketch()`で閉じた後、`_customCornerLastWithFirst()`が`pendingCurves`の先頭(始点からの
+    最初の辺)と末尾(閉じる辺)を取り出してコーナー処理する実装)。これにより
+    **頂点シフト等の回避策は一切不要**で、全頂点(頂点0を含む)にフィレット/面取りを適用できる
+    ことをVitestの一時スパイクテスト(40×40正方形、90度コーナーでの面積減少量が
+    `r²(1-π/4)`(フィレット)・`r²/2`(面取り)と一致することを実測)で確認した(スパイク自体は
+    検証後に削除し、結論を本実装・恒久テストに反映した)。
+  - `model/types.ts`の`polygon`エンティティに`corners?: PolygonCorner[]`
+    (`PolygonCorner = null | { kind: "fillet" | "chamfer"; size: number }`、`corners[i]`が
+    `points[i]`に対応)を追加した。省略可能で既存データと後方互換。`model/validation.ts`に
+    `validatePolygonCorners()`(size>0、kindの妥当性、および「sizeが隣接2辺の短い方の長さの
+    1/2を超える場合」の粗い事前チェック、をpolygon単位で検証する純粋関数)を追加し、
+    `document.ts`に頂点1つ分のコーナーを設定/解除する`setPolygonVertexCorner()`を追加した。
+  - `worker/evaluator.ts`の`polygonDrawing()`をスパイク結果通りに実装した(`lineTo()`直後に
+    該当頂点のコーナーがあれば`customCorner(size, kind)`を呼び、頂点0は
+    `closeWithCustomCorner(size, kind)`で閉じる)。さらに、実際のプロファイル構築(OCCT到達)
+    より前に`validatePolygonCorners()`を使った事前チェックを`evaluateDocument()`のsketch処理時に
+    組み込み、コーナーサイズが隣接辺に対して大きすぎる場合はfeatureId付きのわかりやすい
+    エラーで早期に弾く(自己交差等の厳密な破綻判定は引き続きOCCTの例外→既存のfeatureId付き
+    エラー経路に委ねる)。
+  - `src/sketch/polygonOutline.ts`(新設、React/Three非依存の純粋TS)に、evaluatorが実際に
+    構築するB-Rep形状と同じ幾何(接点・円弧中心・掃引角)を計算する`computeCornerGeometry()`/
+    `polygonOutlinePoints()`を実装した。退化判定(前後の辺がほぼ平行)は、replicadの
+    `removeCorner()`と同じ外積閾値(1e-10)を使うことで、evaluatorがコーナー処理をスキップする
+    ケースとオーバーレイの描画結果を一致させている。`CadViewer`のpolygon描画をこの関数の
+    出力(円弧はポリライン近似)に置き換え、選択スケッチの線(オレンジ強調)が3D形状の
+    丸め・面取りと視覚的に一致するようにした(`npm run dev`+プリインストールChromiumでの
+    実機確認済み。スクリーンショットでオーバーレイの丸められた輪郭と、Cut後の3D形状の
+    丸め穴が正確に重なることを確認した)。
+  - `SketchEditor`のpolygon頂点編集UI(`PolygonVertexEditor`)に、頂点ごとの「コーナー:
+    なし/フィレット/面取り」セレクト(`entity-polygon-<i>-vertex-<j>-corner-kind`)とサイズ入力
+    (`entity-polygon-<i>-vertex-<j>-corner-size`、コーナー未設定時は無効化)を追加した。
+    頂点削除時は`corners`配列もインデックスを詰めて追従させる。**ビューア上でのクリックによる
+    コーナー編集ポップアップは今回は省略した**(パネル編集のみ。時間対効果の観点から見送り。
+    DimensionOverlayと同様の方式で将来追加は可能)。
+  - Vitestに、`polygonOutlinePoints`の幾何テスト(直角コーナーの接点位置・弧の開始終了角・
+    面取り長・退化ケース・頂点0の回帰テスト、10件)、evaluator統合テスト(40×40正方形の
+    4頂点フィレット/面取りでの体積減少の概算検証、頂点0のみのフィレット回帰テスト、
+    コーナーサイズ過大時の事前バリデーションエラー、既存のL字ポリゴン等に影響がないこと)、
+    model層のバリデーション・`setPolygonVertexCorner()`のテストを追加した(Vitest合計125件)。
+    E2Eに、線描画モードで多角形を描いた後に頂点へフィレットを設定して再評価が成功する
+    シナリオを1本追加した(既存13件は無傷、計14件)。
 
 スケッチ拘束ソルバ(PlaneGCS等による寸法間の連立拘束解決)は**Phase 12候補・後日判断**とする。
 Phase 10の「数値入力→決定的ルールでジオメトリ更新」は拘束ソルバとは異なり、単純な直接操作に留める。
