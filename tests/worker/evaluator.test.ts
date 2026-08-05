@@ -15,6 +15,7 @@ import {
   createCircleEntity,
   createEmptyDocument,
   createRectangleEntity,
+  patchExtrudeFeature,
 } from "../../src/model";
 import { evaluateDocument } from "../../src/worker/evaluator";
 
@@ -50,6 +51,28 @@ function countFaces(shape: Shape3D): number {
   const count = faces.length;
   faces.forEach((f) => f.delete());
   return count;
+}
+
+/** テスト用: 形状の中からXY平面に平行(法線がほぼ+Z)な面を探し、faceId/center/normalを取り出す。 */
+function findTopFace(shape: Shape3D): { faceId: number; center: [number, number, number]; normal: [number, number, number] } {
+  const faces = shape.faces;
+  let found: { faceId: number; center: [number, number, number]; normal: [number, number, number] } | null = null;
+  for (const face of faces) {
+    if (face.geomType === "PLANE") {
+      const centerVec = face.center;
+      const normalVec = face.normalAt();
+      const center = centerVec.toTuple();
+      const normal = normalVec.toTuple();
+      centerVec.delete();
+      normalVec.delete();
+      if (Math.abs(normal[2] - 1) < 1e-6 && Math.abs(normal[0]) < 1e-6 && Math.abs(normal[1]) < 1e-6) {
+        found = { faceId: face.hashCode, center, normal };
+      }
+    }
+    face.delete();
+  }
+  if (!found) throw new Error("テストセットアップ失敗: 上面が見つかりません");
+  return found;
 }
 
 const SKIP_NOTE = "Node上でのOpenCascade WASM初期化に失敗したためスキップ";
@@ -160,12 +183,12 @@ describe("evaluateDocument (WASM統合)", () => {
     cutResult.shape.delete();
   });
 
-  it("faceを参照するスケッチ平面は未対応エラー(featureId付き)", (ctx) => {
+  it("faceを参照するスケッチで参照先フィーチャーが存在しない場合はfeatureId付きエラーになる", (ctx) => {
     ctx.skip(!wasmLoaded, SKIP_NOTE);
     const empty = createEmptyDocument();
     const { doc } = addSketchFeature(empty, {
       name: "Sketch1",
-      plane: { kind: "face", featureId: "does-not-matter", faceId: 1 },
+      plane: { kind: "face", featureId: "does-not-matter", faceId: 1, center: [0, 0, 0], normal: [0, 0, 1] },
       entities: [createRectangleEntity({ width: 10, height: 10 })],
     });
 
@@ -173,7 +196,7 @@ describe("evaluateDocument (WASM統合)", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.featureId).toBe(doc.features[0].id);
-    expect(result.message).toContain("未対応");
+    expect(result.message).toContain("見つかりません");
   });
 
   it("extrudeの参照sketchIdが存在しない場合、featureId付きエラーになる", (ctx) => {
@@ -285,5 +308,159 @@ describe("evaluateDocument (WASM統合)", () => {
 
     const result = evaluateDocument(doc);
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("evaluateDocument (WASM統合): スケッチ・オン・フェイス", () => {
+  it("箱の上面へのfaceスケッチ+円カットで穴があき、面数が増える(hashCode一致で解決)", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const rect = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: doc1, feature: boxSketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+    });
+    const { doc: doc2, feature: boxExtrude } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: boxSketch.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const boxResult = evaluateDocument(doc2);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const boxFaceCount = countFaces(boxResult.shape);
+    const top = findTopFace(boxResult.shape);
+    boxResult.shape.delete();
+
+    expect(top.center[0]).toBeCloseTo(0, 6);
+    expect(top.center[1]).toBeCloseTo(0, 6);
+    expect(top.center[2]).toBeCloseTo(20, 6);
+    expect(top.normal[2]).toBeCloseTo(1, 6);
+
+    const circle = createCircleEntity({ radius: 10 });
+    const { doc: doc3, feature: faceSketch } = addSketchFeature(doc2, {
+      name: "FaceSketch1",
+      plane: { kind: "face", featureId: boxExtrude.id, faceId: top.faceId, center: top.center, normal: top.normal },
+      entities: [circle],
+    });
+    // 上面の法線は+Z(外向き)なので、内側に掘るcutはdirection:-1にする。
+    const { doc: cutDoc } = addExtrudeFeature(doc3, {
+      name: "Cut1",
+      sketchId: faceSketch.id,
+      distance: 10,
+      direction: -1,
+      operation: "cut",
+    });
+
+    const result = evaluateDocument(cutDoc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const faceCount = countFaces(result.shape);
+    expect(faceCount).toBeGreaterThan(boxFaceCount);
+    result.shape.delete();
+  });
+
+  it("上流寸法変更(高さ20→30)に幾何マッチングで追従する", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const rect = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: doc1, feature: boxSketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+    });
+    const { doc: doc2, feature: boxExtrude } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: boxSketch.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const boxResult = evaluateDocument(doc2);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const top = findTopFace(boxResult.shape);
+    boxResult.shape.delete();
+
+    const circle = createCircleEntity({ radius: 10 });
+    const { doc: doc3, feature: faceSketch } = addSketchFeature(doc2, {
+      name: "FaceSketch1",
+      // 保存されたcenterは(0,0,20)のまま(高さ変更後も更新されない=意図的に古い値)
+      plane: { kind: "face", featureId: boxExtrude.id, faceId: top.faceId, center: top.center, normal: top.normal },
+      entities: [circle],
+    });
+    const { doc: cutDoc } = addExtrudeFeature(doc3, {
+      name: "Cut1",
+      sketchId: faceSketch.id,
+      distance: 10,
+      direction: -1,
+      operation: "cut",
+    });
+
+    // 箱の高さを20→30に変更する。PlaneRef側のcenter/normalはあえて更新しない。
+    const changedDoc = patchExtrudeFeature(cutDoc, boxExtrude.id, { distance: 30 });
+
+    const result = evaluateDocument(changedDoc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    // 幾何マッチングで新しい上面(z=30)が見つかり、そこにカットが行われていること。
+    // (旧centerのz=20はもはや箱の内部にあるため、成功した時点で新しい上面が使われた証拠になる)
+    const bbox = result.shape.boundingBox;
+    expect(bbox.depth).toBeCloseTo(30, 3);
+    bbox.delete();
+
+    result.shape.delete();
+  });
+
+  it("参照面が幾何マッチングでも見つからない場合、featureId付きエラーになる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const rect = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: doc1, feature: boxSketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+    });
+    const { doc: doc2, feature: boxExtrude } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: boxSketch.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const circle = createCircleEntity({ radius: 10 });
+    const diagonalNormal = 1 / Math.sqrt(3);
+    const { doc: doc3, feature: faceSketch } = addSketchFeature(doc2, {
+      name: "FaceSketch1",
+      // 箱のどの面の法線とも一致しない不正な法線 + 実在しないfaceId
+      plane: {
+        kind: "face",
+        featureId: boxExtrude.id,
+        faceId: 999999999,
+        center: [0, 0, 20],
+        normal: [diagonalNormal, diagonalNormal, diagonalNormal],
+      },
+      entities: [circle],
+    });
+    const { doc } = addExtrudeFeature(doc3, {
+      name: "Cut1",
+      sketchId: faceSketch.id,
+      distance: 10,
+      direction: -1,
+      operation: "cut",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.featureId).toBe(faceSketch.id);
+    expect(result.message).toContain("面を選択し直してください");
   });
 });

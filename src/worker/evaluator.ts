@@ -1,12 +1,17 @@
 // CadDocument.features を先頭から逐次評価し、Replicadの形状(AnyShape)を組み立てる。
 // Worker内でのみimportすること(Replicad = OpenCascade WASM への依存を持つため)。
 //
-// Phase 1 でサポートする範囲:
-//   - sketch: plane は world XY のみ(face参照はエラー)
+// サポート範囲:
+//   - sketch: plane は world XY / 面参照(face)の両方
+//     - face参照は、参照先フィーチャー評価直後のボディ・スナップショットから面を再解決する。
+//       1. 第一候補: face.hashCode(選択時点のfaceId)が一致する面
+//       2. フォールバック: 平面(isPlanar)かつ法線がほぼ一致(cos>0.999)し、
+//          中心距離が最も近い(バウンディングボックス対角長の50%以内)面
+//       3. どちらも失敗したらエラー(featureId付き。UIで再選択を促す)
 //   - entities: rectangle / circle
 //   - extrude: operation "newBody"(最初の1回のみ) / "cut"(既存ボディが必要)
-//   - direction: -1 は逆向き押し出し
-import { drawCircle, drawRectangle, type Drawing, type Shape3D } from "replicad";
+//   - direction: -1 は逆向き押し出し(面参照の場合は面法線の逆方向)
+import { Plane, drawCircle, drawRectangle, type Drawing, type Face, type Shape3D } from "replicad";
 
 import type { CadDocument, FeatureId, SketchEntity, SketchFeature } from "../model/types";
 
@@ -22,6 +27,29 @@ export interface EvaluationFailure {
 }
 
 export type EvaluationResult = EvaluationSuccess | EvaluationFailure;
+
+type Tuple3 = [number, number, number];
+
+/** 面法線の一致とみなす角度許容(cos値。0.999 ≈ 約2.6度以内)。 */
+const FACE_NORMAL_COS_TOLERANCE = 0.999;
+/** 面中心の距離許容(バウンディングボックス対角長に対する比率)。 */
+const FACE_DISTANCE_TOLERANCE_RATIO = 0.5;
+
+function subtract(a: Tuple3, b: Tuple3): Tuple3 {
+  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+}
+function dot(a: Tuple3, b: Tuple3): number {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+function length(v: Tuple3): number {
+  return Math.sqrt(dot(v, v));
+}
+function distance(a: Tuple3, b: Tuple3): number {
+  return length(subtract(a, b));
+}
+function cross(a: Tuple3, b: Tuple3): Tuple3 {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
 
 /** sketch内のentities(rectangle/circle)を1つのDrawingに合成する。 */
 function buildDrawing(entities: SketchEntity[]): Drawing {
@@ -42,21 +70,118 @@ function buildDrawing(entities: SketchEntity[]): Drawing {
   return drawing as Drawing;
 }
 
+/** faceの中心・法線をプレーンなタプルとして取り出す(Vectorラッパーは即delete)。 */
+function faceCenterNormal(face: Face): { center: Tuple3; normal: Tuple3 } {
+  const centerVec = face.center;
+  const normalVec = face.normalAt();
+  const center = centerVec.toTuple();
+  const normal = normalVec.toTuple();
+  centerVec.delete();
+  normalVec.delete();
+  return { center, normal };
+}
+
 /**
- * sketchFeatureをXY平面上のDrawingに変換し、指定距離・方向で押し出す。
+ * 参照ボディ(スナップショット)の中から、選択時点のfaceId/center/normalを手がかりに面を再解決する。
+ * 1. face.hashCode(faceId)が完全一致する面を最優先で採用する。
+ * 2. 一致しなければ、平面(isPlanar)かつ法線がほぼ一致(cos>0.999)し、
+ *    中心距離が最も近い面を採用する(距離がバウンディングボックス対角長の50%を超えるものは除外)。
+ * 3. どちらも失敗した場合はエラーを投げる。
+ *
+ * 使用replicad API: Shape.faces / Face.hashCode / Face.geomType / Face.center / Face.normalAt() / Shape.boundingBox。
+ */
+function resolveFaceGeometry(
+  shape: Shape3D,
+  faceId: number,
+  savedCenter: Tuple3,
+  savedNormal: Tuple3,
+): { center: Tuple3; normal: Tuple3 } {
+  const faces = shape.faces;
+  try {
+    const byId = faces.find((f) => f.hashCode === faceId);
+    if (byId) {
+      return faceCenterNormal(byId);
+    }
+
+    const bbox = shape.boundingBox;
+    const diag = Math.sqrt(bbox.width ** 2 + bbox.height ** 2 + bbox.depth ** 2);
+    bbox.delete();
+    const maxDist = diag * FACE_DISTANCE_TOLERANCE_RATIO;
+
+    let best: { center: Tuple3; normal: Tuple3; dist: number } | null = null;
+    for (const face of faces) {
+      if (face.geomType !== "PLANE") continue;
+      const info = faceCenterNormal(face);
+      if (dot(info.normal, savedNormal) < FACE_NORMAL_COS_TOLERANCE) continue;
+      const dist = distance(info.center, savedCenter);
+      if (dist > maxDist) continue;
+      if (!best || dist < best.dist) {
+        best = { center: info.center, normal: info.normal, dist };
+      }
+    }
+    if (best) {
+      return { center: best.center, normal: best.normal };
+    }
+
+    throw new Error("面を特定できませんでした。面を選択し直してください");
+  } finally {
+    faces.forEach((f) => f.delete());
+  }
+}
+
+/**
+ * 面の中心・法線から、決定的なxDirを持つスケッチ平面(Plane)を構築する。
+ * xDir は 法線とグローバルZの外積(normal × Z)。ほぼ平行(Z軸自体を向く面)な場合はグローバルXにフォールバックする。
+ * 呼び出し側で使用後に plane.delete() すること。
+ */
+function buildFacePlane(center: Tuple3, normal: Tuple3): Plane {
+  const GLOBAL_Z: Tuple3 = [0, 0, 1];
+  let xDir = cross(normal, GLOBAL_Z);
+  if (length(xDir) < 1e-8) {
+    xDir = [1, 0, 0];
+  }
+  return new Plane(center, xDir, normal);
+}
+
+/**
+ * sketchFeatureをDrawingに変換し、指定距離・方向で押し出す。
+ * plane.kind === "world" の場合はXY平面上に、"face" の場合は resolvedFacePlanes に
+ * 事前計算しておいた面情報からスケッチ平面を組み立てて押し出す。
  *
  * 注意: replicadの Sketch#extrude() / Sketches#extrude() は内部で押し出し元の
  * sketch(wire)を自動的に delete() する実装になっている(CompoundSketchを除く)。
  * そのため呼び出し側でsketchOnPlane()の戻り値を重ねて delete() すると
  * 「This object has been deleted」の二重解放エラーになる。ここでは呼ばない。
  */
-function extrudeSketchFeature(sketch: SketchFeature, distance: number, direction: 1 | -1): Shape3D {
+function extrudeSketchFeature(
+  sketch: SketchFeature,
+  distance: number,
+  direction: 1 | -1,
+  resolvedFacePlanes: Map<FeatureId, { center: Tuple3; normal: Tuple3 }>,
+): Shape3D {
   const drawing = buildDrawing(sketch.entities);
-  const sketched = drawing.sketchOnPlane("XY");
-  // sketchOnPlane() の戻り値は型上 SketchInterface | Sketches に分かれ、
-  // extrude() の戻り値もそれぞれ Shape3D / AnyShape に広がるため明示キャストする。
-  // 実際には押し出しは常に立体(Shape3D)を生む。
-  return sketched.extrude(distance * direction) as Shape3D;
+
+  if (sketch.plane.kind === "world") {
+    const sketched = drawing.sketchOnPlane("XY");
+    // sketchOnPlane() の戻り値は型上 SketchInterface | Sketches に分かれ、
+    // extrude() の戻り値もそれぞれ Shape3D / AnyShape に広がるため明示キャストする。
+    // 実際には押し出しは常に立体(Shape3D)を生む。
+    return sketched.extrude(distance * direction) as Shape3D;
+  }
+
+  const resolved = resolvedFacePlanes.get(sketch.id);
+  if (!resolved) {
+    // sketch評価時(ループ内でtype==="sketch"を処理するタイミング)に必ず解決しているため
+    // 通常はここに到達しない。
+    throw new Error("内部エラー: 面参照スケッチの平面が解決されていません");
+  }
+  const plane = buildFacePlane(resolved.center, resolved.normal);
+  try {
+    const sketched = drawing.sketchOnPlane(plane);
+    return sketched.extrude(distance * direction) as Shape3D;
+  } finally {
+    plane.delete();
+  }
 }
 
 /**
@@ -66,6 +191,13 @@ function extrudeSketchFeature(sketch: SketchFeature, distance: number, direction
  */
 export function evaluateDocument(doc: CadDocument): EvaluationResult {
   const sketches = new Map<FeatureId, SketchFeature>();
+  // face参照スケッチの解決済み平面情報(sketchId -> center/normal)。sketch評価時に確定する。
+  const resolvedFacePlanes = new Map<FeatureId, { center: Tuple3; normal: Tuple3 }>();
+  // 各extrudeフィーチャー評価直後のボディのスナップショット(featureId -> クローン)。
+  // 後続のface参照スケッチが面を再解決するために使う。Shape.clone()はOCCTの参照カウント
+  // ベースの軽量コピーであり、live側のbodyを delete() してもスナップショット側は無効化されない
+  // (逆も同様)。評価終了時(成功/失敗いずれでも)にすべて delete() する。
+  const snapshots = new Map<FeatureId, Shape3D>();
   let body: Shape3D | null = null;
   let currentFeatureId: FeatureId | undefined;
 
@@ -74,8 +206,22 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
       currentFeatureId = feature.id;
 
       if (feature.type === "sketch") {
-        if (feature.plane.kind !== "world" || feature.plane.plane !== "XY") {
-          throw new Error("面を参照するスケッチ平面は未対応です(現状はワールドXY平面のみ)");
+        if (feature.plane.kind === "world") {
+          if (feature.plane.plane !== "XY") {
+            throw new Error("対応していないワールド平面です");
+          }
+        } else {
+          const refShape = snapshots.get(feature.plane.featureId);
+          if (!refShape) {
+            throw new Error(`参照先のフィーチャー(${feature.plane.featureId})の形状が見つかりません`);
+          }
+          const resolved = resolveFaceGeometry(
+            refShape,
+            feature.plane.faceId,
+            feature.plane.center,
+            feature.plane.normal,
+          );
+          resolvedFacePlanes.set(feature.id, resolved);
         }
         sketches.set(feature.id, feature);
         continue;
@@ -91,12 +237,12 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
         if (body) {
           throw new Error("単一ボディのみ対応です(既にボディが存在します)");
         }
-        body = extrudeSketchFeature(sketch, feature.distance, feature.direction);
+        body = extrudeSketchFeature(sketch, feature.distance, feature.direction, resolvedFacePlanes);
       } else {
         if (!body) {
           throw new Error("カット対象のボディがありません");
         }
-        const tool = extrudeSketchFeature(sketch, feature.distance, feature.direction);
+        const tool = extrudeSketchFeature(sketch, feature.distance, feature.direction, resolvedFacePlanes);
         let cutResult: Shape3D;
         try {
           cutResult = body.cut(tool);
@@ -106,15 +252,20 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
         body.delete();
         body = cutResult;
       }
+
+      snapshots.set(feature.id, body.clone());
     }
   } catch (err) {
     if (body) body.delete();
+    for (const snap of snapshots.values()) snap.delete();
     return {
       ok: false,
       featureId: currentFeatureId,
       message: err instanceof Error ? err.message : String(err),
     };
   }
+
+  for (const snap of snapshots.values()) snap.delete();
 
   if (!body) {
     return { ok: false, message: "ドキュメントに有効なボディがありません(押し出しフィーチャーがありません)" };
