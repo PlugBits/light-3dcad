@@ -1,95 +1,36 @@
 import { useEffect, useRef, useState } from "react";
 
-import {
-  addExtrudeFeature,
-  addSketchFeature,
-  createEmptyDocument,
-  createRectangleEntity,
-  findFeature,
-  patchExtrudeFeature,
-  updateSketchEntity,
-  type CadDocument,
-  type ExtrudeFeature,
-  type SketchFeature,
-} from "../model";
-import type { WorkerResponse } from "../protocol/messages";
+import { findFeature, patchExtrudeFeature, updateSketchEntity } from "../model/document";
+import type { ExtrudeFeature, SketchFeature } from "../model/types";
+import { useCadStore } from "../state/store";
 import { CadViewer } from "../viewer/CadViewer";
 import { downloadStl } from "../export/downloadStl";
-
-let requestCounter = 0;
-function nextRequestId(): string {
-  requestCounter += 1;
-  return `req-${requestCounter}`;
-}
-
-type Status = "initializing" | "ready" | "evaluating" | "error";
-
-/** 初期ドキュメント: XYスケッチ(矩形60x40) -> 押し出し20mm(newBody)。 */
-function createInitialDocument(): { doc: CadDocument; sketchId: string; entityId: string; extrudeId: string } {
-  const empty = createEmptyDocument();
-  const rect = createRectangleEntity({ width: 60, height: 40 });
-  const { doc: docWithSketch, feature: sketch } = addSketchFeature(empty, {
-    name: "Sketch1",
-    plane: { kind: "world", plane: "XY" },
-    entities: [rect],
-  });
-  const { doc, feature: extrude } = addExtrudeFeature(docWithSketch, {
-    name: "Extrude1",
-    sketchId: sketch.id,
-    distance: 20,
-    direction: 1,
-    operation: "newBody",
-  });
-  return { doc, sketchId: sketch.id, entityId: rect.id, extrudeId: extrude.id };
-}
 
 export default function App() {
   const viewerContainerRef = useRef<HTMLDivElement | null>(null);
   const viewerRef = useRef<CadViewer | null>(null);
-  const workerRef = useRef<Worker | null>(null);
-  const pendingRequests = useRef(new Map<string, (response: WorkerResponse) => void>());
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
 
-  const [status, setStatus] = useState<Status>("initializing");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [initial] = useState(createInitialDocument);
-  const [doc, setDoc] = useState<CadDocument>(initial.doc);
+  const doc = useCadStore((s) => s.doc);
+  const status = useCadStore((s) => s.status);
+  const mesh = useCadStore((s) => s.mesh);
+  const errorMessage = useCadStore((s) => s.errorMessage);
+  const initialSketchId = useCadStore((s) => s.initialSketchId);
+  const initialEntityId = useCadStore((s) => s.initialEntityId);
+  const initialExtrudeId = useCadStore((s) => s.initialExtrudeId);
+  const initialize = useCadStore((s) => s.initialize);
+  const updateDocument = useCadStore((s) => s.updateDocument);
+  const exportStl = useCadStore((s) => s.exportStl);
 
-  const sketch = findFeature(doc, initial.sketchId) as SketchFeature;
-  const rectEntity = sketch.entities.find((e) => e.id === initial.entityId);
-  const extrude = findFeature(doc, initial.extrudeId) as ExtrudeFeature;
+  const sketch = findFeature(doc, initialSketchId) as SketchFeature;
+  const rectEntity = sketch.entities.find((e) => e.id === initialEntityId);
+  const extrude = findFeature(doc, initialExtrudeId) as ExtrudeFeature;
 
-  // Worker初期化(マウント時に一度だけ)
+  // Workerを起動し、初期ドキュメントの評価を1回だけ要求する。
   useEffect(() => {
-    const worker = new Worker(new URL("../worker/cad.worker.ts", import.meta.url), {
-      type: "module",
-    });
-    workerRef.current = worker;
-
-    worker.addEventListener("message", (event: MessageEvent<WorkerResponse>) => {
-      const response = event.data;
-      const resolver = pendingRequests.current.get(response.requestId);
-      if (resolver) {
-        pendingRequests.current.delete(response.requestId);
-        resolver(response);
-      }
-    });
-
-    const requestId = nextRequestId();
-    pendingRequests.current.set(requestId, (response) => {
-      if (response.kind === "ready") {
-        setStatus("ready");
-      } else if (response.kind === "error") {
-        setStatus("error");
-        setErrorMessage(response.message);
-      }
-    });
-    worker.postMessage({ kind: "init", requestId });
-
-    return () => {
-      worker.terminate();
-      workerRef.current = null;
-    };
-  }, []);
+    initialize();
+  }, [initialize]);
 
   // Three.jsビューア初期化(マウント時に一度だけ)
   useEffect(() => {
@@ -102,59 +43,41 @@ export default function App() {
     };
   }, []);
 
-  function sendRequest(request: { kind: "evaluate" | "exportStl"; doc: CadDocument }) {
-    const worker = workerRef.current;
-    if (!worker) return;
-
-    const requestId = nextRequestId();
-    return new Promise<WorkerResponse>((resolve) => {
-      pendingRequests.current.set(requestId, resolve);
-      worker.postMessage({ ...request, requestId });
-    });
-  }
-
-  async function handleGenerate() {
-    setStatus("evaluating");
-    setErrorMessage(null);
-    const response = await sendRequest({ kind: "evaluate", doc });
-    if (!response) return;
-
-    if (response.kind === "evaluated") {
-      viewerRef.current?.setMesh(response.mesh);
-      setStatus("ready");
-    } else if (response.kind === "error") {
-      setStatus("error");
-      setErrorMessage(response.message);
+  // ストアのmeshが更新されるたびにビューアへ反映する。
+  useEffect(() => {
+    if (mesh) {
+      viewerRef.current?.setMesh(mesh);
     }
-  }
-
-  async function handleDownloadStl() {
-    setErrorMessage(null);
-    const response = await sendRequest({ kind: "exportStl", doc });
-    if (!response) return;
-
-    if (response.kind === "stl") {
-      downloadStl(response.blob, "model.stl");
-    } else if (response.kind === "error") {
-      setStatus("error");
-      setErrorMessage(response.message);
-    }
-  }
+  }, [mesh]);
 
   function handleRectChange(key: "width" | "height", value: string) {
     const num = Number(value);
-    if (Number.isNaN(num)) return;
-    setDoc((prev) => updateSketchEntity(prev, initial.sketchId, initial.entityId, { [key]: num }));
+    if (Number.isNaN(num) || num <= 0) return;
+    updateDocument((prev) => updateSketchEntity(prev, initialSketchId, initialEntityId, { [key]: num }));
   }
 
   function handleDistanceChange(value: string) {
     const num = Number(value);
-    if (Number.isNaN(num)) return;
-    setDoc((prev) => patchExtrudeFeature(prev, initial.extrudeId, { distance: num }));
+    if (Number.isNaN(num) || num <= 0) return;
+    updateDocument((prev) => patchExtrudeFeature(prev, initialExtrudeId, { distance: num }));
+  }
+
+  async function handleDownloadStl() {
+    setExportError(null);
+    setExporting(true);
+    try {
+      const blob = await exportStl();
+      downloadStl(blob, "model.stl");
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setExporting(false);
+    }
   }
 
   const rectWidth = rectEntity?.kind === "rectangle" ? rectEntity.width : 0;
   const rectHeight = rectEntity?.kind === "rectangle" ? rectEntity.height : 0;
+  const busy = status === "initializing" || status === "evaluating" || exporting;
 
   return (
     <div style={{ display: "flex", height: "100vh", fontFamily: "sans-serif" }}>
@@ -200,19 +123,21 @@ export default function App() {
           />
         </label>
 
-        <button onClick={handleGenerate} disabled={status === "initializing" || status === "evaluating"}>
-          生成
-        </button>
-        <button onClick={handleDownloadStl} disabled={status === "initializing" || status === "evaluating"}>
+        <button onClick={handleDownloadStl} disabled={busy}>
           STLダウンロード
         </button>
 
         {errorMessage && (
           <p style={{ color: "#ff6b6b", fontSize: 12, whiteSpace: "pre-wrap" }}>{errorMessage}</p>
         )}
+        {exportError && (
+          <p style={{ color: "#ff6b6b", fontSize: 12, whiteSpace: "pre-wrap" }}>
+            STL出力エラー: {exportError}
+          </p>
+        )}
 
         <p style={{ fontSize: 11, opacity: 0.6, marginTop: "auto" }}>
-          面をクリックするとブラウザのコンソールにfaceIdが出力されます。
+          寸法を変更すると自動的に再評価されます。面をクリックするとブラウザのコンソールにfaceIdが出力されます。
         </p>
       </aside>
 
