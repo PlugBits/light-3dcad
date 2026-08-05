@@ -3,6 +3,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
 import type { FeatureId, SketchEntity } from "../model/types";
 import type { FaceGroup, FaceInfo, MeshData } from "../protocol/messages";
+import { polygonOutlinePoints } from "../sketch/polygonOutline";
 import {
   collectSketchSnapCandidates,
   ORIGIN_CANDIDATE,
@@ -163,8 +164,10 @@ function entityLocalPoints(entity: SketchEntity): [number, number][] {
   if (entity.kind === "circle") {
     return circleLocalPoints(entity.center, entity.radius, CIRCLE_SEGMENTS);
   }
-  // polygon: 頂点列そのものが閉ループ(LineLoopが最後→最初を自動的に結ぶ)。
-  return entity.points;
+  // polygon: フィレット/面取り(Phase 11)を適用した輪郭をポリライン近似する。
+  // corners未指定時は points がそのまま返る(既存の直線LineLoopと同じ結果)。
+  // LineLoopが最後→最初を自動的に結ぶため、閉じる辺は明示しない。
+  return polygonOutlinePoints(entity.points, entity.corners);
 }
 
 /** 平面基底に沿った方眼(LineSegments)を構築する。origin中心にhalfExtentの範囲、GRID_SPACING間隔。 */
