@@ -1,6 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { BoxParams, WorkerResponse } from "../protocol/messages";
+import {
+  addExtrudeFeature,
+  addSketchFeature,
+  createEmptyDocument,
+  createRectangleEntity,
+  findFeature,
+  patchExtrudeFeature,
+  updateSketchEntity,
+  type CadDocument,
+  type ExtrudeFeature,
+  type SketchFeature,
+} from "../model";
+import type { WorkerResponse } from "../protocol/messages";
 import { CadViewer } from "../viewer/CadViewer";
 import { downloadStl } from "../export/downloadStl";
 
@@ -12,6 +24,25 @@ function nextRequestId(): string {
 
 type Status = "initializing" | "ready" | "evaluating" | "error";
 
+/** 初期ドキュメント: XYスケッチ(矩形60x40) -> 押し出し20mm(newBody)。 */
+function createInitialDocument(): { doc: CadDocument; sketchId: string; entityId: string; extrudeId: string } {
+  const empty = createEmptyDocument();
+  const rect = createRectangleEntity({ width: 60, height: 40 });
+  const { doc: docWithSketch, feature: sketch } = addSketchFeature(empty, {
+    name: "Sketch1",
+    plane: { kind: "world", plane: "XY" },
+    entities: [rect],
+  });
+  const { doc, feature: extrude } = addExtrudeFeature(docWithSketch, {
+    name: "Extrude1",
+    sketchId: sketch.id,
+    distance: 20,
+    direction: 1,
+    operation: "newBody",
+  });
+  return { doc, sketchId: sketch.id, entityId: rect.id, extrudeId: extrude.id };
+}
+
 export default function App() {
   const viewerContainerRef = useRef<HTMLDivElement | null>(null);
   const viewerRef = useRef<CadViewer | null>(null);
@@ -20,7 +51,12 @@ export default function App() {
 
   const [status, setStatus] = useState<Status>("initializing");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [params, setParams] = useState<BoxParams>({ width: 40, height: 30, distance: 20 });
+  const [initial] = useState(createInitialDocument);
+  const [doc, setDoc] = useState<CadDocument>(initial.doc);
+
+  const sketch = findFeature(doc, initial.sketchId) as SketchFeature;
+  const rectEntity = sketch.entities.find((e) => e.id === initial.entityId);
+  const extrude = findFeature(doc, initial.extrudeId) as ExtrudeFeature;
 
   // Worker初期化(マウント時に一度だけ)
   useEffect(() => {
@@ -66,7 +102,7 @@ export default function App() {
     };
   }, []);
 
-  function sendRequest(request: { kind: "generateBox" | "exportStl"; params: BoxParams }) {
+  function sendRequest(request: { kind: "evaluate" | "exportStl"; doc: CadDocument }) {
     const worker = workerRef.current;
     if (!worker) return;
 
@@ -80,10 +116,10 @@ export default function App() {
   async function handleGenerate() {
     setStatus("evaluating");
     setErrorMessage(null);
-    const response = await sendRequest({ kind: "generateBox", params });
+    const response = await sendRequest({ kind: "evaluate", doc });
     if (!response) return;
 
-    if (response.kind === "boxGenerated") {
+    if (response.kind === "evaluated") {
       viewerRef.current?.setMesh(response.mesh);
       setStatus("ready");
     } else if (response.kind === "error") {
@@ -94,22 +130,31 @@ export default function App() {
 
   async function handleDownloadStl() {
     setErrorMessage(null);
-    const response = await sendRequest({ kind: "exportStl", params });
+    const response = await sendRequest({ kind: "exportStl", doc });
     if (!response) return;
 
-    if (response.kind === "stlReady") {
-      downloadStl(response.blob, "box.stl");
+    if (response.kind === "stl") {
+      downloadStl(response.blob, "model.stl");
     } else if (response.kind === "error") {
       setStatus("error");
       setErrorMessage(response.message);
     }
   }
 
-  function handleParamChange(key: keyof BoxParams, value: string) {
+  function handleRectChange(key: "width" | "height", value: string) {
     const num = Number(value);
     if (Number.isNaN(num)) return;
-    setParams((prev) => ({ ...prev, [key]: num }));
+    setDoc((prev) => updateSketchEntity(prev, initial.sketchId, initial.entityId, { [key]: num }));
   }
+
+  function handleDistanceChange(value: string) {
+    const num = Number(value);
+    if (Number.isNaN(num)) return;
+    setDoc((prev) => patchExtrudeFeature(prev, initial.extrudeId, { distance: num }));
+  }
+
+  const rectWidth = rectEntity?.kind === "rectangle" ? rectEntity.width : 0;
+  const rectHeight = rectEntity?.kind === "rectangle" ? rectEntity.height : 0;
 
   return (
     <div style={{ display: "flex", height: "100vh", fontFamily: "sans-serif" }}>
@@ -123,7 +168,7 @@ export default function App() {
           gap: 12,
         }}
       >
-        <h1 style={{ fontSize: 18, margin: 0 }}>light-3dcad — Phase 0</h1>
+        <h1 style={{ fontSize: 18, margin: 0 }}>light-3dcad — Phase 1</h1>
         <p style={{ fontSize: 13, opacity: 0.8 }}>
           状態: {status}
           {status === "initializing" && " (WASM初期化中…)"}
@@ -134,24 +179,24 @@ export default function App() {
           幅 (mm)
           <input
             type="number"
-            value={params.width}
-            onChange={(e) => handleParamChange("width", e.target.value)}
+            value={rectWidth}
+            onChange={(e) => handleRectChange("width", e.target.value)}
           />
         </label>
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           高さ (mm)
           <input
             type="number"
-            value={params.height}
-            onChange={(e) => handleParamChange("height", e.target.value)}
+            value={rectHeight}
+            onChange={(e) => handleRectChange("height", e.target.value)}
           />
         </label>
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           押し出し距離 (mm)
           <input
             type="number"
-            value={params.distance}
-            onChange={(e) => handleParamChange("distance", e.target.value)}
+            value={extrude.distance}
+            onChange={(e) => handleDistanceChange(e.target.value)}
           />
         </label>
 

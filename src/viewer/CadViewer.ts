@@ -121,9 +121,9 @@ export class CadViewer {
     }
 
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(data.vertices, 3));
+    geometry.setAttribute("position", new THREE.BufferAttribute(data.positions, 3));
     geometry.setAttribute("normal", new THREE.BufferAttribute(data.normals, 3));
-    geometry.setIndex(new THREE.BufferAttribute(data.triangles, 1));
+    geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
 
     // faceGroupsをBufferGeometryのgroupとして登録する(ハイライトは行わないが
     // materialIndexを差し替えられるように単一マテリアルを複製しておく)。

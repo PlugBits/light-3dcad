@@ -1,13 +1,15 @@
 /// <reference lib="webworker" />
 
-// Replicad(opencascade.js WASM)のimportはこのファイル内に限定する。
+// Replicad(opencascade.js WASM)のimportはこのファイル内(および evaluator.ts)に限定する。
 // UI側バンドルにOpenCascadeを含めないため。
 import initOpenCascadeUntyped from "replicad-opencascadejs/src/replicad_single.js";
 import wasmUrl from "replicad-opencascadejs/src/replicad_single.wasm?url";
-import { setOC, drawRectangle, type AnyShape } from "replicad";
+import { setOC, type Shape3D } from "replicad";
 import type { OpenCascadeInstance } from "replicad-opencascadejs/src/replicad_single.js";
 
-import type { BoxParams, MeshData, UiRequest, WorkerResponse } from "../protocol/messages";
+import type { CadDocument, FeatureId } from "../model/types";
+import type { FaceGroup, FaceInfo, MeshData, MeshQuality, UiRequest, WorkerResponse } from "../protocol/messages";
+import { evaluateDocument } from "./evaluator";
 
 // replicad-opencascadejsのd.tsは引数なしの署名しか宣言していないが、実装(emscripten生成の
 // モジュールファクトリ)は `{ locateFile }` などのModuleオーバーライドを受け取れる。
@@ -16,6 +18,8 @@ import type { BoxParams, MeshData, UiRequest, WorkerResponse } from "../protocol
 const initOpenCascade = initOpenCascadeUntyped as unknown as (moduleOverrides: {
   locateFile: (path: string) => string;
 }) => Promise<OpenCascadeInstance>;
+
+const DEFAULT_QUALITY: MeshQuality = { tolerance: 0.1, angularTolerance: 30 };
 
 let ocReady: Promise<void> | null = null;
 
@@ -28,24 +32,97 @@ function ensureOC(): Promise<void> {
   return ocReady;
 }
 
-function buildBox(params: BoxParams): AnyShape {
-  const { width, height, distance } = params;
-  return drawRectangle(width, height).sketchOnPlane("XY").extrude(distance);
-}
+/** shape.mesh() の結果をTransferable用のTypedArrayに変換する。 */
+function toMeshData(shape: Shape3D, quality: MeshQuality): MeshData {
+  const shapeMesh = shape.mesh({ tolerance: quality.tolerance, angularTolerance: quality.angularTolerance });
+  const edgeMesh = shape.meshEdges({ tolerance: quality.tolerance, angularTolerance: quality.angularTolerance });
 
-function toMeshData(shape: AnyShape): MeshData {
-  const shapeMesh = shape.mesh({ tolerance: 0.1, angularTolerance: 30 });
+  const faceGroups: FaceGroup[] = shapeMesh.faceGroups.map((g) => ({
+    start: g.start,
+    count: g.count,
+    faceId: g.faceId,
+  }));
 
   return {
-    vertices: Float32Array.from(shapeMesh.vertices),
+    positions: Float32Array.from(shapeMesh.vertices),
     normals: Float32Array.from(shapeMesh.normals),
-    triangles: Uint32Array.from(shapeMesh.triangles),
-    faceGroups: shapeMesh.faceGroups,
+    indices: Uint32Array.from(shapeMesh.triangles),
+    faceGroups,
+    edges: Float32Array.from(edgeMesh.lines),
   };
+}
+
+/**
+ * shapeの各面(B-Rep face)について中心・法線・平面判定を集めた配列を作る。
+ * faceId は face.hashCode(= mesh()のfaceGroups.faceIdと同じ値)。
+ * 使用したreplicad API: Shape.faces / Face.center / Face.normalAt() / Face.geomType。
+ */
+function computeFaceInfo(shape: Shape3D): FaceInfo[] {
+  const infos: FaceInfo[] = [];
+  for (const face of shape.faces) {
+    const center = face.center;
+    const normal = face.normalAt();
+    infos.push({
+      faceId: face.hashCode,
+      center: center.toTuple(),
+      normal: normal.toTuple(),
+      isPlanar: face.geomType === "PLANE",
+    });
+    center.delete();
+    normal.delete();
+    face.delete();
+  }
+  return infos;
 }
 
 function postResponse(response: WorkerResponse, transfer: Transferable[] = []) {
   (self as unknown as DedicatedWorkerGlobalScope).postMessage(response, transfer);
+}
+
+function evaluateAndRespond(requestId: string, doc: CadDocument, quality: MeshQuality) {
+  const result = evaluateDocument(doc);
+  if (!result.ok) {
+    postResponse({
+      kind: "error",
+      requestId,
+      featureId: result.featureId as FeatureId | undefined,
+      message: result.message,
+    });
+    return;
+  }
+
+  const { shape } = result;
+  try {
+    const mesh = toMeshData(shape, quality);
+    const faceInfo = computeFaceInfo(shape);
+    postResponse(
+      { kind: "evaluated", requestId, mesh, faceInfo },
+      [mesh.positions.buffer, mesh.normals.buffer, mesh.indices.buffer, mesh.edges.buffer],
+    );
+  } finally {
+    shape.delete();
+  }
+}
+
+function exportStlAndRespond(requestId: string, doc: CadDocument, quality: MeshQuality) {
+  const result = evaluateDocument(doc);
+  if (!result.ok) {
+    postResponse({
+      kind: "error",
+      requestId,
+      featureId: result.featureId as FeatureId | undefined,
+      message: result.message,
+    });
+    return;
+  }
+
+  const { shape } = result;
+  try {
+    const blob = shape.blobSTL({ tolerance: quality.tolerance, angularTolerance: quality.angularTolerance });
+    postResponse({ kind: "stl", requestId, blob });
+  } finally {
+    shape.delete();
+  }
 }
 
 self.addEventListener("message", (event: MessageEvent<UiRequest>) => {
@@ -59,23 +136,14 @@ self.addEventListener("message", (event: MessageEvent<UiRequest>) => {
           postResponse({ kind: "ready", requestId: request.requestId });
           break;
         }
-        case "generateBox": {
+        case "evaluate": {
           await ensureOC();
-          const shape = buildBox(request.params);
-          const mesh = toMeshData(shape);
-          shape.delete();
-          postResponse(
-            { kind: "boxGenerated", requestId: request.requestId, mesh },
-            [mesh.vertices.buffer, mesh.normals.buffer, mesh.triangles.buffer],
-          );
+          evaluateAndRespond(request.requestId, request.doc, request.quality ?? DEFAULT_QUALITY);
           break;
         }
         case "exportStl": {
           await ensureOC();
-          const shape = buildBox(request.params);
-          const blob = shape.blobSTL({ tolerance: 0.1, angularTolerance: 30 });
-          shape.delete();
-          postResponse({ kind: "stlReady", requestId: request.requestId, blob });
+          exportStlAndRespond(request.requestId, request.doc, request.quality ?? DEFAULT_QUALITY);
           break;
         }
       }
