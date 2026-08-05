@@ -25,3 +25,12 @@ export function createCircleEntity(params: { center?: [number, number]; radius: 
     radius: params.radius,
   };
 }
+
+/** ID付きの多角形エンティティを作成する。points は順序付き頂点列(閉ループ、3点以上)。 */
+export function createPolygonEntity(params: { points: [number, number][] }): SketchEntity {
+  return {
+    kind: "polygon",
+    id: generateId("entity"),
+    points: params.points,
+  };
+}

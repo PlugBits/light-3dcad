@@ -11,7 +11,7 @@
 //   - entities: rectangle / circle
 //   - extrude: operation "newBody"(最初の1回のみ) / "cut"(既存ボディが必要) / "add"(既存ボディが必要。fuseで結合)
 //   - direction: -1 は逆向き押し出し(面参照の場合は面法線の逆方向)
-import { Plane, drawCircle, drawRectangle, type Drawing, type Face, type Shape3D } from "replicad";
+import { Plane, draw, drawCircle, drawRectangle, type Drawing, type Face, type Shape3D } from "replicad";
 
 import type { CadDocument, FeatureId, SketchEntity, SketchFeature } from "../model/types";
 import type { SketchPlaneInfo } from "../protocol/messages";
@@ -79,7 +79,20 @@ const WORLD_XY_PLANE: PlaneBasis = {
   normal: [0, 0, 1],
 };
 
-/** sketch内のentities(rectangle/circle)を1つのDrawingに合成する。 */
+/**
+ * polygonエンティティの頂点列(3点以上、閉ループ)からDrawingを構築する。
+ * draw(始点).lineTo(...).close() で閉じたプロファイルを作る(replicadのDrawingPen API)。
+ * 自己交差の厳密チェックはしない(評価時にOCCTがエラーを出せば既存のfeatureIdエラー経路に乗る)。
+ */
+function polygonDrawing(points: [number, number][]): Drawing {
+  let pen = draw(points[0]);
+  for (let i = 1; i < points.length; i += 1) {
+    pen = pen.lineTo(points[i]);
+  }
+  return pen.close();
+}
+
+/** sketch内のentities(rectangle/circle/polygon)を1つのDrawingに合成する。 */
 function buildDrawing(entities: SketchEntity[]): Drawing {
   if (entities.length === 0) {
     throw new Error("スケッチに図形がありません");
@@ -87,11 +100,16 @@ function buildDrawing(entities: SketchEntity[]): Drawing {
 
   let drawing: Drawing | null = null;
   for (const entity of entities) {
-    const [cx, cy] = entity.center;
-    const piece: Drawing =
-      entity.kind === "rectangle"
-        ? drawRectangle(entity.width, entity.height).translate(cx, cy)
-        : drawCircle(entity.radius).translate(cx, cy);
+    let piece: Drawing;
+    if (entity.kind === "rectangle") {
+      const [cx, cy] = entity.center;
+      piece = drawRectangle(entity.width, entity.height).translate(cx, cy);
+    } else if (entity.kind === "circle") {
+      const [cx, cy] = entity.center;
+      piece = drawCircle(entity.radius).translate(cx, cy);
+    } else {
+      piece = polygonDrawing(entity.points);
+    }
     drawing = drawing ? drawing.fuse(piece) : piece;
   }
   // entities.length > 0 が保証されているため drawing は必ず非null。

@@ -22,7 +22,13 @@ export type PlaneRef =
 /** スケッチ内の2D図形。座標はスケッチ平面上のローカル座標(mm)。 */
 export type SketchEntity =
   | { kind: "rectangle"; id: string; center: [number, number]; width: number; height: number }
-  | { kind: "circle"; id: string; center: [number, number]; radius: number };
+  | { kind: "circle"; id: string; center: [number, number]; radius: number }
+  | {
+      kind: "polygon";
+      id: string;
+      /** 閉多角形の頂点列(順序付き)。最後の点と最初の点は自動的に結ばれる。3点以上必要。 */
+      points: [number, number][];
+    };
 
 /** 2Dスケッチフィーチャー。 */
 export interface SketchFeature {

@@ -6,6 +6,7 @@ import {
   addSketchFeature,
   createEmptyDocument,
   createCircleEntity,
+  createPolygonEntity,
   createRectangleEntity,
   findFeature,
   getDependentFeatureIds,
@@ -288,6 +289,72 @@ describe("validateFeature / validateDocument", () => {
       [],
     );
     expect(errors.some((e) => e.message.includes("半径"))).toBe(true);
+  });
+
+  it("多角形の頂点数が3未満だとエラー", () => {
+    const polygon = createPolygonEntity({
+      points: [
+        [0, 0],
+        [10, 0],
+      ],
+    });
+    const errors = validateFeature(
+      {
+        type: "sketch",
+        id: "s1",
+        name: "S",
+        plane: { kind: "world", plane: "XY" },
+        entities: [polygon],
+      },
+      [],
+    );
+    expect(errors.some((e) => e.message.includes("3点以上"))).toBe(true);
+  });
+
+  it("多角形に隣接する重複頂点があるとエラー", () => {
+    const polygon = createPolygonEntity({
+      points: [
+        [0, 0],
+        [10, 0],
+        [10, 0.0000001],
+        [0, 10],
+      ],
+    });
+    const errors = validateFeature(
+      {
+        type: "sketch",
+        id: "s1",
+        name: "S",
+        plane: { kind: "world", plane: "XY" },
+        entities: [polygon],
+      },
+      [],
+    );
+    expect(errors.some((e) => e.message.includes("重複"))).toBe(true);
+  });
+
+  it("正しい多角形(3点以上・重複頂点なし)はエラーなし", () => {
+    const polygon = createPolygonEntity({
+      points: [
+        [0, 0],
+        [40, 0],
+        [40, 20],
+        [20, 20],
+        [20, 40],
+        [0, 40],
+      ],
+    });
+    const errors = validateFeature(
+      {
+        type: "sketch",
+        id: "s1",
+        name: "S",
+        plane: { kind: "world", plane: "XY" },
+        entities: [polygon],
+      },
+      [],
+    );
+    expect(errors).toEqual([]);
   });
 
   it("押し出し距離が0以下だとエラー", () => {

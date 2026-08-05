@@ -6,7 +6,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import initOpenCascadeUntyped from "replicad-opencascadejs/src/replicad_single.js";
-import { setOC, type Shape3D } from "replicad";
+import { measureVolume, setOC, type Shape3D } from "replicad";
 import type { OpenCascadeInstance } from "replicad-opencascadejs/src/replicad_single.js";
 
 import {
@@ -14,6 +14,7 @@ import {
   addSketchFeature,
   createCircleEntity,
   createEmptyDocument,
+  createPolygonEntity,
   createRectangleEntity,
   patchExtrudeFeature,
 } from "../../src/model";
@@ -341,6 +342,89 @@ describe("evaluateDocument (WASM統合)", () => {
     const result = evaluateDocument(doc);
     expect(result.ok).toBe(false);
   });
+
+  it("L字型polygonを押し出すとバウンディングボックス40x40x20で、矩形40x40x20より体積が小さい", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    // L字: (0,0)(40,0)(40,20)(20,20)(20,40)(0,40) の6頂点。
+    const lShape = createPolygonEntity({
+      points: [
+        [0, 0],
+        [40, 0],
+        [40, 20],
+        [20, 20],
+        [20, 40],
+        [0, 40],
+      ],
+    });
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [lShape],
+    });
+    const { doc } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const bbox = result.shape.boundingBox;
+    expect(bbox.width).toBeCloseTo(40, 6);
+    expect(bbox.height).toBeCloseTo(40, 6);
+    expect(bbox.depth).toBeCloseTo(20, 6);
+    bbox.delete();
+
+    // L字の断面積は 40*40 - 20*20 = 1200mm^2 なので体積は 1200*20 = 24000mm^3。
+    // 矩形40x40x20の体積(32000mm^3)より小さいことを面積指標(体積)で確認する。
+    const volume = measureVolume(result.shape);
+    expect(volume).toBeLessThan(40 * 40 * 20);
+    expect(volume).toBeCloseTo(1200 * 20, 0);
+
+    result.shape.delete();
+  });
+
+  it("重複頂点を含むpolygonの押し出しはOCCTエラーとしてfeatureId付きで返る", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    // モデル層バリデーションをすり抜けた不正な入力(隣接重複頂点)を直接evaluatorに渡すケース。
+    // OCCT側のエラーが既存のfeatureIdエラー経路に乗ることを確認する。
+    const empty = createEmptyDocument();
+    const degenerate = createPolygonEntity({
+      points: [
+        [0, 0],
+        [0, 0],
+        [10, 0],
+        [10, 10],
+      ],
+    });
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [degenerate],
+    });
+    const { doc } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    // 重複点があってもOCCT側で吸収されて成功する場合と、エラーになる場合がありうる。
+    // どちらであってもfeatureId付きの整合したレスポンス形状であることのみ検証する
+    // (evaluator自体がクラッシュしないこと、エラー時はfeatureIdが特定できることが目的)。
+    if (!result.ok) {
+      expect(result.featureId).toBe(doc.features[1].id);
+    } else {
+      result.shape.delete();
+    }
+  });
 });
 
 describe("evaluateDocument (WASM統合): スケッチ・オン・フェイス", () => {
@@ -564,6 +648,61 @@ describe("evaluateDocument (WASM統合): スケッチ・オン・フェイス", 
     // 面解決に失敗した場合はエラー応答(ok:false)のみが返り、sketchPlanesは含まれない
     // (EvaluationFailureにはsketchPlanesフィールド自体が存在しない)。
     expect("sketchPlanes" in result).toBe(false);
+  });
+
+  it("箱の上面へのfaceスケッチに小さい三角形polygonを置いてCutすると成功する", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const rect = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: doc1, feature: boxSketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+    });
+    const { doc: doc2, feature: boxExtrude } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: boxSketch.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const boxResult = evaluateDocument(doc2);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const boxFaceCount = countFaces(boxResult.shape);
+    const top = findTopFace(boxResult.shape);
+    boxResult.shape.delete();
+
+    // 上面中心付近に収まる小さい三角形。
+    const triangle = createPolygonEntity({
+      points: [
+        [-5, -5],
+        [5, -5],
+        [0, 5],
+      ],
+    });
+    const { doc: doc3, feature: faceSketch } = addSketchFeature(doc2, {
+      name: "FaceSketch1",
+      plane: { kind: "face", featureId: boxExtrude.id, faceId: top.faceId, center: top.center, normal: top.normal },
+      entities: [triangle],
+    });
+    // 上面の法線は+Z(外向き)なので、内側に掘るcutはdirection:-1にする。
+    const { doc: cutDoc } = addExtrudeFeature(doc3, {
+      name: "Cut1",
+      sketchId: faceSketch.id,
+      distance: 5,
+      direction: -1,
+      operation: "cut",
+    });
+
+    const result = evaluateDocument(cutDoc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const faceCount = countFaces(result.shape);
+    expect(faceCount).toBeGreaterThan(boxFaceCount);
+
+    result.shape.delete();
   });
 
   it("押し出しに使われていないスケッチもsketchPlanesに含まれる", (ctx) => {

@@ -10,6 +10,9 @@ function isPositiveFiniteNumber(value: number): boolean {
   return Number.isFinite(value) && value > 0;
 }
 
+/** 隣接する頂点間の距離がこの値以下なら重複とみなす(mm)。 */
+const POLYGON_MIN_VERTEX_DISTANCE = 1e-6;
+
 function validateEntity(entity: SketchEntity, featureId: FeatureId): ValidationError[] {
   const errors: ValidationError[] = [];
   switch (entity.kind) {
@@ -20,17 +23,41 @@ function validateEntity(entity: SketchEntity, featureId: FeatureId): ValidationE
       if (!isPositiveFiniteNumber(entity.height)) {
         errors.push({ featureId, message: `矩形(${entity.id})の高さは正の数である必要があります` });
       }
+      if (!entity.center.every((c) => Number.isFinite(c))) {
+        errors.push({ featureId, message: `図形(${entity.id})の中心座標が不正です` });
+      }
       break;
     }
     case "circle": {
       if (!isPositiveFiniteNumber(entity.radius)) {
         errors.push({ featureId, message: `円(${entity.id})の半径は正の数である必要があります` });
       }
+      if (!entity.center.every((c) => Number.isFinite(c))) {
+        errors.push({ featureId, message: `図形(${entity.id})の中心座標が不正です` });
+      }
       break;
     }
-  }
-  if (!entity.center.every((c) => Number.isFinite(c))) {
-    errors.push({ featureId, message: `図形(${entity.id})の中心座標が不正です` });
+    case "polygon": {
+      if (entity.points.length < 3) {
+        errors.push({ featureId, message: `多角形(${entity.id})は3点以上の頂点が必要です` });
+        break;
+      }
+      if (!entity.points.every(([x, y]) => Number.isFinite(x) && Number.isFinite(y))) {
+        errors.push({ featureId, message: `多角形(${entity.id})の頂点座標が不正です` });
+        break;
+      }
+      for (let i = 0; i < entity.points.length; i += 1) {
+        const [ax, ay] = entity.points[i];
+        const [bx, by] = entity.points[(i + 1) % entity.points.length];
+        const dx = ax - bx;
+        const dy = ay - by;
+        if (Math.sqrt(dx * dx + dy * dy) <= POLYGON_MIN_VERTEX_DISTANCE) {
+          errors.push({ featureId, message: `多角形(${entity.id})に隣接する重複頂点があります` });
+          break;
+        }
+      }
+      break;
+    }
   }
   return errors;
 }
