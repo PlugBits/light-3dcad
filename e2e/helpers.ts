@@ -69,6 +69,23 @@ export function collectPageErrors(page: Page): Error[] {
 }
 
 /**
+ * 指定ワールド座標(スケッチ平面上の点等)を、現在のカメラでのページ内クリック座標に変換する。
+ * `window.__cadViewerDebug.projectPoint`(開発ビルド限定)が返すcanvas内ピクセル座標に
+ * canvasの画面上オフセットを足し合わせる。線描画モードのE2Eから使う。
+ */
+export async function screenPointForWorld(
+  page: Page,
+  world: [number, number, number],
+): Promise<{ x: number; y: number }> {
+  const canvas = page.locator('[data-testid="viewer-container"] canvas');
+  const box = await canvas.boundingBox();
+  if (!box) throw new Error("viewer canvas が見つかりません");
+  const projected = await page.evaluate((w) => window.__cadViewerDebug?.projectPoint(w) ?? null, world);
+  if (!projected) throw new Error("projectPoint()がnullを返しました(カメラ範囲外の可能性)");
+  return { x: box.x + projected.x, y: box.y + projected.y };
+}
+
+/**
  * 「初期ボックスの上面を選択 → 選択面にスケッチ → 円(r=10)追加 →
  *  押し出し追加(Cut・深さ10・方向反転)」までを行い、評価成功(ready)まで待つ。
  * 要求8ステップのうち4〜7に相当する共通フロー。呼び出し前に waitForReady 済みであること。
