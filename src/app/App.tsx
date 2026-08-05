@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ExtrudeEditor } from "../components/ExtrudeEditor";
 import { FeatureTree } from "../components/FeatureTree";
 import { SketchEditor } from "../components/SketchEditor";
 import { downloadStl } from "../export/downloadStl";
-import { findFeature, getDependentFeatureIds } from "../model/document";
+import { addSketchEntity, findFeature, getDependentFeatureIds } from "../model/document";
+import { createPolygonEntity } from "../model/entity";
 import { useCadStore } from "../state/store";
 import { CadViewer, type SketchOverlayEntry } from "../viewer/CadViewer";
 
@@ -33,6 +34,14 @@ export default function App() {
   const removeFeature = useCadStore((s) => s.removeFeature);
   const exportStl = useCadStore((s) => s.exportStl);
   const setShowSketches = useCadStore((s) => s.setShowSketches);
+  const updateDocument = useCadStore((s) => s.updateDocument);
+
+  // 線描画モード中かどうか(UI側の表示状態。実体はCadViewerが持つ)。
+  const [drawingMode, setDrawingMode] = useState(false);
+  // 描画モード開始時点で対象だったスケッチID。選択が他に移ったら自動キャンセルするために使う。
+  const [drawingSketchId, setDrawingSketchId] = useState<string | null>(null);
+  // 1mmグリッドスナップ(デフォルトON)。
+  const [gridSnap, setGridSnap] = useState(true);
 
   // Workerを起動し、初期ドキュメントの評価を1回だけ要求する。
   useEffect(() => {
@@ -96,6 +105,15 @@ export default function App() {
     }
   }, [faceInfo, selectedFace, selectFace]);
 
+  // 描画モード中にフィーチャーツリーの選択が別のフィーチャーに移った場合は、描画モードを
+  // 自動的にキャンセルする(ビューア側のcancelPolygonDrawing()がonCancelを呼び、
+  // drawingModeのReact stateもそこで false に戻る)。
+  useEffect(() => {
+    if (drawingMode && selectedFeatureId !== drawingSketchId) {
+      viewerRef.current?.cancelPolygonDrawing();
+    }
+  }, [drawingMode, selectedFeatureId, drawingSketchId]);
+
   const sketches = doc.features.filter((f) => f.type === "sketch");
   const selectedFeature = selectedFeatureId ? findFeature(doc, selectedFeatureId) : undefined;
   // 選択中フィーチャーがスケッチで、かつWorkerが平面基底を解決済みの場合のみ取得できる。
@@ -147,6 +165,34 @@ export default function App() {
     viewerRef.current?.lookAtPlane(selectedSketchPlane);
   }
 
+  function handleStartDrawing() {
+    if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
+    const sketchId = selectedFeature.id;
+    viewerRef.current.startPolygonDrawing(selectedSketchPlane, gridSnap, {
+      onComplete: (points) => {
+        const entity = createPolygonEntity({ points });
+        updateDocument((d) => addSketchEntity(d, sketchId, entity));
+        setDrawingMode(false);
+        setDrawingSketchId(null);
+      },
+      onCancel: () => {
+        setDrawingMode(false);
+        setDrawingSketchId(null);
+      },
+    });
+    setDrawingSketchId(sketchId);
+    setDrawingMode(true);
+  }
+
+  function handleCancelDrawing() {
+    viewerRef.current?.cancelPolygonDrawing();
+  }
+
+  function handleGridSnapChange(checked: boolean) {
+    setGridSnap(checked);
+    viewerRef.current?.setPolygonDrawingSnap(checked);
+  }
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", fontFamily: "sans-serif" }}>
       <header
@@ -190,6 +236,24 @@ export default function App() {
         >
           平面に正対
         </button>
+        <button
+          type="button"
+          data-testid="btn-draw-polygon"
+          onClick={drawingMode ? handleCancelDrawing : handleStartDrawing}
+          disabled={!drawingMode && !selectedSketchPlane}
+          title="クリックで頂点を追加して閉じた多角形を描きます(始点付近クリックまたはEnterで確定、Escでキャンセル)"
+        >
+          {drawingMode ? "線描画キャンセル(Esc)" : "線描画"}
+        </button>
+        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+          <input
+            type="checkbox"
+            data-testid="toggle-grid-snap"
+            checked={gridSnap}
+            onChange={(e) => handleGridSnapChange(e.target.checked)}
+          />
+          1mmスナップ
+        </label>
         <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
           <input
             type="checkbox"

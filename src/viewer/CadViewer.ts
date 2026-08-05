@@ -27,6 +27,10 @@ const GRID_OPACITY = 0.45;
  * 埋まっていても選択時は視認できるようにするため)。
  */
 const SELECTED_SKETCH_RENDER_ORDER = 999;
+/** 描画モードのプレビュー線(確定済みセグメント+ラバーバンド)の色。選択中スケッチと同系色。 */
+const DRAWING_PREVIEW_COLOR = 0xff9800;
+/** 描画モードで「始点に戻ったとみなす」スクリーン距離(px)。 */
+const CLOSE_TO_START_PX = 10;
 
 type Tuple3 = [number, number, number];
 
@@ -40,13 +44,52 @@ export interface SketchOverlayEntry {
   normal: Tuple3;
 }
 
+/**
+ * ワールド座標系での平面基底(origin/xDir/yDir/normal)。Workerが返すsketchPlanesの正本を
+ * そのまま渡すことを想定する(UI側で独自に再計算しない)。lookAtPlane()/線描画モードで使う。
+ */
+export interface PlaneBasis {
+  origin: Tuple3;
+  xDir: Tuple3;
+  yDir: Tuple3;
+  normal: Tuple3;
+}
+
+/** 線描画モードの完了/キャンセル時に呼ばれるコールバック。 */
+export interface PolygonDrawingCallbacks {
+  /** 3点以上の頂点列で閉じて確定したときに呼ばれる(ローカル2D座標、スナップ適用済み)。 */
+  onComplete: (points: [number, number][]) => void;
+  /** Escapeキーまたはcancel呼び出しで中断したときに呼ばれる(頂点0でも呼ばれうる)。 */
+  onCancel: () => void;
+}
+
 declare global {
   interface Window {
     __cadViewerDebug?: {
       sketchLineCount: () => number;
       gridVisible: () => boolean;
+      /** 現在のカメラでワールド座標をcanvas内ピクセル座標に投影する(開発ビルド限定、E2E用)。 */
+      projectPoint: (world: Tuple3) => { x: number; y: number } | null;
     };
   }
+}
+
+/** 平面基底(正規直交)上のローカル2D座標をワールド座標に変換する(オフセットなし)。 */
+function planeLocalToWorld(basis: PlaneBasis, u: number, v: number): Tuple3 {
+  const { origin, xDir, yDir } = basis;
+  return [
+    origin[0] + u * xDir[0] + v * yDir[0],
+    origin[1] + u * xDir[1] + v * yDir[1],
+    origin[2] + u * xDir[2] + v * yDir[2],
+  ];
+}
+
+/** ワールド座標を平面基底(正規直交)上のローカル2D座標に変換する(内積による逆変換)。 */
+function planeWorldToLocal(basis: PlaneBasis, world: Tuple3): [number, number] {
+  const rel: Tuple3 = [world[0] - basis.origin[0], world[1] - basis.origin[1], world[2] - basis.origin[2]];
+  const u = rel[0] * basis.xDir[0] + rel[1] * basis.xDir[1] + rel[2] * basis.xDir[2];
+  const v = rel[0] * basis.yDir[0] + rel[1] * basis.yDir[1] + rel[2] * basis.yDir[2];
+  return [u, v];
 }
 
 /** スケッチのローカル2D座標を平面基底でワールド座標に変換する(法線方向に微小オフセット済み)。 */
@@ -148,6 +191,18 @@ export class CadViewer {
   /** 直近のsetSketchOverlay()でグリッドが描画されたかどうか。E2Eデバッグフックが参照する。 */
   private sketchGridBuilt = false;
 
+  /** 線描画モード中かどうか。trueの間はクリックを面選択でなく頂点追加として扱う。 */
+  private drawingActive = false;
+  private drawingBasis: PlaneBasis | null = null;
+  private drawingSnap = true;
+  /** 確定済み頂点列(ローカル2D座標、スナップ適用済み)。 */
+  private drawingPoints: [number, number][] = [];
+  private drawingCallbacks: PolygonDrawingCallbacks | null = null;
+  /** プレビュー線(確定済みセグメント+ラバーバンド)を乗せるグループ。showSketchesトグルとは独立して常に表示する。 */
+  private drawingGroup: THREE.Group;
+  private drawingPreviewGeometries: THREE.BufferGeometry[] = [];
+  private drawingPreviewMaterials: THREE.Material[] = [];
+
   constructor(container: HTMLElement, onFaceSelect?: (face: FaceInfo | null) => void) {
     this.container = container;
     this.onFaceSelect = onFaceSelect;
@@ -186,7 +241,11 @@ export class CadViewer {
     this.sketchOverlayGroup = new THREE.Group();
     this.scene.add(this.sketchOverlayGroup);
 
+    this.drawingGroup = new THREE.Group();
+    this.scene.add(this.drawingGroup);
+
     this.renderer.domElement.addEventListener("click", this.handleClick);
+    this.renderer.domElement.addEventListener("mousemove", this.handleDrawingMouseMove);
     window.addEventListener("keydown", this.handleKeyDown);
 
     this.resizeObserver = new ResizeObserver(() => this.handleResize());
@@ -194,11 +253,12 @@ export class CadViewer {
 
     this.animate();
 
-    // E2Eテストからスケッチオーバーレイの描画結果を検証するためのフック(開発ビルドのみ)。
+    // E2Eテストからスケッチオーバーレイ・描画モードの結果を検証するためのフック(開発ビルドのみ)。
     if (import.meta.env.DEV) {
       window.__cadViewerDebug = {
         sketchLineCount: () => this.sketchLineCount,
         gridVisible: () => this.sketchGridBuilt && this.sketchOverlayGroup.visible,
+        projectPoint: (world) => this.projectPoint(world),
       };
     }
   }
@@ -218,12 +278,24 @@ export class CadViewer {
   }
 
   private handleKeyDown = (event: KeyboardEvent) => {
+    if (this.drawingActive) {
+      if (event.key === "Escape") {
+        this.cancelPolygonDrawing();
+      } else if (event.key === "Enter") {
+        this.finishPolygonDrawing();
+      }
+      return;
+    }
     if (event.key === "Escape") {
       this.clearSelection();
     }
   };
 
   private handleClick = (event: MouseEvent) => {
+    if (this.drawingActive) {
+      this.handlePolygonClick(event);
+      return;
+    }
     if (!this.mesh) return;
 
     const rect = this.renderer.domElement.getBoundingClientRect();
@@ -403,7 +475,7 @@ export class CadViewer {
    * 常に法線と直交することが保証された基底ベクトルを使うことでジンバルロックを避ける)。
    * OrbitControls の target/カメラ位置の設定のみで実現する小規模な変更。
    */
-  lookAtPlane(basis: { origin: Tuple3; yDir: Tuple3; normal: Tuple3 }) {
+  lookAtPlane(basis: PlaneBasis) {
     const origin = new THREE.Vector3(...basis.origin);
     const normal = new THREE.Vector3(...basis.normal).normalize();
     const distance = Math.max(this.meshHalfExtent * 3, 100);
@@ -415,10 +487,199 @@ export class CadViewer {
     this.controls.update();
   }
 
+  /**
+   * 指定平面上での線描画モードを開始する。以後のクリックは面選択でなく頂点追加として扱われ、
+   * カーソルはcrosshairになる。基底(basis)はWorkerが返したsketchPlanesの値をそのまま渡すこと
+   * (UI側で独自に再計算しない)。
+   */
+  startPolygonDrawing(basis: PlaneBasis, snap: boolean, callbacks: PolygonDrawingCallbacks) {
+    this.cancelPolygonDrawing();
+    this.clearSelection();
+    this.drawingActive = true;
+    this.drawingBasis = basis;
+    this.drawingSnap = snap;
+    this.drawingPoints = [];
+    this.drawingCallbacks = callbacks;
+    this.renderer.domElement.style.cursor = "crosshair";
+  }
+
+  /** 描画モード中のグリッドスナップ有効/無効をリアルタイムに切り替える。 */
+  setPolygonDrawingSnap(enabled: boolean) {
+    this.drawingSnap = enabled;
+  }
+
+  isPolygonDrawingActive(): boolean {
+    return this.drawingActive;
+  }
+
+  /** 描画中の頂点列を破棄してモードを終了する(onCancelが呼ばれる)。非アクティブなら何もしない。 */
+  cancelPolygonDrawing() {
+    if (!this.drawingActive) return;
+    const callbacks = this.drawingCallbacks;
+    this.exitDrawingState();
+    callbacks?.onCancel();
+  }
+
+  /** 頂点3点以上であれば閉じて確定する(onCompleteが呼ばれる)。非アクティブ・頂点不足時は何もしない。 */
+  private finishPolygonDrawing() {
+    if (!this.drawingActive || this.drawingPoints.length < 3) return;
+    const points = [...this.drawingPoints];
+    const callbacks = this.drawingCallbacks;
+    this.exitDrawingState();
+    callbacks?.onComplete(points);
+  }
+
+  /** 描画モードの内部状態・プレビュー・カーソルをリセットする(コールバックは呼ばない)。 */
+  private exitDrawingState() {
+    this.drawingActive = false;
+    this.drawingBasis = null;
+    this.drawingPoints = [];
+    this.drawingCallbacks = null;
+    this.renderer.domElement.style.cursor = "";
+    this.clearDrawingPreview();
+  }
+
+  /** 描画モード中のクリックをレイキャストしてスケッチ平面上のローカル2D座標に変換し、頂点を追加する。 */
+  private handlePolygonClick(event: MouseEvent) {
+    if (!this.drawingBasis) return;
+    const basis = this.drawingBasis;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+
+    // 始点付近(スクリーン距離10px程度以内)のクリックは閉じて確定する扱いにする。
+    if (this.drawingPoints.length >= 3) {
+      const startWorld = planeLocalToWorld(basis, this.drawingPoints[0][0], this.drawingPoints[0][1]);
+      const startScreen = this.projectPoint(startWorld);
+      if (startScreen) {
+        const dx = startScreen.x - px;
+        const dy = startScreen.y - py;
+        if (Math.sqrt(dx * dx + dy * dy) <= CLOSE_TO_START_PX) {
+          this.finishPolygonDrawing();
+          return;
+        }
+      }
+    }
+
+    const hit = this.raycastDrawingPlane(basis, px, py, rect);
+    if (!hit) return;
+
+    let [u, v] = planeWorldToLocal(basis, hit);
+    if (this.drawingSnap) {
+      u = Math.round(u);
+      v = Math.round(v);
+    }
+    this.drawingPoints.push([u, v]);
+    this.updateDrawingPreview();
+  }
+
+  /** マウス移動時、描画モード中であればラバーバンド(確定済み最終点→カーソル位置)を更新する。 */
+  private handleDrawingMouseMove = (event: MouseEvent) => {
+    if (!this.drawingActive || !this.drawingBasis) return;
+    const basis = this.drawingBasis;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+
+    const hit = this.raycastDrawingPlane(basis, px, py, rect);
+    if (!hit) {
+      this.updateDrawingPreview();
+      return;
+    }
+    let [u, v] = planeWorldToLocal(basis, hit);
+    if (this.drawingSnap) {
+      u = Math.round(u);
+      v = Math.round(v);
+    }
+    this.updateDrawingPreview([u, v]);
+  };
+
+  /** canvas内ピクセル座標(px, py)から描画平面(basis)へのレイキャスト交点(ワールド座標)を返す。 */
+  private raycastDrawingPlane(basis: PlaneBasis, px: number, py: number, rect: DOMRect): Tuple3 | null {
+    const pointer = new THREE.Vector2((px / rect.width) * 2 - 1, -(py / rect.height) * 2 + 1);
+    this.raycaster.setFromCamera(pointer, this.camera);
+    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(
+      new THREE.Vector3(basis.normal[0], basis.normal[1], basis.normal[2]),
+      new THREE.Vector3(basis.origin[0], basis.origin[1], basis.origin[2]),
+    );
+    const hit = new THREE.Vector3();
+    if (!this.raycaster.ray.intersectPlane(plane, hit)) return null;
+    return [hit.x, hit.y, hit.z];
+  }
+
+  /** プレビュー(確定済みセグメント+ラバーバンド)を作り直す。hoverLocalを渡すとラバーバンドも描く。 */
+  private updateDrawingPreview(hoverLocal?: [number, number]) {
+    this.clearDrawingPreview();
+    if (!this.drawingBasis || this.drawingPoints.length === 0) return;
+    const basis = this.drawingBasis;
+
+    const worldPts = this.drawingPoints.map(([u, v]) => planeLocalToWorld(basis, u, v));
+    const positions = new Float32Array(worldPts.length * 3);
+    worldPts.forEach((p, i) => positions.set(p, i * 3));
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    const material = new THREE.LineBasicMaterial({ color: DRAWING_PREVIEW_COLOR, depthTest: false });
+    const line = new THREE.Line(geometry, material);
+    line.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
+    this.drawingGroup.add(line);
+    this.drawingPreviewGeometries.push(geometry);
+    this.drawingPreviewMaterials.push(material);
+
+    if (hoverLocal) {
+      const last = worldPts[worldPts.length - 1];
+      const hoverWorld = planeLocalToWorld(basis, hoverLocal[0], hoverLocal[1]);
+      const rubberGeometry = new THREE.BufferGeometry();
+      rubberGeometry.setAttribute(
+        "position",
+        new THREE.Float32BufferAttribute([...last, ...hoverWorld], 3),
+      );
+      const rubberMaterial = new THREE.LineDashedMaterial({
+        color: DRAWING_PREVIEW_COLOR,
+        dashSize: 2,
+        gapSize: 1,
+        depthTest: false,
+      });
+      const rubberLine = new THREE.Line(rubberGeometry, rubberMaterial);
+      rubberLine.computeLineDistances();
+      rubberLine.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
+      this.drawingGroup.add(rubberLine);
+      this.drawingPreviewGeometries.push(rubberGeometry);
+      this.drawingPreviewMaterials.push(rubberMaterial);
+    }
+  }
+
+  /** プレビュー線をsceneから取り除き、リソースを解放する。 */
+  private clearDrawingPreview() {
+    while (this.drawingGroup.children.length > 0) {
+      this.drawingGroup.remove(this.drawingGroup.children[0]);
+    }
+    this.drawingPreviewGeometries.forEach((g) => g.dispose());
+    this.drawingPreviewMaterials.forEach((m) => m.dispose());
+    this.drawingPreviewGeometries = [];
+    this.drawingPreviewMaterials = [];
+  }
+
+  /**
+   * 現在のカメラでワールド座標をcanvas内ピクセル座標(左上が原点)に投影する。
+   * E2Eの`window.__cadViewerDebug.projectPoint`と、描画モードの始点近傍判定の両方から使う。
+   */
+  projectPoint(world: Tuple3): { x: number; y: number } | null {
+    const vec = new THREE.Vector3(world[0], world[1], world[2]);
+    vec.project(this.camera);
+    if (!Number.isFinite(vec.x) || !Number.isFinite(vec.y)) return null;
+    const width = this.container.clientWidth;
+    const height = this.container.clientHeight;
+    return {
+      x: ((vec.x + 1) / 2) * width,
+      y: ((1 - vec.y) / 2) * height,
+    };
+  }
+
   dispose() {
     cancelAnimationFrame(this.animationFrameId);
     this.resizeObserver.disconnect();
     this.renderer.domElement.removeEventListener("click", this.handleClick);
+    this.renderer.domElement.removeEventListener("mousemove", this.handleDrawingMouseMove);
     window.removeEventListener("keydown", this.handleKeyDown);
     this.controls.dispose();
     if (this.mesh) {
@@ -431,6 +692,7 @@ export class CadViewer {
       }
     }
     this.clearSketchOverlay();
+    this.clearDrawingPreview();
     if (import.meta.env.DEV && window.__cadViewerDebug) {
       delete window.__cadViewerDebug;
     }

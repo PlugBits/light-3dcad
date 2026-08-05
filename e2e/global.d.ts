@@ -7,6 +7,7 @@ declare global {
     __cadViewerDebug?: {
       sketchLineCount: () => number;
       gridVisible: () => boolean;
+      projectPoint: (world: [number, number, number]) => { x: number; y: number } | null;
     };
   }
 }
