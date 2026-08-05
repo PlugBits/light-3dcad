@@ -1,11 +1,101 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
+import type { FeatureId, SketchEntity } from "../model/types";
 import type { FaceGroup, FaceInfo, MeshData } from "../protocol/messages";
 
 const BASE_COLOR = 0x5b8def;
 /** 選択面のハイライト色(通常より明るい黄系)。 */
 const HIGHLIGHT_COLOR = 0xffd54f;
+
+/** 選択中スケッチの線色(オレンジ)。 */
+const SKETCH_SELECTED_COLOR = 0xff9800;
+/** 非選択スケッチの線色(控えめなグレー、半透明)。 */
+const SKETCH_DEFAULT_COLOR = 0xaaaaaa;
+/** Z-fighting防止のため、スケッチ線を面法線方向へオフセットする距離(mm)。 */
+const SKETCH_NORMAL_OFFSET = 0.05;
+/** 円エンティティのポリライン近似の分割数。 */
+const CIRCLE_SEGMENTS = 64;
+/** 選択中スケッチのグリッド間隔(mm)。 */
+const GRID_SPACING = 10;
+/** グリッドの色・不透明度。 */
+const GRID_COLOR = 0xffcc80;
+const GRID_OPACITY = 0.45;
+
+type Tuple3 = [number, number, number];
+
+/** ビューア描画用に、平面基底(origin/xDir/yDir/normal)を紐づけた1スケッチ分のエンティティ群。 */
+export interface SketchOverlayEntry {
+  sketchId: FeatureId;
+  entities: SketchEntity[];
+  origin: Tuple3;
+  xDir: Tuple3;
+  yDir: Tuple3;
+  normal: Tuple3;
+}
+
+declare global {
+  interface Window {
+    __cadViewerDebug?: {
+      sketchLineCount: () => number;
+      gridVisible: () => boolean;
+    };
+  }
+}
+
+/** スケッチのローカル2D座標を平面基底でワールド座標に変換する(法線方向に微小オフセット済み)。 */
+function toWorldPoint(entry: SketchOverlayEntry, u: number, v: number): Tuple3 {
+  const { origin, xDir, yDir, normal } = entry;
+  return [
+    origin[0] + u * xDir[0] + v * yDir[0] + SKETCH_NORMAL_OFFSET * normal[0],
+    origin[1] + u * xDir[1] + v * yDir[1] + SKETCH_NORMAL_OFFSET * normal[1],
+    origin[2] + u * xDir[2] + v * yDir[2] + SKETCH_NORMAL_OFFSET * normal[2],
+  ];
+}
+
+/** rectangle/circleエンティティのローカル2D頂点列(閉ループ)を返す。 */
+function entityLocalPoints(entity: SketchEntity): [number, number][] {
+  if (entity.kind === "rectangle") {
+    const [cx, cy] = entity.center;
+    const hw = entity.width / 2;
+    const hh = entity.height / 2;
+    return [
+      [cx - hw, cy - hh],
+      [cx + hw, cy - hh],
+      [cx + hw, cy + hh],
+      [cx - hw, cy + hh],
+    ];
+  }
+  const [cx, cy] = entity.center;
+  const points: [number, number][] = [];
+  for (let i = 0; i < CIRCLE_SEGMENTS; i += 1) {
+    const t = (i / CIRCLE_SEGMENTS) * Math.PI * 2;
+    points.push([cx + entity.radius * Math.cos(t), cy + entity.radius * Math.sin(t)]);
+  }
+  return points;
+}
+
+/** 平面基底に沿った方眼(LineSegments)を構築する。origin中心にhalfExtentの範囲、GRID_SPACING間隔。 */
+function buildPlaneGrid(entry: SketchOverlayEntry, halfExtent: number): THREE.LineSegments {
+  const divisions = Math.max(2, Math.ceil((halfExtent * 2) / GRID_SPACING));
+  const actualHalf = (divisions * GRID_SPACING) / 2;
+  const positions: number[] = [];
+
+  for (let i = 0; i <= divisions; i += 1) {
+    const t = -actualHalf + i * GRID_SPACING;
+    const a1 = toWorldPoint(entry, t, -actualHalf);
+    const a2 = toWorldPoint(entry, t, actualHalf);
+    positions.push(...a1, ...a2);
+    const b1 = toWorldPoint(entry, -actualHalf, t);
+    const b2 = toWorldPoint(entry, actualHalf, t);
+    positions.push(...b1, ...b2);
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  const material = new THREE.LineBasicMaterial({ color: GRID_COLOR, transparent: true, opacity: GRID_OPACITY });
+  return new THREE.LineSegments(geometry, material);
+}
 
 /**
  * Three.jsシーンの命令的なラッパー。React stateにシーンを持たせず、
@@ -27,6 +117,17 @@ export class CadViewer {
   private animationFrameId = 0;
   /** 面がクリックで選択/解除されたときに呼ばれる(解除時はnull)。 */
   private onFaceSelect?: (face: FaceInfo | null) => void;
+  /** 現在のメッシュのバウンディングボックスから求めた半径目安(mm)。グリッド範囲の基準に使う。 */
+  private meshHalfExtent = 50;
+
+  /** スケッチ線・グリッドを乗せるグループ。表示/非表示はこのgroup.visibleで切り替える。 */
+  private sketchOverlayGroup: THREE.Group;
+  private sketchOverlayGeometries: THREE.BufferGeometry[] = [];
+  private sketchOverlayMaterials: THREE.Material[] = [];
+  /** 直近のsetSketchOverlay()で描画した線(LineLoop)の本数。E2Eデバッグフックが参照する。 */
+  private sketchLineCount = 0;
+  /** 直近のsetSketchOverlay()でグリッドが描画されたかどうか。E2Eデバッグフックが参照する。 */
+  private sketchGridBuilt = false;
 
   constructor(container: HTMLElement, onFaceSelect?: (face: FaceInfo | null) => void) {
     this.container = container;
@@ -63,6 +164,9 @@ export class CadViewer {
     grid.rotation.x = Math.PI / 2;
     this.scene.add(grid);
 
+    this.sketchOverlayGroup = new THREE.Group();
+    this.scene.add(this.sketchOverlayGroup);
+
     this.renderer.domElement.addEventListener("click", this.handleClick);
     window.addEventListener("keydown", this.handleKeyDown);
 
@@ -70,6 +174,14 @@ export class CadViewer {
     this.resizeObserver.observe(container);
 
     this.animate();
+
+    // E2Eテストからスケッチオーバーレイの描画結果を検証するためのフック(開発ビルドのみ)。
+    if (import.meta.env.DEV) {
+      window.__cadViewerDebug = {
+        sketchLineCount: () => this.sketchLineCount,
+        gridVisible: () => this.sketchGridBuilt && this.sketchOverlayGroup.visible,
+      };
+    }
   }
 
   private animate = () => {
@@ -189,6 +301,76 @@ export class CadViewer {
 
     this.mesh = new THREE.Mesh(geometry, materials.length > 0 ? materials : new THREE.MeshStandardMaterial({ color: BASE_COLOR }));
     this.scene.add(this.mesh);
+
+    geometry.computeBoundingBox();
+    const bbox = geometry.boundingBox;
+    if (bbox) {
+      const size = new THREE.Vector3();
+      bbox.getSize(size);
+      this.meshHalfExtent = Math.max(size.x, size.y, size.z, 20) / 2;
+    }
+  }
+
+  /** 直前のsetSketchOverlay()呼び出しで生成した線・グリッドをsceneから取り除き、リソースを解放する。 */
+  private clearSketchOverlay() {
+    while (this.sketchOverlayGroup.children.length > 0) {
+      this.sketchOverlayGroup.remove(this.sketchOverlayGroup.children[0]);
+    }
+    this.sketchOverlayGeometries.forEach((g) => g.dispose());
+    this.sketchOverlayMaterials.forEach((m) => m.dispose());
+    this.sketchOverlayGeometries = [];
+    this.sketchOverlayMaterials = [];
+    this.sketchLineCount = 0;
+    this.sketchGridBuilt = false;
+  }
+
+  /**
+   * 各スケッチのエンティティ(矩形/円)を、Workerが返した平面基底で3D線として描画する。
+   * 選択中スケッチ(selectedSketchId)は強調色+平面グリッドで、それ以外は控えめな色で表示する。
+   * visible=false のときは何も描画せず(既存の描画があれば消す)、grid/lineCountも0になる。
+   */
+  setSketchOverlay(entries: SketchOverlayEntry[], selectedSketchId: FeatureId | null, visible: boolean) {
+    this.clearSketchOverlay();
+    this.sketchOverlayGroup.visible = visible;
+    if (!visible) return;
+
+    for (const entry of entries) {
+      const isSelected = entry.sketchId === selectedSketchId;
+      const color = isSelected ? SKETCH_SELECTED_COLOR : SKETCH_DEFAULT_COLOR;
+      const material = new THREE.LineBasicMaterial({
+        color,
+        transparent: !isSelected,
+        opacity: isSelected ? 1 : 0.5,
+        linewidth: isSelected ? 2 : 1,
+      });
+      this.sketchOverlayMaterials.push(material);
+
+      for (const entity of entry.entities) {
+        const localPoints = entityLocalPoints(entity);
+        const positions = new Float32Array(localPoints.length * 3);
+        localPoints.forEach(([u, v], i) => {
+          const [x, y, z] = toWorldPoint(entry, u, v);
+          positions[i * 3] = x;
+          positions[i * 3 + 1] = y;
+          positions[i * 3 + 2] = z;
+        });
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+        this.sketchOverlayGeometries.push(geometry);
+
+        const line = new THREE.LineLoop(geometry, material);
+        this.sketchOverlayGroup.add(line);
+        this.sketchLineCount += 1;
+      }
+
+      if (isSelected) {
+        const grid = buildPlaneGrid(entry, this.meshHalfExtent * 1.2);
+        this.sketchOverlayGeometries.push(grid.geometry);
+        this.sketchOverlayMaterials.push(grid.material as THREE.Material);
+        this.sketchOverlayGroup.add(grid);
+        this.sketchGridBuilt = true;
+      }
+    }
   }
 
   dispose() {
@@ -205,6 +387,10 @@ export class CadViewer {
       } else {
         material.dispose();
       }
+    }
+    this.clearSketchOverlay();
+    if (import.meta.env.DEV && window.__cadViewerDebug) {
+      delete window.__cadViewerDebug;
     }
     this.renderer.dispose();
     this.container.removeChild(this.renderer.domElement);

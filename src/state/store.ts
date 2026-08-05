@@ -11,7 +11,7 @@ import {
 } from "../model/document";
 import { createRectangleEntity } from "../model/entity";
 import type { CadDocument, ExtrudeFeature, FeatureId } from "../model/types";
-import type { FaceInfo, MeshData, MeshQuality, WorkerResponse } from "../protocol/messages";
+import type { FaceInfo, MeshData, MeshQuality, SketchPlaneInfo, WorkerResponse } from "../protocol/messages";
 
 export type EvalStatus = "initializing" | "evaluating" | "ready" | "error";
 
@@ -96,6 +96,8 @@ interface CadStoreState {
   status: EvalStatus;
   mesh: MeshData | null;
   faceInfo: FaceInfo[];
+  /** 各スケッチの解決済み平面基底(origin/xDir/yDir/normal)。ビューアのスケッチ線描画に使う派生状態。 */
+  sketchPlanes: SketchPlaneInfo[];
   errorMessage: string | null;
   errorFeatureId: FeatureId | null;
   /** 現在表示中のmesh/faceInfo/errorに対応する最新のevaluateリクエストID(古い応答の破棄に使う)。 */
@@ -103,6 +105,11 @@ interface CadStoreState {
 
   /** ビューアで現在選択中の面(未選択はnull)。 */
   selectedFace: SelectedFace | null;
+
+  /** スケッチ線オーバーレイの表示/非表示(デフォルトON)。 */
+  showSketches: boolean;
+  /** スケッチ線オーバーレイの表示/非表示を切り替える。 */
+  setShowSketches: (visible: boolean) => void;
 
   exporting: boolean;
   exportError: string | null;
@@ -142,7 +149,14 @@ function applyEvaluated(
   if (get().latestEvaluateRequestId !== requestId) return;
 
   if (response.kind === "evaluated") {
-    set({ status: "ready", mesh: response.mesh, faceInfo: response.faceInfo, errorMessage: null, errorFeatureId: null });
+    set({
+      status: "ready",
+      mesh: response.mesh,
+      faceInfo: response.faceInfo,
+      sketchPlanes: response.sketchPlanes,
+      errorMessage: null,
+      errorFeatureId: null,
+    });
   } else if (response.kind === "error") {
     set({
       status: "error",
@@ -159,11 +173,15 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   status: "initializing",
   mesh: null,
   faceInfo: [],
+  sketchPlanes: [],
   errorMessage: null,
   errorFeatureId: null,
   latestEvaluateRequestId: null,
 
   selectedFace: null,
+
+  showSketches: true,
+  setShowSketches: (visible) => set({ showSketches: visible }),
 
   exporting: false,
   exportError: null,
