@@ -541,6 +541,40 @@ describe("evaluateDocument (WASM統合)", () => {
     result.shape.delete();
   });
 
+  it("コーナーサイズが隣接辺に対して大きすぎる場合、OCCT到達前の事前バリデーションでfeatureId付きエラーになる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    // 頂点1の隣接辺はどちらも長さ40mm。サイズ30 > 40/2=20 のため事前チェックで弾かれるはず。
+    const oversized = createPolygonEntity({
+      points: [
+        [0, 0],
+        [40, 0],
+        [40, 40],
+        [0, 40],
+      ],
+      corners: [null, { kind: "fillet", size: 30 }, null, null],
+    });
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [oversized],
+    });
+    const { doc } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    // エラーはsketchフィーチャー(コーナーの持ち主)のIDで返る。
+    expect(result.featureId).toBe(sketch.id);
+    expect(result.message).toContain("大きすぎます");
+  });
+
   it("重複頂点を含むpolygonの押し出しはOCCTエラーとしてfeatureId付きで返る", (ctx) => {
     ctx.skip(!wasmLoaded, SKIP_NOTE);
     // モデル層バリデーションをすり抜けた不正な入力(隣接重複頂点)を直接evaluatorに渡すケース。

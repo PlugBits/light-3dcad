@@ -8,12 +8,16 @@
 //       2. フォールバック: 平面(isPlanar)かつ法線がほぼ一致(cos>0.999)し、
 //          中心距離が最も近い(バウンディングボックス対角長の50%以内)面
 //       3. どちらも失敗したらエラー(featureId付き。UIで再選択を促す)
-//   - entities: rectangle / circle
+//   - entities: rectangle / circle / polygon(頂点ごとのフィレット/面取り指定 corners に対応。
+//     replicadのDrawingPen#customCorner()/#closeWithCustomCorner()を使う。頂点0(始点)を
+//     含む全頂点でコーナー処理可能。OCCT構築前に隣接辺に対して明らかに大きすぎるサイズを
+//     弾く粗い事前バリデーションを行う)
 //   - extrude: operation "newBody"(最初の1回のみ) / "cut"(既存ボディが必要) / "add"(既存ボディが必要。fuseで結合)
 //   - direction: -1 は逆向き押し出し(面参照の場合は面法線の逆方向)
 import { Plane, draw, drawCircle, drawRectangle, type Drawing, type Face, type Shape3D } from "replicad";
 
 import type { CadDocument, FeatureId, PolygonCorner, SketchEntity, SketchFeature } from "../model/types";
+import { validatePolygonCorners } from "../model/validation";
 import type { SketchPlaneInfo } from "../protocol/messages";
 
 export interface EvaluationSuccess {
@@ -112,6 +116,23 @@ function polygonDrawing(points: [number, number][], corners?: PolygonCorner[]): 
     return pen.closeWithCustomCorner(corner0.size, corner0.kind);
   }
   return pen.close();
+}
+
+/**
+ * sketch内のpolygonエンティティのコーナー指定(fillet/chamfer)を検証する(Phase 11)。
+ * OCCTでの実際のプロファイル構築(buildDrawing)より前に呼ぶことで、サイズが隣接辺に対して
+ * 明らかに大きすぎる場合にわかりやすいメッセージのエラーを早期に返す(「粗い事前チェック」。
+ * 自己交差等の厳密な破綻判定はOCCTに任せ、失敗時は通常のtry/catch経由でfeatureId付き
+ * エラーになる)。エラーがあれば最初の1件のメッセージでthrowする。
+ */
+function validateSketchPolygonCorners(sketch: SketchFeature): void {
+  for (const entity of sketch.entities) {
+    if (entity.kind !== "polygon" || !entity.corners) continue;
+    const errors = validatePolygonCorners(entity.id, entity.points, entity.corners);
+    if (errors.length > 0) {
+      throw new Error(errors[0].message);
+    }
+  }
 }
 
 /** sketch内のentities(rectangle/circle/polygon)を1つのDrawingに合成する。 */
@@ -313,6 +334,7 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
           );
           resolvedFacePlanes.set(feature.id, resolved);
         }
+        validateSketchPolygonCorners(feature);
         sketches.set(feature.id, feature);
         continue;
       }
