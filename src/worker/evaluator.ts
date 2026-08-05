@@ -23,16 +23,6 @@ export interface EvaluationFailure {
 
 export type EvaluationResult = EvaluationSuccess | EvaluationFailure;
 
-/** sketchOnPlane() の戻り値(Sketch | CompoundSketch | Sketches)を型を問わずに解放する。 */
-function deleteSketchResult(result: unknown): void {
-  const r = result as { delete?: () => void; sketches?: Array<{ delete: () => void }> };
-  if (typeof r.delete === "function") {
-    r.delete();
-  } else if (Array.isArray(r.sketches)) {
-    r.sketches.forEach((s) => s.delete());
-  }
-}
-
 /** sketch内のentities(rectangle/circle)を1つのDrawingに合成する。 */
 function buildDrawing(entities: SketchEntity[]): Drawing {
   if (entities.length === 0) {
@@ -52,18 +42,21 @@ function buildDrawing(entities: SketchEntity[]): Drawing {
   return drawing as Drawing;
 }
 
-/** sketchFeatureをXY平面上のDrawingに変換し、指定距離・方向で押し出す。 */
+/**
+ * sketchFeatureをXY平面上のDrawingに変換し、指定距離・方向で押し出す。
+ *
+ * 注意: replicadの Sketch#extrude() / Sketches#extrude() は内部で押し出し元の
+ * sketch(wire)を自動的に delete() する実装になっている(CompoundSketchを除く)。
+ * そのため呼び出し側でsketchOnPlane()の戻り値を重ねて delete() すると
+ * 「This object has been deleted」の二重解放エラーになる。ここでは呼ばない。
+ */
 function extrudeSketchFeature(sketch: SketchFeature, distance: number, direction: 1 | -1): Shape3D {
   const drawing = buildDrawing(sketch.entities);
   const sketched = drawing.sketchOnPlane("XY");
-  try {
-    // sketchOnPlane() の戻り値は型上 SketchInterface | Sketches に分かれ、
-    // extrude() の戻り値もそれぞれ Shape3D / AnyShape に広がるため明示キャストする。
-    // 実際には押し出しは常に立体(Shape3D)を生む。
-    return sketched.extrude(distance * direction) as Shape3D;
-  } finally {
-    deleteSketchResult(sketched);
-  }
+  // sketchOnPlane() の戻り値は型上 SketchInterface | Sketches に分かれ、
+  // extrude() の戻り値もそれぞれ Shape3D / AnyShape に広がるため明示キャストする。
+  // 実際には押し出しは常に立体(Shape3D)を生む。
+  return sketched.extrude(distance * direction) as Shape3D;
 }
 
 /**
