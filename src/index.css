@@ -1,0 +1,18 @@
+:root {
+  color-scheme: light dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: system-ui, "Segoe UI", Roboto, sans-serif;
+}
+
+button {
+  cursor: pointer;
+}
