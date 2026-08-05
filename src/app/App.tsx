@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import type { BoxParams, WorkerResponse } from "../protocol/messages";
 import { CadViewer } from "../viewer/CadViewer";
+import { downloadStl } from "../export/downloadStl";
 
 let requestCounter = 0;
 function nextRequestId(): string {
@@ -65,7 +66,7 @@ export default function App() {
     };
   }, []);
 
-  function sendRequest(request: { kind: "generateBox"; params: BoxParams }) {
+  function sendRequest(request: { kind: "generateBox" | "exportStl"; params: BoxParams }) {
     const worker = workerRef.current;
     if (!worker) return;
 
@@ -85,6 +86,19 @@ export default function App() {
     if (response.kind === "boxGenerated") {
       viewerRef.current?.setMesh(response.mesh);
       setStatus("ready");
+    } else if (response.kind === "error") {
+      setStatus("error");
+      setErrorMessage(response.message);
+    }
+  }
+
+  async function handleDownloadStl() {
+    setErrorMessage(null);
+    const response = await sendRequest({ kind: "exportStl", params });
+    if (!response) return;
+
+    if (response.kind === "stlReady") {
+      downloadStl(response.blob, "box.stl");
     } else if (response.kind === "error") {
       setStatus("error");
       setErrorMessage(response.message);
@@ -144,10 +158,17 @@ export default function App() {
         <button onClick={handleGenerate} disabled={status === "initializing" || status === "evaluating"}>
           生成
         </button>
+        <button onClick={handleDownloadStl} disabled={status === "initializing" || status === "evaluating"}>
+          STLダウンロード
+        </button>
 
         {errorMessage && (
           <p style={{ color: "#ff6b6b", fontSize: 12, whiteSpace: "pre-wrap" }}>{errorMessage}</p>
         )}
+
+        <p style={{ fontSize: 11, opacity: 0.6, marginTop: "auto" }}>
+          面をクリックするとブラウザのコンソールにfaceIdが出力されます。
+        </p>
       </aside>
 
       <main style={{ flex: 1 }}>
