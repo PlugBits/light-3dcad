@@ -17,6 +17,7 @@ import {
   removeFeature,
   removeFeatureCascade,
   removeSketchEntity,
+  setPolygonVertexCorner,
   updateSketchEntity,
   validateDocument,
   validateFeature,
@@ -136,6 +137,67 @@ describe("patchSketchFeature / updateSketchEntity", () => {
     const updated = updateSketchEntity(doc, sketch.id, "nope", { width: 999 });
     const found = findFeature(updated, sketch.id) as SketchFeature;
     expect(found.entities[0]).toMatchObject({ width: 60, height: 40 });
+  });
+});
+
+describe("setPolygonVertexCorner", () => {
+  function makePolygonSketchDoc(): { doc: CadDocument; sketch: SketchFeature; entityId: string } {
+    const empty = createEmptyDocument();
+    const polygon = createPolygonEntity({
+      points: [
+        [0, 0],
+        [40, 0],
+        [40, 40],
+        [0, 40],
+      ],
+    });
+    const { doc, feature } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [polygon],
+    });
+    return { doc, sketch: feature, entityId: polygon.id };
+  }
+
+  it("corners未指定のpolygonに1頂点のfilletを設定できる(他はnullで埋まる)", () => {
+    const { doc, sketch, entityId } = makePolygonSketchDoc();
+    const updated = setPolygonVertexCorner(doc, sketch.id, entityId, 1, { kind: "fillet", size: 5 });
+    const found = findFeature(updated, sketch.id) as SketchFeature;
+    const polygon = found.entities[0];
+    expect(polygon.kind).toBe("polygon");
+    if (polygon.kind !== "polygon") return;
+    expect(polygon.corners).toEqual([null, { kind: "fillet", size: 5 }, null, null]);
+    // 非破壊(元のdocは変化しない)
+    const originalPolygon = (findFeature(doc, sketch.id) as SketchFeature).entities[0];
+    expect(originalPolygon.kind === "polygon" ? originalPolygon.corners : undefined).toBeUndefined();
+  });
+
+  it("既存のcornersがある場合は該当頂点のみ上書きする", () => {
+    const { doc, sketch, entityId } = makePolygonSketchDoc();
+    const withFirst = setPolygonVertexCorner(doc, sketch.id, entityId, 0, { kind: "chamfer", size: 3 });
+    const withSecond = setPolygonVertexCorner(withFirst, sketch.id, entityId, 2, { kind: "fillet", size: 8 });
+    const polygon = (findFeature(withSecond, sketch.id) as SketchFeature).entities[0];
+    expect(polygon.kind === "polygon" ? polygon.corners : undefined).toEqual([
+      { kind: "chamfer", size: 3 },
+      null,
+      { kind: "fillet", size: 8 },
+      null,
+    ]);
+  });
+
+  it("nullを指定するとコーナーを解除できる", () => {
+    const { doc, sketch, entityId } = makePolygonSketchDoc();
+    const withCorner = setPolygonVertexCorner(doc, sketch.id, entityId, 1, { kind: "fillet", size: 5 });
+    const cleared = setPolygonVertexCorner(withCorner, sketch.id, entityId, 1, null);
+    const polygon = (findFeature(cleared, sketch.id) as SketchFeature).entities[0];
+    expect(polygon.kind === "polygon" ? polygon.corners : undefined).toEqual([null, null, null, null]);
+  });
+
+  it("範囲外のvertexIndexは無視される(ドキュメント不変)", () => {
+    const { doc, sketch, entityId } = makePolygonSketchDoc();
+    const updated = setPolygonVertexCorner(doc, sketch.id, entityId, 99, { kind: "fillet", size: 5 });
+    const polygon = (findFeature(updated, sketch.id) as SketchFeature).entities[0];
+    expect(polygon.kind === "polygon" ? polygon.corners : undefined).toBeUndefined();
   });
 });
 
@@ -355,6 +417,94 @@ describe("validateFeature / validateDocument", () => {
       [],
     );
     expect(errors).toEqual([]);
+  });
+
+  describe("多角形の頂点コーナー(fillet/chamfer、Phase 11)", () => {
+    // 40x40正方形。頂点1=(40,0)は隣接辺(頂点0->1: 長さ40、頂点1->2: 長さ40)がともに40。
+    const SQUARE_POINTS: [number, number][] = [
+      [0, 0],
+      [40, 0],
+      [40, 40],
+      [0, 40],
+    ];
+
+    function squareWithCorners(corners: (null | { kind: "fillet" | "chamfer"; size: number })[]) {
+      return createPolygonEntity({ points: SQUARE_POINTS, corners });
+    }
+
+    it("corners未指定はエラーなし(既存データとの後方互換)", () => {
+      const polygon = createPolygonEntity({ points: SQUARE_POINTS });
+      const errors = validateFeature(
+        { type: "sketch", id: "s1", name: "S", plane: { kind: "world", plane: "XY" }, entities: [polygon] },
+        [],
+      );
+      expect(errors).toEqual([]);
+    });
+
+    it("妥当なサイズのfillet/chamfer指定はエラーなし", () => {
+      const polygon = squareWithCorners([
+        { kind: "fillet", size: 5 },
+        { kind: "chamfer", size: 5 },
+        null,
+        null,
+      ]);
+      const errors = validateFeature(
+        { type: "sketch", id: "s1", name: "S", plane: { kind: "world", plane: "XY" }, entities: [polygon] },
+        [],
+      );
+      expect(errors).toEqual([]);
+    });
+
+    it("サイズが0以下だとエラー", () => {
+      const polygon = squareWithCorners([{ kind: "fillet", size: 0 }, null, null, null]);
+      const errors = validateFeature(
+        { type: "sketch", id: "s1", name: "S", plane: { kind: "world", plane: "XY" }, entities: [polygon] },
+        [],
+      );
+      expect(errors.some((e) => e.message.includes("正の数"))).toBe(true);
+    });
+
+    it("サイズが隣接辺の短い方の半分を超えるとエラー(粗い事前チェック)", () => {
+      // 頂点1の隣接辺はどちらも長さ40。サイズ21 > 40/2=20 なのでエラーになるはず。
+      const polygon = squareWithCorners([null, { kind: "fillet", size: 21 }, null, null]);
+      const errors = validateFeature(
+        { type: "sketch", id: "s1", name: "S", plane: { kind: "world", plane: "XY" }, entities: [polygon] },
+        [],
+      );
+      expect(errors.some((e) => e.message.includes("大きすぎます"))).toBe(true);
+    });
+
+    it("サイズがちょうど隣接辺の短い方の半分ならエラーにならない(境界値)", () => {
+      const polygon = squareWithCorners([null, { kind: "fillet", size: 20 }, null, null]);
+      const errors = validateFeature(
+        { type: "sketch", id: "s1", name: "S", plane: { kind: "world", plane: "XY" }, entities: [polygon] },
+        [],
+      );
+      expect(errors).toEqual([]);
+    });
+
+    it("頂点0(始点)のコーナーサイズも同じ基準で検証される", () => {
+      // 頂点0の隣接辺は 頂点3->0(長さ40)と頂点0->1(長さ40)。
+      const polygon = squareWithCorners([{ kind: "fillet", size: 25 }, null, null, null]);
+      const errors = validateFeature(
+        { type: "sketch", id: "s1", name: "S", plane: { kind: "world", plane: "XY" }, entities: [polygon] },
+        [],
+      );
+      expect(errors.some((e) => e.message.includes("大きすぎます"))).toBe(true);
+    });
+
+    it("不正なkindはエラー", () => {
+      const polygon = createPolygonEntity({
+        points: SQUARE_POINTS,
+        // @ts-expect-error 意図的に不正なkindを渡す
+        corners: [{ kind: "invalid", size: 5 }, null, null, null],
+      });
+      const errors = validateFeature(
+        { type: "sketch", id: "s1", name: "S", plane: { kind: "world", plane: "XY" }, entities: [polygon] },
+        [],
+      );
+      expect(errors.some((e) => e.message.includes("コーナー種別"))).toBe(true);
+    });
   });
 
   it("押し出し距離が0以下だとエラー", () => {

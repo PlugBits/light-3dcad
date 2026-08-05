@@ -389,6 +389,158 @@ describe("evaluateDocument (WASM統合)", () => {
     result.shape.delete();
   });
 
+  it("40x40正方形の4頂点(頂点0含む)全てにフィレットr=5を適用すると押し出しに成功し、体積が角のある正方形より小さくなる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const r = 5;
+    const height = 20;
+    const filleted = createPolygonEntity({
+      points: [
+        [0, 0],
+        [40, 0],
+        [40, 40],
+        [0, 40],
+      ],
+      corners: [
+        { kind: "fillet", size: r },
+        { kind: "fillet", size: r },
+        { kind: "fillet", size: r },
+        { kind: "fillet", size: r },
+      ],
+    });
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [filleted],
+    });
+    const { doc } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: height,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const bbox = result.shape.boundingBox;
+    // フィレットは角を丸めるだけなのでバウンディングボックスは40x40x20のまま。
+    expect(bbox.width).toBeCloseTo(40, 3);
+    expect(bbox.height).toBeCloseTo(40, 3);
+    expect(bbox.depth).toBeCloseTo(height, 6);
+    bbox.delete();
+
+    // 直角90度の角を半径rでフィレットすると、1隅あたり r^2 - πr^2/4 = r^2(1-π/4) の断面積が削れる。
+    // 4隅分・高さ倍した体積が減ることを概算検証する(誤差1mm^3程度まで許容)。
+    const plainVolume = 40 * 40 * height;
+    const removedPerCorner = r * r * (1 - Math.PI / 4);
+    const expectedVolume = plainVolume - 4 * removedPerCorner * height;
+    const volume = measureVolume(result.shape);
+    expect(volume).toBeLessThan(plainVolume);
+    expect(volume).toBeCloseTo(expectedVolume, 0);
+
+    result.shape.delete();
+  });
+
+  it("40x40正方形の4頂点(頂点0含む)全てに面取りsize=5を適用すると押し出しに成功し、体積がフィレットよりさらに小さくなる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const size = 5;
+    const height = 20;
+    const chamfered = createPolygonEntity({
+      points: [
+        [0, 0],
+        [40, 0],
+        [40, 40],
+        [0, 40],
+      ],
+      corners: [
+        { kind: "chamfer", size },
+        { kind: "chamfer", size },
+        { kind: "chamfer", size },
+        { kind: "chamfer", size },
+      ],
+    });
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [chamfered],
+    });
+    const { doc } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: height,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    // 直角90度の角を面取りすると、1隅あたり size^2/2 の直角二等辺三角形の断面積が削れる
+    // (脚長がsizeと一致するのは90度の頂点のみ。src/sketch/polygonOutline.ts のコメント参照)。
+    const plainVolume = 40 * 40 * height;
+    const removedPerCorner = (size * size) / 2;
+    const expectedVolume = plainVolume - 4 * removedPerCorner * height;
+    const volume = measureVolume(result.shape);
+    expect(volume).toBeLessThan(plainVolume);
+    expect(volume).toBeCloseTo(expectedVolume, 0);
+
+    result.shape.delete();
+  });
+
+  it("頂点0(始点)のみにフィレットを適用しても押し出しに成功する(customCorner/closeWithCustomCornerのスパイク回帰テスト)", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const r = 5;
+    const height = 10;
+    const filletedAtVertex0 = createPolygonEntity({
+      points: [
+        [0, 0],
+        [40, 0],
+        [40, 40],
+        [0, 40],
+      ],
+      corners: [{ kind: "fillet", size: r }, null, null, null],
+    });
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [filletedAtVertex0],
+    });
+    const { doc } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: height,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    // 頂点0(0,0)近傍が丸められ、他の3頂点(直角のまま)は残る。
+    // バウンディングボックスの最小コーナーは、頂点0が丸められた分だけ(0,0)から後退しない
+    // (フィレットは角を内側に削るだけで外形の頂点1,2,3側の境界は変わらないため、bboxはそのまま40x40)。
+    const bbox = result.shape.boundingBox;
+    expect(bbox.width).toBeCloseTo(40, 3);
+    expect(bbox.height).toBeCloseTo(40, 3);
+    bbox.delete();
+
+    const plainVolume = 40 * 40 * height;
+    const removedPerCorner = r * r * (1 - Math.PI / 4);
+    const expectedVolume = plainVolume - removedPerCorner * height;
+    const volume = measureVolume(result.shape);
+    expect(volume).toBeLessThan(plainVolume);
+    expect(volume).toBeCloseTo(expectedVolume, 0);
+
+    result.shape.delete();
+  });
+
   it("重複頂点を含むpolygonの押し出しはOCCTエラーとしてfeatureId付きで返る", (ctx) => {
     ctx.skip(!wasmLoaded, SKIP_NOTE);
     // モデル層バリデーションをすり抜けた不正な入力(隣接重複頂点)を直接evaluatorに渡すケース。

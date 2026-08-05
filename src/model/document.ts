@@ -6,6 +6,7 @@ import type {
   Feature,
   FeatureId,
   PlaneRef,
+  PolygonCorner,
   SketchEntity,
   SketchFeature,
 } from "./types";
@@ -115,6 +116,33 @@ export function updateSketchEntity(
     entities: sketch.entities.map((entity) =>
       entity.id === entityId ? ({ ...entity, ...patch } as SketchEntity) : entity,
     ),
+  }));
+}
+
+/**
+ * polygonエンティティの1頂点(vertexIndex)のコーナー指定(fillet/chamfer/null)を設定する。
+ * entity.corners が未設定の場合は points と同じ長さのnull配列から始める。
+ * entity が見つからない・polygonでない・vertexIndexが範囲外の場合は元のドキュメントをそのまま返す。
+ */
+export function setPolygonVertexCorner(
+  doc: CadDocument,
+  sketchId: FeatureId,
+  entityId: string,
+  vertexIndex: number,
+  corner: PolygonCorner,
+): CadDocument {
+  return updateFeature<SketchFeature>(doc, sketchId, (sketch) => ({
+    ...sketch,
+    entities: sketch.entities.map((entity) => {
+      if (entity.id !== entityId || entity.kind !== "polygon") return entity;
+      if (vertexIndex < 0 || vertexIndex >= entity.points.length) return entity;
+      const nextCorners: PolygonCorner[] = entity.corners
+        ? entity.corners.slice()
+        : entity.points.map(() => null);
+      while (nextCorners.length < entity.points.length) nextCorners.push(null);
+      nextCorners[vertexIndex] = corner;
+      return { ...entity, corners: nextCorners };
+    }),
   }));
 }
 

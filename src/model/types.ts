@@ -19,6 +19,15 @@ export type PlaneRef =
       normal: [number, number, number];
     };
 
+/**
+ * polygon頂点のコーナー指定。null/未指定は角のまま。
+ * kind:"fillet" は丸め(円弧)、"chamfer" は面取り(直線カット)。
+ * size は replicad の customCorner() にそのまま渡す値(丸め半径、または面取りのオフセット距離。
+ * 直角90度の頂点では面取りの脚長と一致するが、それ以外の角度では脚長と一致しない。
+ * 詳細は src/sketch/polygonOutline.ts のコメントを参照)。size > 0 が必須。
+ */
+export type PolygonCorner = null | { kind: "fillet" | "chamfer"; size: number };
+
 /** スケッチ内の2D図形。座標はスケッチ平面上のローカル座標(mm)。 */
 export type SketchEntity =
   | { kind: "rectangle"; id: string; center: [number, number]; width: number; height: number }
@@ -28,6 +37,13 @@ export type SketchEntity =
       id: string;
       /** 閉多角形の頂点列(順序付き)。最後の点と最初の点は自動的に結ばれる。3点以上必要。 */
       points: [number, number][];
+      /**
+       * 各頂点(points[i]に対応)のコーナー指定。省略可(既存データとの後方互換のため)。
+       * 指定する場合は points と同じ長さが期待されるが、短い場合は該当インデックス以降を
+       * 「角のまま(null)」として扱う(evaluator/オーバーレイ側の配列アクセスは常に
+       * corners?.[i] の形でオプショナルに読む)。
+       */
+      corners?: PolygonCorner[];
     };
 
 /** 2Dスケッチフィーチャー。 */

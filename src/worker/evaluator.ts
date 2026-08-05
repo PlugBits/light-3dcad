@@ -13,7 +13,7 @@
 //   - direction: -1 は逆向き押し出し(面参照の場合は面法線の逆方向)
 import { Plane, draw, drawCircle, drawRectangle, type Drawing, type Face, type Shape3D } from "replicad";
 
-import type { CadDocument, FeatureId, SketchEntity, SketchFeature } from "../model/types";
+import type { CadDocument, FeatureId, PolygonCorner, SketchEntity, SketchFeature } from "../model/types";
 import type { SketchPlaneInfo } from "../protocol/messages";
 
 export interface EvaluationSuccess {
@@ -83,11 +83,33 @@ const WORLD_XY_PLANE: PlaneBasis = {
  * polygonエンティティの頂点列(3点以上、閉ループ)からDrawingを構築する。
  * draw(始点).lineTo(...).close() で閉じたプロファイルを作る(replicadのDrawingPen API)。
  * 自己交差の厳密チェックはしない(評価時にOCCTがエラーを出せば既存のfeatureIdエラー経路に乗る)。
+ *
+ * corners[i] が指定されていれば points[i] の頂点にフィレット/面取りを適用する(Phase 11)。
+ * replicadの DrawingPen#customCorner(size, mode) は「直前に描いた曲線」と「次に描く曲線」の間の
+ * コーナーに遅延適用される(次のlineTo/close時点のsaveCurve()で実際に適用される)。そのため
+ * points[i](i>=1)にコーナーを付けたい場合は、その頂点へのlineTo()の直後・次のlineTo()より前に
+ * customCorner()を呼ぶ(呼んだ時点では確定せず、次の曲線が描かれた時に頂点iのコーナーとして
+ * 適用される)。
+ *
+ * 頂点0(始点)のコーナーは通常のcustomCorner()では扱えない(始点にはまだ「前の曲線」が
+ * 存在しないため)。replicadは専用の DrawingPen#closeWithCustomCorner(size, mode) を提供しており、
+ * これは close()と同様にプロファイルを閉じたうえで、最後に描いた曲線(閉じる辺)と最初に描いた
+ * 曲線(始点からの最初の辺)の間、すなわち頂点0、にコーナーを適用する
+ * (_customCornerLastWithFirst()がpendingCurvesの先頭と末尾を取り出して処理する実装のため)。
+ * これにより頂点0を含む全頂点でフィレット/面取りが可能(回避策の頂点シフトは不要)。
  */
-function polygonDrawing(points: [number, number][]): Drawing {
+function polygonDrawing(points: [number, number][], corners?: PolygonCorner[]): Drawing {
   let pen = draw(points[0]);
   for (let i = 1; i < points.length; i += 1) {
     pen = pen.lineTo(points[i]);
+    const corner = corners?.[i];
+    if (corner) {
+      pen = pen.customCorner(corner.size, corner.kind);
+    }
+  }
+  const corner0 = corners?.[0];
+  if (corner0) {
+    return pen.closeWithCustomCorner(corner0.size, corner0.kind);
   }
   return pen.close();
 }
@@ -108,7 +130,7 @@ function buildDrawing(entities: SketchEntity[]): Drawing {
       const [cx, cy] = entity.center;
       piece = drawCircle(entity.radius).translate(cx, cy);
     } else {
-      piece = polygonDrawing(entity.points);
+      piece = polygonDrawing(entity.points, entity.corners);
     }
     drawing = drawing ? drawing.fuse(piece) : piece;
   }

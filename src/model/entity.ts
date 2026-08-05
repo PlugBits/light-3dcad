@@ -1,5 +1,5 @@
 import { generateId } from "./id";
-import type { SketchEntity } from "./types";
+import type { PolygonCorner, SketchEntity } from "./types";
 
 /** ID付きの矩形エンティティを作成する。 */
 export function createRectangleEntity(params: {
@@ -26,11 +26,18 @@ export function createCircleEntity(params: { center?: [number, number]; radius: 
   };
 }
 
-/** ID付きの多角形エンティティを作成する。points は順序付き頂点列(閉ループ、3点以上)。 */
-export function createPolygonEntity(params: { points: [number, number][] }): SketchEntity {
+/**
+ * ID付きの多角形エンティティを作成する。points は順序付き頂点列(閉ループ、3点以上)。
+ * corners は頂点ごとのフィレット/面取り指定(省略可、省略時は全頂点が角のまま)。
+ */
+export function createPolygonEntity(params: {
+  points: [number, number][];
+  corners?: PolygonCorner[];
+}): SketchEntity {
   return {
     kind: "polygon",
     id: generateId("entity"),
     points: params.points,
+    ...(params.corners ? { corners: params.corners } : {}),
   };
 }
