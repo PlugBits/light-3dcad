@@ -10,10 +10,13 @@ import {
   removeFeatureCascade,
 } from "../model/document";
 import { createRectangleEntity } from "../model/entity";
-import type { CadDocument, FeatureId } from "../model/types";
+import type { CadDocument, ExtrudeFeature, FeatureId } from "../model/types";
 import type { FaceInfo, MeshData, MeshQuality, WorkerResponse } from "../protocol/messages";
 
 export type EvalStatus = "initializing" | "evaluating" | "ready" | "error";
+
+/** ビューアで選択中の面(faceInfoの1要素相当)。 */
+export type SelectedFace = FaceInfo;
 
 interface PendingEntry {
   resolve: (response: WorkerResponse) => void;
@@ -98,6 +101,9 @@ interface CadStoreState {
   /** 現在表示中のmesh/faceInfo/errorに対応する最新のevaluateリクエストID(古い応答の破棄に使う)。 */
   latestEvaluateRequestId: string | null;
 
+  /** ビューアで現在選択中の面(未選択はnull)。 */
+  selectedFace: SelectedFace | null;
+
   exporting: boolean;
   exportError: string | null;
 
@@ -113,6 +119,15 @@ interface CadStoreState {
   addExtrude: (sketchId: FeatureId) => void;
   /** フィーチャーを削除する(依存する後続フィーチャーもカスケード削除)。 */
   removeFeature: (featureId: FeatureId) => void;
+  /** ビューアでの面選択状態を更新する(nullで選択解除)。 */
+  selectFace: (face: SelectedFace | null) => void;
+  /**
+   * 現在選択中の平面な面を新しいスケッチ平面として、face参照スケッチフィーチャーを追加する。
+   * 参照フィーチャーIDには「現在のボディを生成した履歴末尾のジオメトリ系フィーチャー」
+   * (= doc.features中、最後に登場するextrudeフィーチャー)のIDを使う。
+   * 平面でない面が選択されている、またはボディが存在しない場合は何もしない。
+   */
+  addFaceSketch: () => void;
   /** 現在のドキュメントをSTLとしてエクスポートする(exporting/exportErrorはストアで管理)。 */
   exportStl: () => Promise<Blob>;
 }
@@ -147,6 +162,8 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   errorMessage: null,
   errorFeatureId: null,
   latestEvaluateRequestId: null,
+
+  selectedFace: null,
 
   exporting: false,
   exportError: null,
@@ -200,6 +217,39 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
     if (selected && !findFeature(nextDoc, selected)) {
       set({ selectedFeatureId: null });
     }
+  },
+
+  selectFace: (face) => set({ selectedFace: face }),
+
+  addFaceSketch: () => {
+    const face = get().selectedFace;
+    if (!face || !face.isPlanar) return;
+
+    const doc = get().doc;
+    // 履歴末尾から最初に見つかるextrudeフィーチャー = 現在のボディを生成したフィーチャー。
+    let lastExtrude: ExtrudeFeature | null = null;
+    for (let i = doc.features.length - 1; i >= 0; i -= 1) {
+      const f = doc.features[i];
+      if (f.type === "extrude") {
+        lastExtrude = f;
+        break;
+      }
+    }
+    if (!lastExtrude) return;
+
+    const { doc: nextDoc, feature } = addSketchFeature(doc, {
+      name: nextFeatureName(doc, "FaceSketch"),
+      plane: {
+        kind: "face",
+        featureId: lastExtrude.id,
+        faceId: face.faceId,
+        center: face.center,
+        normal: face.normal,
+      },
+      entities: [],
+    });
+    get().updateDocument(() => nextDoc);
+    set({ selectedFeatureId: feature.id, selectedFace: null });
   },
 
   exportStl: async () => {

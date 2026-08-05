@@ -15,15 +15,19 @@ export default function App() {
   const doc = useCadStore((s) => s.doc);
   const status = useCadStore((s) => s.status);
   const mesh = useCadStore((s) => s.mesh);
+  const faceInfo = useCadStore((s) => s.faceInfo);
   const errorMessage = useCadStore((s) => s.errorMessage);
   const errorFeatureId = useCadStore((s) => s.errorFeatureId);
   const selectedFeatureId = useCadStore((s) => s.selectedFeatureId);
+  const selectedFace = useCadStore((s) => s.selectedFace);
   const exporting = useCadStore((s) => s.exporting);
   const exportError = useCadStore((s) => s.exportError);
   const initialize = useCadStore((s) => s.initialize);
   const selectFeature = useCadStore((s) => s.selectFeature);
+  const selectFace = useCadStore((s) => s.selectFace);
   const addSketch = useCadStore((s) => s.addSketch);
   const addExtrude = useCadStore((s) => s.addExtrude);
+  const addFaceSketch = useCadStore((s) => s.addFaceSketch);
   const removeFeature = useCadStore((s) => s.removeFeature);
   const exportStl = useCadStore((s) => s.exportStl);
 
@@ -32,10 +36,14 @@ export default function App() {
     initialize();
   }, [initialize]);
 
-  // Three.jsビューア初期化(マウント時に一度だけ)
+  // Three.jsビューア初期化(マウント時に一度だけ)。
+  // 面クリック時のコールバックはストアの最新スナップショットを直接参照する
+  // (依存配列は空のまま=マウント時に一度だけ生成するビューアに対して安定した参照を渡す)。
   useEffect(() => {
     if (!viewerContainerRef.current) return;
-    const viewer = new CadViewer(viewerContainerRef.current);
+    const viewer = new CadViewer(viewerContainerRef.current, (face) => {
+      useCadStore.getState().selectFace(face);
+    });
     viewerRef.current = viewer;
     return () => {
       viewer.dispose();
@@ -43,12 +51,20 @@ export default function App() {
     };
   }, []);
 
-  // ストアのmeshが更新されるたびにビューアへ反映する。
+  // ストアのmesh/faceInfoが更新されるたびにビューアへ反映する。
   useEffect(() => {
     if (mesh) {
-      viewerRef.current?.setMesh(mesh);
+      viewerRef.current?.setMesh(mesh, faceInfo);
     }
-  }, [mesh]);
+  }, [mesh, faceInfo]);
+
+  // 選択中の面が再評価後のfaceInfoに存在しなくなった場合(トポロジカルネーミングのずれ等)は
+  // 選択状態をクリアする。
+  useEffect(() => {
+    if (selectedFace && !faceInfo.some((f) => f.faceId === selectedFace.faceId)) {
+      selectFace(null);
+    }
+  }, [faceInfo, selectedFace, selectFace]);
 
   const sketches = doc.features.filter((f) => f.type === "sketch");
   const selectedFeature = selectedFeatureId ? findFeature(doc, selectedFeatureId) : undefined;
@@ -96,12 +112,15 @@ export default function App() {
           borderBottom: "1px solid #444",
         }}
       >
-        <h1 style={{ fontSize: 16, margin: 0 }}>light-3dcad — Phase 2</h1>
+        <h1 style={{ fontSize: 16, margin: 0 }}>light-3dcad — Phase 3</h1>
         <button type="button" onClick={addSketch}>
           スケッチ追加
         </button>
         <button type="button" onClick={handleAddExtrude} disabled={sketches.length === 0}>
           押し出し追加
+        </button>
+        <button type="button" onClick={addFaceSketch} disabled={!selectedFace?.isPlanar}>
+          選択面にスケッチ
         </button>
         <button type="button" onClick={handleDownloadStl} disabled={busy || exporting}>
           {exporting ? "STL出力中…" : "STLダウンロード"}
@@ -135,6 +154,28 @@ export default function App() {
               onDelete={handleDelete}
             />
           </div>
+
+          {selectedFace && (
+            <div
+              style={{
+                borderTop: "1px solid #444",
+                paddingTop: 12,
+                fontSize: 12,
+                display: "flex",
+                flexDirection: "column",
+                gap: 4,
+              }}
+            >
+              <strong>選択中の面</strong>
+              <span>中心: {selectedFace.center.map((v) => v.toFixed(2)).join(", ")}</span>
+              <span>法線: {selectedFace.normal.map((v) => v.toFixed(2)).join(", ")}</span>
+              {!selectedFace.isPlanar && (
+                <span style={{ color: "#ff6b6b" }}>
+                  この面は平面ではないため、スケッチ平面にできません。
+                </span>
+              )}
+            </div>
+          )}
 
           {errorMessage && (
             <p style={{ color: "#ff6b6b", fontSize: 12, whiteSpace: "pre-wrap", margin: 0 }}>

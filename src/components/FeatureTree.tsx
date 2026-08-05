@@ -11,6 +11,14 @@ const TYPE_LABEL: Record<Feature["type"], string> = {
   extrude: "押し出し",
 };
 
+/** フィーチャーツリーに表示する種別ラベル。face参照スケッチは「面上スケッチ」と表示する。 */
+function typeLabel(feature: Feature): string {
+  if (feature.type === "sketch" && feature.plane.kind === "face") {
+    return "面上スケッチ";
+  }
+  return TYPE_LABEL[feature.type];
+}
+
 interface FeatureTreeProps {
   doc: CadDocument;
   selectedFeatureId: FeatureId | null;
@@ -47,7 +55,7 @@ export function FeatureTree({ doc, selectedFeatureId, errorFeatureId, onSelect, 
               <span aria-hidden="true">{ICONS[feature.type]}</span>
               <span style={{ flex: 1, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {feature.name}
-                <span style={{ opacity: 0.6 }}> ({TYPE_LABEL[feature.type]})</span>
+                <span style={{ opacity: 0.6 }}> ({typeLabel(feature)})</span>
               </span>
               {hasError && (
                 <span title="評価エラーがあります" style={{ color: "#ff6b6b" }}>

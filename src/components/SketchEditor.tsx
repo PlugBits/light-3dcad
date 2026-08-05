@@ -65,7 +65,12 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
         <input type="text" value={sketch.name} onChange={(e) => handleRename(e.target.value)} />
       </label>
       <p style={{ fontSize: 11, opacity: 0.7, margin: 0 }}>
-        平面: {sketch.plane.kind === "world" ? `ワールド ${sketch.plane.plane}` : "面参照"}
+        平面:{" "}
+        {sketch.plane.kind === "world"
+          ? `ワールド ${sketch.plane.plane}`
+          : `面参照(中心 ${sketch.plane.center.map((v) => v.toFixed(1)).join(", ")} / 法線 ${sketch.plane.normal
+              .map((v) => v.toFixed(2))
+              .join(", ")})`}
       </p>
 
       <div style={{ display: "flex", gap: 8 }}>

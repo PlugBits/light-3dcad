@@ -1,7 +1,11 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
-import type { FaceGroup, MeshData } from "../protocol/messages";
+import type { FaceGroup, FaceInfo, MeshData } from "../protocol/messages";
+
+const BASE_COLOR = 0x5b8def;
+/** 選択面のハイライト色(通常より明るい黄系)。 */
+const HIGHLIGHT_COLOR = 0xffd54f;
 
 /**
  * Three.jsシーンの命令的なラッパー。React stateにシーンを持たせず、
@@ -14,13 +18,19 @@ export class CadViewer {
   private controls: OrbitControls;
   private mesh: THREE.Mesh | null = null;
   private faceGroups: FaceGroup[] = [];
+  private faceInfo: FaceInfo[] = [];
+  private materials: THREE.MeshStandardMaterial[] = [];
+  private selectedGroupIndex: number | null = null;
   private raycaster = new THREE.Raycaster();
   private container: HTMLElement;
   private resizeObserver: ResizeObserver;
   private animationFrameId = 0;
+  /** 面がクリックで選択/解除されたときに呼ばれる(解除時はnull)。 */
+  private onFaceSelect?: (face: FaceInfo | null) => void;
 
-  constructor(container: HTMLElement) {
+  constructor(container: HTMLElement, onFaceSelect?: (face: FaceInfo | null) => void) {
     this.container = container;
+    this.onFaceSelect = onFaceSelect;
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x222630);
@@ -54,6 +64,7 @@ export class CadViewer {
     this.scene.add(grid);
 
     this.renderer.domElement.addEventListener("click", this.handleClick);
+    window.addEventListener("keydown", this.handleKeyDown);
 
     this.resizeObserver = new ResizeObserver(() => this.handleResize());
     this.resizeObserver.observe(container);
@@ -75,6 +86,12 @@ export class CadViewer {
     this.renderer.setSize(clientWidth, clientHeight);
   }
 
+  private handleKeyDown = (event: KeyboardEvent) => {
+    if (event.key === "Escape") {
+      this.clearSelection();
+    }
+  };
+
   private handleClick = (event: MouseEvent) => {
     if (!this.mesh) return;
 
@@ -86,28 +103,55 @@ export class CadViewer {
 
     this.raycaster.setFromCamera(pointer, this.camera);
     const intersections = this.raycaster.intersectObject(this.mesh, false);
-    if (intersections.length === 0) return;
+    if (intersections.length === 0) {
+      // 空クリック(何もヒットしなかった)= 選択解除。
+      this.clearSelection();
+      return;
+    }
 
     const triangleIndex = intersections[0].faceIndex;
-    if (triangleIndex == null) return;
+    if (triangleIndex == null) {
+      this.clearSelection();
+      return;
+    }
 
     // faceIndexは三角形番号。triangles配列上のオフセット(triangleIndex*3)が
     // どのfaceGroup範囲に含まれるかを線形探索してB-Rep面IDを逆引きする。
     const triangleOffset = triangleIndex * 3;
-    const group = this.faceGroups.find(
+    const groupIndex = this.faceGroups.findIndex(
       (g) => triangleOffset >= g.start && triangleOffset < g.start + g.count,
     );
 
-    if (group) {
-      // eslint-disable-next-line no-console
-      console.log("[CadViewer] face clicked, faceId =", group.faceId);
-    } else {
-      // eslint-disable-next-line no-console
-      console.log("[CadViewer] face clicked, but no matching faceGroup for triangle", triangleIndex);
+    if (groupIndex === -1) {
+      this.clearSelection();
+      return;
     }
+
+    const faceId = this.faceGroups[groupIndex].faceId;
+    const info = this.faceInfo.find((f) => f.faceId === faceId) ?? null;
+    this.selectGroup(groupIndex);
+    this.onFaceSelect?.(info);
   };
 
-  setMesh(data: MeshData) {
+  /** materialIndex = groupIndex のマテリアル色をハイライト色に、前回選択分は基本色に戻す。 */
+  private selectGroup(groupIndex: number) {
+    if (this.selectedGroupIndex != null) {
+      this.materials[this.selectedGroupIndex]?.color.setHex(BASE_COLOR);
+    }
+    this.selectedGroupIndex = groupIndex;
+    this.materials[groupIndex]?.color.setHex(HIGHLIGHT_COLOR);
+  }
+
+  /** 面の選択を解除し、ハイライトを元の色に戻す。onFaceSelect(null)を呼ぶ。 */
+  clearSelection() {
+    if (this.selectedGroupIndex != null) {
+      this.materials[this.selectedGroupIndex]?.color.setHex(BASE_COLOR);
+      this.selectedGroupIndex = null;
+      this.onFaceSelect?.(null);
+    }
+  }
+
+  setMesh(data: MeshData, faceInfo: FaceInfo[] = []) {
     if (this.mesh) {
       this.scene.remove(this.mesh);
       this.mesh.geometry.dispose();
@@ -125,21 +169,25 @@ export class CadViewer {
     geometry.setAttribute("normal", new THREE.BufferAttribute(data.normals, 3));
     geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
 
-    // faceGroupsをBufferGeometryのgroupとして登録する(ハイライトは行わないが
-    // materialIndexを差し替えられるように単一マテリアルを複製しておく)。
+    // faceGroupsをBufferGeometryのgroupとして登録する。materialIndexごとに
+    // マテリアルを複製しておき、選択面のみ色を差し替えてハイライトする。
     geometry.clearGroups();
-    const baseColor = 0x5b8def;
-    const materials: THREE.Material[] = [];
+    const materials: THREE.MeshStandardMaterial[] = [];
     data.faceGroups.forEach((group, materialIndex) => {
       geometry.addGroup(group.start, group.count, materialIndex);
       materials.push(
-        new THREE.MeshStandardMaterial({ color: baseColor, side: THREE.DoubleSide }),
+        new THREE.MeshStandardMaterial({ color: BASE_COLOR, side: THREE.DoubleSide }),
       );
     });
 
     this.faceGroups = data.faceGroups;
+    this.faceInfo = faceInfo;
+    this.materials = materials;
+    // メッシュが再生成されるとfaceGroupsのインデックス対応も変わりうるため選択状態はリセットする。
+    // (ストア側の選択面はfaceInfoに残っているかどうかで呼び出し元が判断する)
+    this.selectedGroupIndex = null;
 
-    this.mesh = new THREE.Mesh(geometry, materials.length > 0 ? materials : new THREE.MeshStandardMaterial({ color: baseColor }));
+    this.mesh = new THREE.Mesh(geometry, materials.length > 0 ? materials : new THREE.MeshStandardMaterial({ color: BASE_COLOR }));
     this.scene.add(this.mesh);
   }
 
@@ -147,6 +195,7 @@ export class CadViewer {
     cancelAnimationFrame(this.animationFrameId);
     this.resizeObserver.disconnect();
     this.renderer.domElement.removeEventListener("click", this.handleClick);
+    window.removeEventListener("keydown", this.handleKeyDown);
     this.controls.dispose();
     if (this.mesh) {
       this.mesh.geometry.dispose();
