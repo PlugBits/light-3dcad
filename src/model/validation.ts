@@ -43,8 +43,13 @@ export function validateFeature(feature: Feature, allFeatures: readonly Feature[
     if (feature.plane.kind === "world" && feature.plane.plane !== "XY") {
       errors.push({ featureId: feature.id, message: "対応していないワールド平面です" });
     }
-    if (feature.plane.kind === "face" && !feature.plane.featureId) {
-      errors.push({ featureId: feature.id, message: "参照フィーチャーIDが指定されていません" });
+    if (feature.plane.kind === "face") {
+      if (!feature.plane.featureId) {
+        errors.push({ featureId: feature.id, message: "参照フィーチャーIDが指定されていません" });
+      }
+      if (!feature.plane.center.every((c) => Number.isFinite(c)) || !feature.plane.normal.every((c) => Number.isFinite(c))) {
+        errors.push({ featureId: feature.id, message: "面参照の中心・法線座標が不正です" });
+      }
     }
     feature.entities.forEach((entity) => {
       errors.push(...validateEntity(entity, feature.id));

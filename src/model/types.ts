@@ -8,7 +8,16 @@ export type FeatureId = string;
 /** スケッチが乗る平面の参照。 */
 export type PlaneRef =
   | { kind: "world"; plane: "XY" }
-  | { kind: "face"; featureId: FeatureId; faceId: number };
+  | {
+      kind: "face";
+      featureId: FeatureId;
+      /** 選択時点のB-Rep面ID(face.hashCode)。再評価で変わりうるため第一候補としてのみ使う。 */
+      faceId: number;
+      /** 選択時点の面中心(mm)。faceId解決に失敗した際の幾何マッチングに使う。 */
+      center: [number, number, number];
+      /** 選択時点の面法線(単位ベクトル)。幾何マッチングに使う。 */
+      normal: [number, number, number];
+    };
 
 /** スケッチ内の2D図形。座標はスケッチ平面上のローカル座標(mm)。 */
 export type SketchEntity =
