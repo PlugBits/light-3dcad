@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
-import type { MeshData } from "../protocol/messages";
+import type { FaceGroup, MeshData } from "../protocol/messages";
 
 /**
  * Three.jsシーンの命令的なラッパー。React stateにシーンを持たせず、
@@ -13,6 +13,8 @@ export class CadViewer {
   private camera: THREE.PerspectiveCamera;
   private controls: OrbitControls;
   private mesh: THREE.Mesh | null = null;
+  private faceGroups: FaceGroup[] = [];
+  private raycaster = new THREE.Raycaster();
   private container: HTMLElement;
   private resizeObserver: ResizeObserver;
   private animationFrameId = 0;
@@ -51,6 +53,8 @@ export class CadViewer {
     grid.rotation.x = Math.PI / 2;
     this.scene.add(grid);
 
+    this.renderer.domElement.addEventListener("click", this.handleClick);
+
     this.resizeObserver = new ResizeObserver(() => this.handleResize());
     this.resizeObserver.observe(container);
 
@@ -71,6 +75,38 @@ export class CadViewer {
     this.renderer.setSize(clientWidth, clientHeight);
   }
 
+  private handleClick = (event: MouseEvent) => {
+    if (!this.mesh) return;
+
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const pointer = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+
+    this.raycaster.setFromCamera(pointer, this.camera);
+    const intersections = this.raycaster.intersectObject(this.mesh, false);
+    if (intersections.length === 0) return;
+
+    const triangleIndex = intersections[0].faceIndex;
+    if (triangleIndex == null) return;
+
+    // faceIndexは三角形番号。triangles配列上のオフセット(triangleIndex*3)が
+    // どのfaceGroup範囲に含まれるかを線形探索してB-Rep面IDを逆引きする。
+    const triangleOffset = triangleIndex * 3;
+    const group = this.faceGroups.find(
+      (g) => triangleOffset >= g.start && triangleOffset < g.start + g.count,
+    );
+
+    if (group) {
+      // eslint-disable-next-line no-console
+      console.log("[CadViewer] face clicked, faceId =", group.faceId);
+    } else {
+      // eslint-disable-next-line no-console
+      console.log("[CadViewer] face clicked, but no matching faceGroup for triangle", triangleIndex);
+    }
+  };
+
   setMesh(data: MeshData) {
     if (this.mesh) {
       this.scene.remove(this.mesh);
@@ -89,14 +125,28 @@ export class CadViewer {
     geometry.setAttribute("normal", new THREE.BufferAttribute(data.normals, 3));
     geometry.setIndex(new THREE.BufferAttribute(data.triangles, 1));
 
-    const material = new THREE.MeshStandardMaterial({ color: 0x5b8def, side: THREE.DoubleSide });
-    this.mesh = new THREE.Mesh(geometry, material);
+    // faceGroupsをBufferGeometryのgroupとして登録する(ハイライトは行わないが
+    // materialIndexを差し替えられるように単一マテリアルを複製しておく)。
+    geometry.clearGroups();
+    const baseColor = 0x5b8def;
+    const materials: THREE.Material[] = [];
+    data.faceGroups.forEach((group, materialIndex) => {
+      geometry.addGroup(group.start, group.count, materialIndex);
+      materials.push(
+        new THREE.MeshStandardMaterial({ color: baseColor, side: THREE.DoubleSide }),
+      );
+    });
+
+    this.faceGroups = data.faceGroups;
+
+    this.mesh = new THREE.Mesh(geometry, materials.length > 0 ? materials : new THREE.MeshStandardMaterial({ color: baseColor }));
     this.scene.add(this.mesh);
   }
 
   dispose() {
     cancelAnimationFrame(this.animationFrameId);
     this.resizeObserver.disconnect();
+    this.renderer.domElement.removeEventListener("click", this.handleClick);
     this.controls.dispose();
     if (this.mesh) {
       this.mesh.geometry.dispose();
