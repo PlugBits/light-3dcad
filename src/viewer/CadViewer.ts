@@ -37,6 +37,14 @@ const GRID_OPACITY = 0.45;
  * 埋まっていても選択時は視認できるようにするため)。
  */
 const SELECTED_SKETCH_RENDER_ORDER = 999;
+/**
+ * 描画モードの動的フィードバック(確定済みプレビュー線・ラバーバンド・軸ロックガイド・スナップ
+ * マーカー)のrenderOrder。原点マーカー・X/Y軸(SELECTED_SKETCH_RENDER_ORDER)と同じ値だと、
+ * depthTest:false同士の描画順がThree.js内部のソート(renderOrder同点時はmaterial単位)に委ねられ
+ * 不安定になり、赤いX軸等がユーザー操作中のフィードバックを隠してしまうことがあるため、
+ * 常に手前になるようそれより大きい値を使う。
+ */
+const DRAWING_FEEDBACK_RENDER_ORDER = SELECTED_SKETCH_RENDER_ORDER + 1;
 /** 描画モードのプレビュー線(確定済みセグメント+ラバーバンド)の色。選択中スケッチと同系色。 */
 const DRAWING_PREVIEW_COLOR = 0xff9800;
 /** 描画モードで「始点に戻ったとみなす」スクリーン距離(px)。 */
@@ -263,7 +271,8 @@ function buildSnapMarkerObjects(basis: PlaneBasis, kind: SnapKind, local: [numbe
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
     const loop = new THREE.LineLoop(geometry, material);
-    loop.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
+    // ガイド線・ラバーバンドより確実に手前に出す(スナップ確定は最も目立たせたいフィードバックのため)。
+    loop.renderOrder = DRAWING_FEEDBACK_RENDER_ORDER + 2;
     objects.push(loop);
   };
   const addSegment = (a: [number, number], b: [number, number]) => {
@@ -272,7 +281,7 @@ function buildSnapMarkerObjects(basis: PlaneBasis, kind: SnapKind, local: [numbe
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.Float32BufferAttribute([...wa, ...wb], 3));
     const seg = new THREE.Line(geometry, material);
-    seg.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
+    seg.renderOrder = DRAWING_FEEDBACK_RENDER_ORDER + 2;
     objects.push(seg);
   };
 
@@ -842,7 +851,7 @@ export class CadViewer {
       geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
       const material = new THREE.LineBasicMaterial({ color: DRAWING_PREVIEW_COLOR, depthTest: false });
       const line = new THREE.Line(geometry, material);
-      line.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
+      line.renderOrder = DRAWING_FEEDBACK_RENDER_ORDER;
       this.drawingGroup.add(line);
       this.drawingPreviewGeometries.push(geometry);
       this.drawingPreviewMaterials.push(material);
@@ -860,7 +869,8 @@ export class CadViewer {
         });
         const rubberLine = new THREE.Line(rubberGeometry, rubberMaterial);
         rubberLine.computeLineDistances();
-        rubberLine.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
+        // 軸ロックガイド線(同じDRAWING_FEEDBACK_RENDER_ORDER)より確実に手前に出す。
+        rubberLine.renderOrder = DRAWING_FEEDBACK_RENDER_ORDER + 1;
         this.drawingGroup.add(rubberLine);
         this.drawingPreviewGeometries.push(rubberGeometry);
         this.drawingPreviewMaterials.push(rubberMaterial);
@@ -878,14 +888,11 @@ export class CadViewer {
       const wb = planeLocalToWorld(basis, b[0], b[1]);
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute("position", new THREE.Float32BufferAttribute([...wa, ...wb], 3));
-      const material = new THREE.LineBasicMaterial({
-        color: AXIS_GUIDE_COLOR,
-        depthTest: false,
-        transparent: true,
-        opacity: 0.7,
-      });
+      // opaqueにする(transparent:trueにすると別の描画パスに回り、renderOrderで意図した
+      // 重なり順(ラバーバンドを上に)を制御できなくなるため)。
+      const material = new THREE.LineBasicMaterial({ color: AXIS_GUIDE_COLOR, depthTest: false });
       const guide = new THREE.Line(geometry, material);
-      guide.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
+      guide.renderOrder = DRAWING_FEEDBACK_RENDER_ORDER;
       this.drawingGroup.add(guide);
       this.drawingPreviewGeometries.push(geometry);
       this.drawingPreviewMaterials.push(material);
