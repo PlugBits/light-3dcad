@@ -168,8 +168,8 @@ export default function App() {
   function handleStartDrawing() {
     if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
     const sketchId = selectedFeature.id;
-    viewerRef.current.startPolygonDrawing(selectedSketchPlane, gridSnap, {
-      onComplete: (points) => {
+    viewerRef.current.startPolygonDrawing(selectedSketchPlane, gridSnap, selectedFeature.entities, {
+      onComplete: (points: [number, number][]) => {
         const entity = createPolygonEntity({ points });
         updateDocument((d) => addSketchEntity(d, sketchId, entity));
         setDrawingMode(false);
@@ -245,14 +245,17 @@ export default function App() {
         >
           {drawingMode ? "線描画キャンセル(Esc)" : "線描画"}
         </button>
-        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+        <label
+          style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}
+          title="頂点・中心・中点・原点・グリッドへのスナップ、水平/垂直の軸ロックをまとめてON/OFFします(1mmグリッド)"
+        >
           <input
             type="checkbox"
-            data-testid="toggle-grid-snap"
+            data-testid="toggle-snap"
             checked={gridSnap}
             onChange={(e) => handleGridSnapChange(e.target.checked)}
           />
-          1mmスナップ
+          スナップ
         </label>
         <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
           <input
@@ -263,6 +266,11 @@ export default function App() {
           />
           スケッチ表示
         </label>
+        {drawingMode && (
+          <span data-testid="drawing-shift-hint" style={{ fontSize: 11, opacity: 0.7 }}>
+            Shift押下中はスナップ・軸ロックを一時無効化(フリー入力)
+          </span>
+        )}
         <span data-testid="status-text" style={{ fontSize: 12, opacity: 0.8, marginLeft: "auto" }}>
           状態: {status}
           {status === "initializing" && " (WASM初期化中…)"}

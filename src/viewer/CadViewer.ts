@@ -3,6 +3,16 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
 import type { FeatureId, SketchEntity } from "../model/types";
 import type { FaceGroup, FaceInfo, MeshData } from "../protocol/messages";
+import {
+  collectSketchSnapCandidates,
+  ORIGIN_CANDIDATE,
+  pointsToVertexCandidates,
+  resolveDrawingPoint,
+  type AxisLockKind,
+  type ResolvedDrawingPoint,
+  type SnapCandidate,
+  type SnapKind,
+} from "../sketch/snapping";
 
 const BASE_COLOR = 0x5b8def;
 /** 選択面のハイライト色(通常より明るい黄系)。 */
@@ -31,6 +41,22 @@ const SELECTED_SKETCH_RENDER_ORDER = 999;
 const DRAWING_PREVIEW_COLOR = 0xff9800;
 /** 描画モードで「始点に戻ったとみなす」スクリーン距離(px)。 */
 const CLOSE_TO_START_PX = 10;
+/** 点スナップの許容距離(スクリーンpx)。描画モード中にローカルmmへ換算して使う。 */
+const SNAP_TOLERANCE_PX = 12;
+/** 描画モードのグリッドスナップ間隔(mm)。 */
+const DRAWING_GRID_SPACING = 1;
+/** X軸(赤系)/Y軸(緑系)の線色。原点マーカーの色。 */
+const AXIS_X_COLOR = 0xff5252;
+const AXIS_Y_COLOR = 0x66bb6a;
+const ORIGIN_MARKER_COLOR = 0xffffff;
+/** 原点マーカー(丸の半径・十字の腕の長さ、mm)。 */
+const ORIGIN_MARKER_RADIUS = 3;
+const ORIGIN_MARKER_CROSS_HALF = 5;
+/** 描画中の軸ロックガイド線・スナップ確定マーカーの色。 */
+const AXIS_GUIDE_COLOR = 0x29b6f6;
+const SNAP_MARKER_COLOR = 0x40c4ff;
+/** スナップ確定マーカーの半径・半辺長(mm)。 */
+const SNAP_MARKER_SIZE = 1.2;
 
 type Tuple3 = [number, number, number];
 
@@ -102,6 +128,17 @@ function toWorldPoint(entry: SketchOverlayEntry, u: number, v: number): Tuple3 {
   ];
 }
 
+/** 中心center・半径radiusの円をsegments分割のポリラインで近似したローカル2D頂点列を返す。 */
+function circleLocalPoints(center: [number, number], radius: number, segments: number): [number, number][] {
+  const [cx, cy] = center;
+  const points: [number, number][] = [];
+  for (let i = 0; i < segments; i += 1) {
+    const t = (i / segments) * Math.PI * 2;
+    points.push([cx + radius * Math.cos(t), cy + radius * Math.sin(t)]);
+  }
+  return points;
+}
+
 /** rectangle/circle/polygonエンティティのローカル2D頂点列(閉ループ)を返す。 */
 function entityLocalPoints(entity: SketchEntity): [number, number][] {
   if (entity.kind === "rectangle") {
@@ -116,13 +153,7 @@ function entityLocalPoints(entity: SketchEntity): [number, number][] {
     ];
   }
   if (entity.kind === "circle") {
-    const [cx, cy] = entity.center;
-    const points: [number, number][] = [];
-    for (let i = 0; i < CIRCLE_SEGMENTS; i += 1) {
-      const t = (i / CIRCLE_SEGMENTS) * Math.PI * 2;
-      points.push([cx + entity.radius * Math.cos(t), cy + entity.radius * Math.sin(t)]);
-    }
-    return points;
+    return circleLocalPoints(entity.center, entity.radius, CIRCLE_SEGMENTS);
   }
   // polygon: 頂点列そのものが閉ループ(LineLoopが最後→最初を自動的に結ぶ)。
   return entity.points;
@@ -160,6 +191,115 @@ function buildPlaneGrid(entry: SketchOverlayEntry, halfExtent: number): THREE.Li
 }
 
 /**
+ * 選択中スケッチの原点マーカー(丸+十字)とX軸(赤系)/Y軸(緑系)の線分を構築する
+ * (平面基底entry上、halfExtent範囲の長さ)。グリッドと同様、常にdepthTest:false+
+ * 高renderOrderでソリッドより手前に見せる。
+ */
+function buildOriginAxisMarkers(entry: SketchOverlayEntry, halfExtent: number): (THREE.Line | THREE.LineLoop)[] {
+  const objects: (THREE.Line | THREE.LineLoop)[] = [];
+
+  const addLine = (localPoints: [number, number][], color: number, closed: boolean) => {
+    const positions = new Float32Array(localPoints.length * 3);
+    localPoints.forEach(([u, v], i) => positions.set(toWorldPoint(entry, u, v), i * 3));
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    const material = new THREE.LineBasicMaterial({ color, depthTest: false });
+    const line = closed ? new THREE.LineLoop(geometry, material) : new THREE.Line(geometry, material);
+    line.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
+    objects.push(line);
+  };
+
+  addLine(
+    [
+      [-halfExtent, 0],
+      [halfExtent, 0],
+    ],
+    AXIS_X_COLOR,
+    false,
+  );
+  addLine(
+    [
+      [0, -halfExtent],
+      [0, halfExtent],
+    ],
+    AXIS_Y_COLOR,
+    false,
+  );
+  addLine(circleLocalPoints([0, 0], ORIGIN_MARKER_RADIUS, 20), ORIGIN_MARKER_COLOR, true);
+  addLine(
+    [
+      [-ORIGIN_MARKER_CROSS_HALF, 0],
+      [ORIGIN_MARKER_CROSS_HALF, 0],
+    ],
+    ORIGIN_MARKER_COLOR,
+    false,
+  );
+  addLine(
+    [
+      [0, -ORIGIN_MARKER_CROSS_HALF],
+      [0, ORIGIN_MARKER_CROSS_HALF],
+    ],
+    ORIGIN_MARKER_COLOR,
+    false,
+  );
+
+  return objects;
+}
+
+/**
+ * 描画モード中、スナップが確定した点に表示するマーカーを構築する(basis上のlocal座標)。
+ * 種別ごとに形を変える: vertex=四角、midpoint=三角、center=丸、origin=丸+十字。gridはマーカー無し(空配列)。
+ */
+function buildSnapMarkerObjects(basis: PlaneBasis, kind: SnapKind, local: [number, number]): (THREE.Line | THREE.LineLoop)[] {
+  if (kind === "grid") return [];
+  const objects: (THREE.Line | THREE.LineLoop)[] = [];
+  const material = new THREE.LineBasicMaterial({ color: SNAP_MARKER_COLOR, depthTest: false });
+  const s = SNAP_MARKER_SIZE;
+  const [cx, cy] = local;
+
+  const addLoop = (points: [number, number][]) => {
+    const positions = new Float32Array(points.length * 3);
+    points.forEach(([u, v], i) => positions.set(planeLocalToWorld(basis, u, v), i * 3));
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    const loop = new THREE.LineLoop(geometry, material);
+    loop.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
+    objects.push(loop);
+  };
+  const addSegment = (a: [number, number], b: [number, number]) => {
+    const wa = planeLocalToWorld(basis, a[0], a[1]);
+    const wb = planeLocalToWorld(basis, b[0], b[1]);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute([...wa, ...wb], 3));
+    const seg = new THREE.Line(geometry, material);
+    seg.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
+    objects.push(seg);
+  };
+
+  if (kind === "vertex") {
+    addLoop([
+      [cx - s, cy - s],
+      [cx + s, cy - s],
+      [cx + s, cy + s],
+      [cx - s, cy + s],
+    ]);
+  } else if (kind === "midpoint") {
+    addLoop([
+      [cx, cy + s],
+      [cx + s, cy - s],
+      [cx - s, cy - s],
+    ]);
+  } else if (kind === "center") {
+    addLoop(circleLocalPoints(local, s, 16));
+  } else if (kind === "origin") {
+    addLoop(circleLocalPoints(local, s, 16));
+    addSegment([cx - s * 1.5, cy], [cx + s * 1.5, cy]);
+    addSegment([cx, cy - s * 1.5], [cx, cy + s * 1.5]);
+  }
+  return objects;
+}
+
+/**
  * Three.jsシーンの命令的なラッパー。React stateにシーンを持たせず、
  * DOMコンテナに対して直接マウント/更新/破棄する。
  */
@@ -194,14 +334,19 @@ export class CadViewer {
   /** 線描画モード中かどうか。trueの間はクリックを面選択でなく頂点追加として扱う。 */
   private drawingActive = false;
   private drawingBasis: PlaneBasis | null = null;
+  /** 「スナップ」チェックボックスの状態(グリッド+点スナップ全体のON/OFF)。Shift押下中はこれとは別に一時無効化される。 */
   private drawingSnap = true;
+  /** 描画対象スケッチに既にある図形(vertex/center/midpoint候補の収集元)。startPolygonDrawing()で設定する。 */
+  private drawingEntities: SketchEntity[] = [];
   /** 確定済み頂点列(ローカル2D座標、スナップ適用済み)。 */
   private drawingPoints: [number, number][] = [];
   private drawingCallbacks: PolygonDrawingCallbacks | null = null;
-  /** プレビュー線(確定済みセグメント+ラバーバンド)を乗せるグループ。showSketchesトグルとは独立して常に表示する。 */
+  /** プレビュー線(確定済みセグメント+ラバーバンド+軸ロックガイド+スナップマーカー)を乗せるグループ。showSketchesトグルとは独立して常に表示する。 */
   private drawingGroup: THREE.Group;
   private drawingPreviewGeometries: THREE.BufferGeometry[] = [];
   private drawingPreviewMaterials: THREE.Material[] = [];
+  /** 描画モード中、カーソル付近に現在のローカル座標・長さ・角度を表示するHTMLオーバーレイ。 */
+  private coordOverlayEl: HTMLDivElement;
 
   constructor(container: HTMLElement, onFaceSelect?: (face: FaceInfo | null) => void) {
     this.container = container;
@@ -243,6 +388,29 @@ export class CadViewer {
 
     this.drawingGroup = new THREE.Group();
     this.scene.add(this.drawingGroup);
+
+    // コンテナを絶対配置の基準にする(座標オーバーレイをcanvas上にpxで重ねるため)。
+    // containerは既存レイアウト上は幅・高さ100%のプレーンなdivであり、position指定を持たない
+    // 想定なのでrelativeにしても既存の見た目には影響しない。
+    if (getComputedStyle(container).position === "static") {
+      container.style.position = "relative";
+    }
+    this.coordOverlayEl = document.createElement("div");
+    this.coordOverlayEl.setAttribute("data-testid", "drawing-coord-overlay");
+    Object.assign(this.coordOverlayEl.style, {
+      position: "absolute",
+      pointerEvents: "none",
+      background: "rgba(0, 0, 0, 0.75)",
+      color: "#fff",
+      padding: "2px 6px",
+      borderRadius: "3px",
+      fontSize: "11px",
+      fontFamily: "monospace",
+      whiteSpace: "nowrap",
+      display: "none",
+      zIndex: "10",
+    });
+    container.appendChild(this.coordOverlayEl);
 
     this.renderer.domElement.addEventListener("click", this.handleClick);
     this.renderer.domElement.addEventListener("mousemove", this.handleDrawingMouseMove);
@@ -465,6 +633,13 @@ export class CadViewer {
         this.sketchOverlayMaterials.push(grid.material as THREE.Material);
         this.sketchOverlayGroup.add(grid);
         this.sketchGridBuilt = true;
+
+        const axisMarkers = buildOriginAxisMarkers(entry, this.meshHalfExtent * 1.2);
+        axisMarkers.forEach((obj) => {
+          this.sketchOverlayGeometries.push(obj.geometry as THREE.BufferGeometry);
+          this.sketchOverlayMaterials.push(obj.material as THREE.Material);
+          this.sketchOverlayGroup.add(obj);
+        });
       }
     }
   }
@@ -490,20 +665,22 @@ export class CadViewer {
   /**
    * 指定平面上での線描画モードを開始する。以後のクリックは面選択でなく頂点追加として扱われ、
    * カーソルはcrosshairになる。基底(basis)はWorkerが返したsketchPlanesの値をそのまま渡すこと
-   * (UI側で独自に再計算しない)。
+   * (UI側で独自に再計算しない)。existingEntitiesは対象スケッチに既にある図形で、
+   * 点スナップ候補(頂点・中心・中点)の収集元として使う。
    */
-  startPolygonDrawing(basis: PlaneBasis, snap: boolean, callbacks: PolygonDrawingCallbacks) {
+  startPolygonDrawing(basis: PlaneBasis, snap: boolean, existingEntities: SketchEntity[], callbacks: PolygonDrawingCallbacks) {
     this.cancelPolygonDrawing();
     this.clearSelection();
     this.drawingActive = true;
     this.drawingBasis = basis;
     this.drawingSnap = snap;
+    this.drawingEntities = existingEntities;
     this.drawingPoints = [];
     this.drawingCallbacks = callbacks;
     this.renderer.domElement.style.cursor = "crosshair";
   }
 
-  /** 描画モード中のグリッドスナップ有効/無効をリアルタイムに切り替える。 */
+  /** 描画モード中のスナップ(グリッド+点スナップ)有効/無効をリアルタイムに切り替える。軸ロックはこれと独立。 */
   setPolygonDrawingSnap(enabled: boolean) {
     this.drawingSnap = enabled;
   }
@@ -533,10 +710,12 @@ export class CadViewer {
   private exitDrawingState() {
     this.drawingActive = false;
     this.drawingBasis = null;
+    this.drawingEntities = [];
     this.drawingPoints = [];
     this.drawingCallbacks = null;
     this.renderer.domElement.style.cursor = "";
     this.clearDrawingPreview();
+    this.coordOverlayEl.style.display = "none";
   }
 
   /** 描画モード中のクリックをレイキャストしてスケッチ平面上のローカル2D座標に変換し、頂点を追加する。 */
@@ -547,7 +726,7 @@ export class CadViewer {
     const px = event.clientX - rect.left;
     const py = event.clientY - rect.top;
 
-    // 始点付近(スクリーン距離10px程度以内)のクリックは閉じて確定する扱いにする。
+    // 始点付近(スクリーン距離10px程度以内)のクリックは閉じて確定する扱いにする(スナップ判定より優先)。
     if (this.drawingPoints.length >= 3) {
       const startWorld = planeLocalToWorld(basis, this.drawingPoints[0][0], this.drawingPoints[0][1]);
       const startScreen = this.projectPoint(startWorld);
@@ -564,16 +743,13 @@ export class CadViewer {
     const hit = this.raycastDrawingPlane(basis, px, py, rect);
     if (!hit) return;
 
-    let [u, v] = planeWorldToLocal(basis, hit);
-    if (this.drawingSnap) {
-      u = Math.round(u);
-      v = Math.round(v);
-    }
-    this.drawingPoints.push([u, v]);
+    const resolved = this.resolveDrawingCursor(basis, hit, event.shiftKey);
+    this.drawingPoints.push(resolved.point);
     this.updateDrawingPreview();
+    this.updateCoordOverlay(px, py, resolved.point);
   }
 
-  /** マウス移動時、描画モード中であればラバーバンド(確定済み最終点→カーソル位置)を更新する。 */
+  /** マウス移動時、描画モード中であればスナップ・軸ロックを適用したラバーバンド・ガイド・座標表示を更新する。 */
   private handleDrawingMouseMove = (event: MouseEvent) => {
     if (!this.drawingActive || !this.drawingBasis) return;
     const basis = this.drawingBasis;
@@ -584,15 +760,57 @@ export class CadViewer {
     const hit = this.raycastDrawingPlane(basis, px, py, rect);
     if (!hit) {
       this.updateDrawingPreview();
+      this.coordOverlayEl.style.display = "none";
       return;
     }
-    let [u, v] = planeWorldToLocal(basis, hit);
-    if (this.drawingSnap) {
-      u = Math.round(u);
-      v = Math.round(v);
-    }
-    this.updateDrawingPreview([u, v]);
+    const resolved = this.resolveDrawingCursor(basis, hit, event.shiftKey);
+    this.updateDrawingPreview({ local: resolved.point, snapKind: resolved.snapKind, axis: resolved.axis });
+    this.updateCoordOverlay(px, py, resolved.point);
   };
+
+  /**
+   * カーソルのワールド交点(hitWorld)を、スナップ・軸ロックを適用したスケッチ平面ローカル2D座標に解決する。
+   * Shift押下中(shiftHeld)は点スナップ・グリッドスナップ・軸ロックのすべてを一時無効化する
+   * (完全フリー入力)。「スナップ」チェックボックス(drawingSnap)は点+グリッドスナップのみを
+   * 制御し、軸ロックはチェックボックスと独立してShift以外では常に有効。
+   */
+  private resolveDrawingCursor(basis: PlaneBasis, hitWorld: Tuple3, shiftHeld: boolean): ResolvedDrawingPoint {
+    const cursor = planeWorldToLocal(basis, hitWorld);
+    const snapEnabled = this.drawingSnap && !shiftHeld;
+    const axisLockEnabled = !shiftHeld;
+    const tolerance = this.pxToMm(SNAP_TOLERANCE_PX, hitWorld);
+    const candidates: SnapCandidate[] = snapEnabled
+      ? [
+          ...collectSketchSnapCandidates(this.drawingEntities),
+          ORIGIN_CANDIDATE,
+          ...pointsToVertexCandidates(this.drawingPoints),
+        ]
+      : [];
+    const lastPoint = this.drawingPoints.length > 0 ? this.drawingPoints[this.drawingPoints.length - 1] : null;
+    return resolveDrawingPoint({
+      cursor,
+      lastPoint,
+      candidates,
+      gridSpacing: snapEnabled ? DRAWING_GRID_SPACING : 0,
+      tolerance,
+      axisLockEnabled,
+    });
+  }
+
+  /**
+   * canvas内スクリーンpx距離を、指定ワールド点(hitWorld)におけるローカルmm距離に概算換算する。
+   * パースペクティブカメラの垂直画角とカメラ〜hitWorld間の距離から、その距離での画面高さ(mm)を求め、
+   * canvasの高さ(px)で割ってmm/px比を得る(視線とほぼ直交する平面上での近似。スナップ判定用途では
+   * 厳密なピクセル一致は不要なため、この近似で十分)。
+   */
+  private pxToMm(px: number, hitWorld: Tuple3): number {
+    const hit = new THREE.Vector3(hitWorld[0], hitWorld[1], hitWorld[2]);
+    const dist = this.camera.position.distanceTo(hit);
+    const vFovRad = (this.camera.fov * Math.PI) / 180;
+    const worldHeightAtDist = 2 * Math.tan(vFovRad / 2) * dist;
+    const heightPx = Math.max(this.container.clientHeight, 1);
+    return px * (worldHeightAtDist / heightPx);
+  }
 
   /** canvas内ピクセル座標(px, py)から描画平面(basis)へのレイキャスト交点(ワールド座標)を返す。 */
   private raycastDrawingPlane(basis: PlaneBasis, px: number, py: number, rect: DOMRect): Tuple3 | null {
@@ -607,45 +825,97 @@ export class CadViewer {
     return [hit.x, hit.y, hit.z];
   }
 
-  /** プレビュー(確定済みセグメント+ラバーバンド)を作り直す。hoverLocalを渡すとラバーバンドも描く。 */
-  private updateDrawingPreview(hoverLocal?: [number, number]) {
+  /**
+   * プレビュー(確定済みセグメント+ラバーバンド+軸ロックガイド+スナップマーカー)を作り直す。
+   * hoverを渡すと、ラバーバンド・(軸ロック中なら)ガイド線・(スナップ中なら)確定候補マーカーも描く。
+   */
+  private updateDrawingPreview(hover?: { local: [number, number]; snapKind: SnapKind | null; axis: AxisLockKind }) {
     this.clearDrawingPreview();
-    if (!this.drawingBasis || this.drawingPoints.length === 0) return;
+    if (!this.drawingBasis) return;
     const basis = this.drawingBasis;
 
-    const worldPts = this.drawingPoints.map(([u, v]) => planeLocalToWorld(basis, u, v));
-    const positions = new Float32Array(worldPts.length * 3);
-    worldPts.forEach((p, i) => positions.set(p, i * 3));
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-    const material = new THREE.LineBasicMaterial({ color: DRAWING_PREVIEW_COLOR, depthTest: false });
-    const line = new THREE.Line(geometry, material);
-    line.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
-    this.drawingGroup.add(line);
-    this.drawingPreviewGeometries.push(geometry);
-    this.drawingPreviewMaterials.push(material);
+    if (this.drawingPoints.length > 0) {
+      const worldPts = this.drawingPoints.map(([u, v]) => planeLocalToWorld(basis, u, v));
+      const positions = new Float32Array(worldPts.length * 3);
+      worldPts.forEach((p, i) => positions.set(p, i * 3));
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+      const material = new THREE.LineBasicMaterial({ color: DRAWING_PREVIEW_COLOR, depthTest: false });
+      const line = new THREE.Line(geometry, material);
+      line.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
+      this.drawingGroup.add(line);
+      this.drawingPreviewGeometries.push(geometry);
+      this.drawingPreviewMaterials.push(material);
 
-    if (hoverLocal) {
-      const last = worldPts[worldPts.length - 1];
-      const hoverWorld = planeLocalToWorld(basis, hoverLocal[0], hoverLocal[1]);
-      const rubberGeometry = new THREE.BufferGeometry();
-      rubberGeometry.setAttribute(
-        "position",
-        new THREE.Float32BufferAttribute([...last, ...hoverWorld], 3),
-      );
-      const rubberMaterial = new THREE.LineDashedMaterial({
-        color: DRAWING_PREVIEW_COLOR,
-        dashSize: 2,
-        gapSize: 1,
-        depthTest: false,
-      });
-      const rubberLine = new THREE.Line(rubberGeometry, rubberMaterial);
-      rubberLine.computeLineDistances();
-      rubberLine.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
-      this.drawingGroup.add(rubberLine);
-      this.drawingPreviewGeometries.push(rubberGeometry);
-      this.drawingPreviewMaterials.push(rubberMaterial);
+      if (hover) {
+        const last = worldPts[worldPts.length - 1];
+        const hoverWorld = planeLocalToWorld(basis, hover.local[0], hover.local[1]);
+        const rubberGeometry = new THREE.BufferGeometry();
+        rubberGeometry.setAttribute("position", new THREE.Float32BufferAttribute([...last, ...hoverWorld], 3));
+        const rubberMaterial = new THREE.LineDashedMaterial({
+          color: DRAWING_PREVIEW_COLOR,
+          dashSize: 2,
+          gapSize: 1,
+          depthTest: false,
+        });
+        const rubberLine = new THREE.Line(rubberGeometry, rubberMaterial);
+        rubberLine.computeLineDistances();
+        rubberLine.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
+        this.drawingGroup.add(rubberLine);
+        this.drawingPreviewGeometries.push(rubberGeometry);
+        this.drawingPreviewMaterials.push(rubberMaterial);
+      }
     }
+
+    if (hover?.axis && this.drawingPoints.length > 0) {
+      const from = this.drawingPoints[this.drawingPoints.length - 1];
+      const extent = Math.max(this.meshHalfExtent * 1.5, 50);
+      const a: [number, number] =
+        hover.axis === "horizontal" ? [from[0] - extent, from[1]] : [from[0], from[1] - extent];
+      const b: [number, number] =
+        hover.axis === "horizontal" ? [from[0] + extent, from[1]] : [from[0], from[1] + extent];
+      const wa = planeLocalToWorld(basis, a[0], a[1]);
+      const wb = planeLocalToWorld(basis, b[0], b[1]);
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute([...wa, ...wb], 3));
+      const material = new THREE.LineBasicMaterial({
+        color: AXIS_GUIDE_COLOR,
+        depthTest: false,
+        transparent: true,
+        opacity: 0.7,
+      });
+      const guide = new THREE.Line(geometry, material);
+      guide.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
+      this.drawingGroup.add(guide);
+      this.drawingPreviewGeometries.push(geometry);
+      this.drawingPreviewMaterials.push(material);
+    }
+
+    if (hover?.snapKind) {
+      const markers = buildSnapMarkerObjects(basis, hover.snapKind, hover.local);
+      markers.forEach((obj) => {
+        this.drawingGroup.add(obj);
+        this.drawingPreviewGeometries.push(obj.geometry as THREE.BufferGeometry);
+        this.drawingPreviewMaterials.push(obj.material as THREE.Material);
+      });
+    }
+  }
+
+  /** カーソル付近に現在のローカル座標(2点目以降は直前点からの長さ・角度も)を表示する。 */
+  private updateCoordOverlay(px: number, py: number, local: [number, number]) {
+    const [u, v] = local;
+    let text = `(${u.toFixed(1)}, ${v.toFixed(1)})`;
+    if (this.drawingPoints.length > 0) {
+      const [lu, lv] = this.drawingPoints[this.drawingPoints.length - 1];
+      const len = Math.hypot(u - lu, v - lv);
+      let angleDeg = (Math.atan2(v - lv, u - lu) * 180) / Math.PI;
+      if (angleDeg < 0) angleDeg += 360;
+      text += ` L=${len.toFixed(1)}mm ∠${angleDeg.toFixed(0)}°`;
+    }
+    this.coordOverlayEl.textContent = text;
+    this.coordOverlayEl.style.left = `${px + 14}px`;
+    this.coordOverlayEl.style.top = `${py + 14}px`;
+    this.coordOverlayEl.style.display = "block";
   }
 
   /** プレビュー線をsceneから取り除き、リソースを解放する。 */
@@ -696,6 +966,7 @@ export class CadViewer {
     if (import.meta.env.DEV && window.__cadViewerDebug) {
       delete window.__cadViewerDebug;
     }
+    this.container.removeChild(this.coordOverlayEl);
     this.renderer.dispose();
     this.container.removeChild(this.renderer.domElement);
   }
