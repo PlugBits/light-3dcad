@@ -70,6 +70,11 @@ export default function App() {
   const selectedFeature = selectedFeatureId ? findFeature(doc, selectedFeatureId) : undefined;
 
   const busy = status === "initializing" || status === "evaluating";
+  // WASM初期化は"evaluate"リクエストの中で行われる(initialize()参照)ため、
+  // 初回ロード中は mesh がまだ無い状態で status が "evaluating" になる期間が長く続く。
+  // そのためオーバーレイは「初回のmesh取得が完了するまで」を基準に表示する
+  // (status==="initializing"のみだと、実際にWASMを読み込んでいる間表示されない)。
+  const showInitOverlay = mesh === null && (status === "initializing" || status === "evaluating");
 
   function handleDelete(featureId: string) {
     const dependentIds = getDependentFeatureIds(doc, featureId);
@@ -225,7 +230,7 @@ export default function App() {
 
         <main style={{ flex: 1, position: "relative" }}>
           <div ref={viewerContainerRef} data-testid="viewer-container" style={{ width: "100%", height: "100%" }} />
-          {status === "initializing" && (
+          {showInitOverlay && (
             <div
               data-testid="init-overlay"
               style={{
@@ -256,7 +261,7 @@ export default function App() {
               <span>CADカーネルを初期化中…(初回は数秒〜数十秒かかります)</span>
             </div>
           )}
-          {status === "evaluating" && (
+          {!showInitOverlay && status === "evaluating" && (
             <div
               data-testid="evaluating-overlay"
               style={{
