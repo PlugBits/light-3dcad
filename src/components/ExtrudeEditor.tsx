@@ -12,6 +12,12 @@ export function ExtrudeEditor({ extrude, doc }: { extrude: ExtrudeFeature; doc: 
     updateDocument((d) => patchExtrudeFeature(d, extrude.id, p));
   }
 
+  function toOperation(value: string): ExtrudeFeature["operation"] {
+    if (value === "cut") return "cut";
+    if (value === "add") return "add";
+    return "newBody";
+  }
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <h3 style={{ margin: 0, fontSize: 14 }}>押し出し編集</h3>
@@ -67,10 +73,11 @@ export function ExtrudeEditor({ extrude, doc }: { extrude: ExtrudeFeature; doc: 
         <select
           value={extrude.operation}
           data-testid="extrude-operation-select"
-          onChange={(e) => patch({ operation: e.target.value === "cut" ? "cut" : "newBody" })}
+          onChange={(e) => patch({ operation: toOperation(e.target.value) })}
         >
           <option value="newBody">New Body</option>
           <option value="cut">Cut</option>
+          <option value="add">Add</option>
         </select>
       </label>
     </div>
