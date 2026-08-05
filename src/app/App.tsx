@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
 import { ExtrudeEditor } from "../components/ExtrudeEditor";
 import { FeatureTree } from "../components/FeatureTree";
@@ -6,7 +6,7 @@ import { SketchEditor } from "../components/SketchEditor";
 import { downloadStl } from "../export/downloadStl";
 import { findFeature, getDependentFeatureIds } from "../model/document";
 import { useCadStore } from "../state/store";
-import { CadViewer } from "../viewer/CadViewer";
+import { CadViewer, type SketchOverlayEntry } from "../viewer/CadViewer";
 
 export default function App() {
   const viewerContainerRef = useRef<HTMLDivElement | null>(null);
@@ -16,10 +16,12 @@ export default function App() {
   const status = useCadStore((s) => s.status);
   const mesh = useCadStore((s) => s.mesh);
   const faceInfo = useCadStore((s) => s.faceInfo);
+  const sketchPlanes = useCadStore((s) => s.sketchPlanes);
   const errorMessage = useCadStore((s) => s.errorMessage);
   const errorFeatureId = useCadStore((s) => s.errorFeatureId);
   const selectedFeatureId = useCadStore((s) => s.selectedFeatureId);
   const selectedFace = useCadStore((s) => s.selectedFace);
+  const showSketches = useCadStore((s) => s.showSketches);
   const exporting = useCadStore((s) => s.exporting);
   const exportError = useCadStore((s) => s.exportError);
   const initialize = useCadStore((s) => s.initialize);
@@ -30,6 +32,7 @@ export default function App() {
   const addFaceSketch = useCadStore((s) => s.addFaceSketch);
   const removeFeature = useCadStore((s) => s.removeFeature);
   const exportStl = useCadStore((s) => s.exportStl);
+  const setShowSketches = useCadStore((s) => s.setShowSketches);
 
   // Workerを起動し、初期ドキュメントの評価を1回だけ要求する。
   useEffect(() => {
@@ -57,6 +60,33 @@ export default function App() {
       viewerRef.current?.setMesh(mesh, faceInfo);
     }
   }, [mesh, faceInfo]);
+
+  // doc(スケッチのentities)とsketchPlanes(Workerが解決した平面基底)を突き合わせて
+  // ビューア描画用のオーバーレイ入力を作る。平面解決に失敗したスケッチ(sketchPlanesに無い)は
+  // 描画対象から外れる(エラーは既存のeval-errorで表示される)。
+  const sketchOverlays = useMemo<SketchOverlayEntry[]>(() => {
+    const planeById = new Map(sketchPlanes.map((p) => [p.sketchId, p]));
+    const overlays: SketchOverlayEntry[] = [];
+    for (const feature of doc.features) {
+      if (feature.type !== "sketch") continue;
+      const plane = planeById.get(feature.id);
+      if (!plane) continue;
+      overlays.push({
+        sketchId: feature.id,
+        entities: feature.entities,
+        origin: plane.origin,
+        xDir: plane.xDir,
+        yDir: plane.yDir,
+        normal: plane.normal,
+      });
+    }
+    return overlays;
+  }, [doc, sketchPlanes]);
+
+  // オーバーレイ入力・選択スケッチ・表示トグルが変わるたびにビューアへ反映する。
+  useEffect(() => {
+    viewerRef.current?.setSketchOverlay(sketchOverlays, selectedFeatureId, showSketches);
+  }, [sketchOverlays, selectedFeatureId, showSketches]);
 
   // 選択中の面が再評価後のfaceInfoに存在しなくなった場合(トポロジカルネーミングのずれ等)は
   // 選択状態をクリアする。
@@ -140,6 +170,15 @@ export default function App() {
         <button type="button" data-testid="btn-download-stl" onClick={handleDownloadStl} disabled={busy || exporting}>
           {exporting ? "STL出力中…" : "STLダウンロード"}
         </button>
+        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+          <input
+            type="checkbox"
+            data-testid="toggle-sketch-visibility"
+            checked={showSketches}
+            onChange={(e) => setShowSketches(e.target.checked)}
+          />
+          スケッチ表示
+        </label>
         <span data-testid="status-text" style={{ fontSize: 12, opacity: 0.8, marginLeft: "auto" }}>
           状態: {status}
           {status === "initializing" && " (WASM初期化中…)"}

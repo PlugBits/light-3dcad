@@ -157,5 +157,5 @@ Phase 0〜5すべて完了。
 Phase 0〜5(上記)の完了後に追加されたフェーズ。
 
 - **Phase 6 – 押し出しAdd操作**: 完了。`ExtrudeFeature.operation` に `"add"` を追加し(New Body / Cut / Add の3択)、モデル層のバリデーションを対応させた。evaluatorにCutと対称なfuse分岐(`body.fuse(tool)`)を実装し、既存ボディが無い状態でのAddはfeatureId付きエラーになる。押し出し編集UI(`ExtrudeEditor`)の操作セレクトに「Add」を追加。Vitestに、面上スケッチ+円でのAdd評価(バウンディングボックス高さが箱20+ボス10=30に増加すること)・ボディ無しAddのエラー・モデル層のoperationバリデーションのテストを追加。E2Eに、上面への円スケッチ→Add(方向+1、距離10)でエラーなく再評価が完了する(ready復帰)シナリオを1本追加。
-- **Phase 7 – スケッチ線の可視化**(未着手): Workerが各スケッチの解決済み平面(原点・X軸・Y軸・法線)を評価結果として返し、ビューアがスケッチの矩形・円を3D線としてThree.js上に描画する。選択中スケッチの強調表示と、スケッチ平面上のグリッド表示を行う。
+- **Phase 7 – スケッチ線の可視化**: 完了。evaluate応答に`sketchPlanes`(各スケッチの解決済みorigin/xDir/yDir/normal。押し出しに使われていないスケッチも含む)を追加し、evaluatorが押し出し用Planeの構築と同一の計算(facePlaneRawXDir/facePlaneBasis)を共有することで線と実形状のずれを防いだ。CadViewerがスケッチの矩形・円を3D線(LineLoop、円は64分割)として描画し、選択中スケッチはオレンジ強調+平面グリッド(10mm間隔)を表示する。表示トグル(デフォルトON)をツールバーに追加し、E2Eからの検証用に開発ビルド限定の`window.__cadViewerDebug`フックを設けた。
 - **Phase 8 – 2D CAD風線描画スケッチ**(未着手): 閉じた点列を持つpolygonエンティティを`model/`に追加し、クリックで頂点を追加していき、始点に戻ると閉じて確定する描画モードをUIに実装する。1mm単位のグリッドスナップと、頂点座標を数値入力で編集する機能を含む。
