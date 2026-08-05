@@ -106,6 +106,15 @@ describe("evaluateDocument (WASM統合)", () => {
     const faceIds = new Set(mesh.faceGroups.map((g) => g.faceId));
     expect(faceIds.size).toBe(6);
 
+    // XYスケッチの解決済み平面はワールド原点・単位XY基底になる。
+    expect(result.sketchPlanes).toHaveLength(1);
+    const [plane] = result.sketchPlanes;
+    expect(plane.sketchId).toBe(sketch.id);
+    expect(plane.origin).toEqual([0, 0, 0]);
+    expect(plane.xDir).toEqual([1, 0, 0]);
+    expect(plane.yDir).toEqual([0, 1, 0]);
+    expect(plane.normal).toEqual([0, 0, 1]);
+
     result.shape.delete();
   });
 
@@ -384,6 +393,17 @@ describe("evaluateDocument (WASM統合): スケッチ・オン・フェイス", 
     if (!result.ok) return;
     const faceCount = countFaces(result.shape);
     expect(faceCount).toBeGreaterThan(boxFaceCount);
+
+    // 箱上面へのfaceスケッチの解決済み平面はorigin≈(0,0,20)/normal≈(0,0,1)になる。
+    const facePlane = result.sketchPlanes.find((p) => p.sketchId === faceSketch.id);
+    expect(facePlane).toBeDefined();
+    expect(facePlane?.origin[0]).toBeCloseTo(0, 6);
+    expect(facePlane?.origin[1]).toBeCloseTo(0, 6);
+    expect(facePlane?.origin[2]).toBeCloseTo(20, 6);
+    expect(facePlane?.normal[0]).toBeCloseTo(0, 6);
+    expect(facePlane?.normal[1]).toBeCloseTo(0, 6);
+    expect(facePlane?.normal[2]).toBeCloseTo(1, 6);
+
     result.shape.delete();
   });
 
@@ -489,6 +509,11 @@ describe("evaluateDocument (WASM統合): スケッチ・オン・フェイス", 
     expect(bbox.depth).toBeCloseTo(30, 3);
     bbox.delete();
 
+    // sketchPlanesも幾何マッチング後の新しい上面(z=30)に追従している。
+    const facePlane = result.sketchPlanes.find((p) => p.sketchId === faceSketch.id);
+    expect(facePlane).toBeDefined();
+    expect(facePlane?.origin[2]).toBeCloseTo(30, 3);
+
     result.shape.delete();
   });
 
@@ -536,5 +561,44 @@ describe("evaluateDocument (WASM統合): スケッチ・オン・フェイス", 
     if (result.ok) return;
     expect(result.featureId).toBe(faceSketch.id);
     expect(result.message).toContain("面を選択し直してください");
+    // 面解決に失敗した場合はエラー応答(ok:false)のみが返り、sketchPlanesは含まれない
+    // (EvaluationFailureにはsketchPlanesフィールド自体が存在しない)。
+    expect("sketchPlanes" in result).toBe(false);
+  });
+
+  it("押し出しに使われていないスケッチもsketchPlanesに含まれる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const rect = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: doc1, feature: boxSketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+    });
+    const { doc: doc2 } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: boxSketch.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    // Extrudeで使われない、独立した(未使用の)円スケッチを追加する。
+    const circle = createCircleEntity({ radius: 5, center: [10, 10] });
+    const { doc, feature: unusedSketch } = addSketchFeature(doc2, {
+      name: "UnusedSketch",
+      plane: { kind: "world", plane: "XY" },
+      entities: [circle],
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    expect(result.sketchPlanes).toHaveLength(2);
+    const ids = result.sketchPlanes.map((p) => p.sketchId).sort();
+    expect(ids).toEqual([boxSketch.id, unusedSketch.id].sort());
+
+    result.shape.delete();
   });
 });

@@ -91,12 +91,12 @@ function evaluateAndRespond(requestId: string, doc: CadDocument, quality: MeshQu
     return;
   }
 
-  const { shape } = result;
+  const { shape, sketchPlanes } = result;
   try {
     const mesh = toMeshData(shape, quality);
     const faceInfo = computeFaceInfo(shape);
     postResponse(
-      { kind: "evaluated", requestId, mesh, faceInfo },
+      { kind: "evaluated", requestId, mesh, faceInfo, sketchPlanes },
       [mesh.positions.buffer, mesh.normals.buffer, mesh.indices.buffer, mesh.edges.buffer],
     );
   } finally {

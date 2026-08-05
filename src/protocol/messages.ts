@@ -46,10 +46,25 @@ export interface FaceInfo {
   isPlanar: boolean;
 }
 
+/**
+ * 解決済みのスケッチ平面基底(ワールド座標系)。
+ * origin/xDir/yDir/normal はevaluatorがスケッチのDrawingを乗せる際に実際に使う
+ * Plane(replicad)の基底と厳密に一致する(evaluator.tsのbuildFacePlane/buildFacePlaneBasisを参照)。
+ * スケッチのローカル2D座標 (u, v) のワールド座標は origin + u*xDir + v*yDir。
+ * 面参照の解決に失敗したスケッチはこの配列に含まれない。
+ */
+export interface SketchPlaneInfo {
+  sketchId: FeatureId;
+  origin: [number, number, number];
+  xDir: [number, number, number];
+  yDir: [number, number, number];
+  normal: [number, number, number];
+}
+
 /** Worker -> UI のレスポンス */
 export type WorkerResponse =
   | { kind: "ready"; requestId: string }
-  | { kind: "evaluated"; requestId: string; mesh: MeshData; faceInfo: FaceInfo[] }
+  | { kind: "evaluated"; requestId: string; mesh: MeshData; faceInfo: FaceInfo[]; sketchPlanes: SketchPlaneInfo[] }
   | { kind: "stl"; requestId: string; blob: Blob }
   | { kind: "error"; requestId: string; featureId?: FeatureId; message: string }
   | { kind: "progress"; requestId: string; message: string };

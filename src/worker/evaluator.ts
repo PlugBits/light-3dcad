@@ -14,10 +14,18 @@
 import { Plane, drawCircle, drawRectangle, type Drawing, type Face, type Shape3D } from "replicad";
 
 import type { CadDocument, FeatureId, SketchEntity, SketchFeature } from "../model/types";
+import type { SketchPlaneInfo } from "../protocol/messages";
 
 export interface EvaluationSuccess {
   ok: true;
   shape: Shape3D;
+  /**
+   * 各スケッチフィーチャーの解決済み平面基底(ワールド座標系)。
+   * doc.features中の全スケッチが対象(押し出しに使われていないスケッチも含む)。
+   * face参照スケッチの解決に失敗した場合は評価全体がエラーになるため、
+   * この配列が返る時点(ok:true)では全スケッチが解決済みである。
+   */
+  sketchPlanes: SketchPlaneInfo[];
 }
 
 export interface EvaluationFailure {
@@ -50,6 +58,26 @@ function distance(a: Tuple3, b: Tuple3): number {
 function cross(a: Tuple3, b: Tuple3): Tuple3 {
   return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 }
+function normalize(v: Tuple3): Tuple3 {
+  const len = length(v);
+  if (len < 1e-12) return v;
+  return [v[0] / len, v[1] / len, v[2] / len];
+}
+
+interface PlaneBasis {
+  origin: Tuple3;
+  xDir: Tuple3;
+  yDir: Tuple3;
+  normal: Tuple3;
+}
+
+/** world XY平面の解決済み基底(sketchPlanes用)。replicadの名前付き平面"XY"の定義と一致させる。 */
+const WORLD_XY_PLANE: PlaneBasis = {
+  origin: [0, 0, 0],
+  xDir: [1, 0, 0],
+  yDir: [0, 1, 0],
+  normal: [0, 0, 1],
+};
 
 /** sketch内のentities(rectangle/circle)を1つのDrawingに合成する。 */
 function buildDrawing(entities: SketchEntity[]): Drawing {
@@ -130,17 +158,39 @@ function resolveFaceGeometry(
 }
 
 /**
- * 面の中心・法線から、決定的なxDirを持つスケッチ平面(Plane)を構築する。
+ * 面の法線から、決定的なxDir(未正規化)を求める。
  * xDir は 法線とグローバルZの外積(normal × Z)。ほぼ平行(Z軸自体を向く面)な場合はグローバルXにフォールバックする。
+ * buildFacePlane() と facePlaneBasis() の両方がこの関数を使うことで、
+ * evaluatorが実際に押し出しに使うPlaneの基底とsketchPlanes応答の基底を一致させる。
+ */
+function facePlaneRawXDir(normal: Tuple3): Tuple3 {
+  const GLOBAL_Z: Tuple3 = [0, 0, 1];
+  const xDir = cross(normal, GLOBAL_Z);
+  if (length(xDir) < 1e-8) {
+    return [1, 0, 0];
+  }
+  return xDir;
+}
+
+/**
+ * 面の中心・法線から、決定的なxDirを持つスケッチ平面(Plane)を構築する。
  * 呼び出し側で使用後に plane.delete() すること。
  */
 function buildFacePlane(center: Tuple3, normal: Tuple3): Plane {
-  const GLOBAL_Z: Tuple3 = [0, 0, 1];
-  let xDir = cross(normal, GLOBAL_Z);
-  if (length(xDir) < 1e-8) {
-    xDir = [1, 0, 0];
-  }
-  return new Plane(center, xDir, normal);
+  return new Plane(center, facePlaneRawXDir(normal), normal);
+}
+
+/**
+ * buildFacePlane()が構築するreplicad Planeと同一の基底を、プレーンなタプルとして計算する
+ * (sketchPlanes応答用。Plane自身はOCCTオブジェクトを保持するため使い回さない)。
+ * replicadのPlaneコンストラクタと同じ正規化手順(zDir=normalize(normal),
+ * xDir=normalize(rawXDir), yDir=normalize(zDir×xDir))を踏襲する。
+ */
+function facePlaneBasis(center: Tuple3, normal: Tuple3): PlaneBasis {
+  const zDir = normalize(normal);
+  const xDir = normalize(facePlaneRawXDir(normal));
+  const yDir = normalize(cross(zDir, xDir));
+  return { origin: center, xDir, yDir, normal: zDir };
 }
 
 /**
@@ -285,5 +335,19 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
     return { ok: false, message: "ドキュメントに有効なボディがありません(押し出しフィーチャーがありません)" };
   }
 
-  return { ok: true, shape: body };
+  // ここに到達した時点でループは最後まで例外なく完走しているため、
+  // sketchesに登録された全スケッチ(world/faceいずれも)の平面基底が解決済みである。
+  const sketchPlanes: SketchPlaneInfo[] = [];
+  for (const [sketchId, sketch] of sketches) {
+    if (sketch.plane.kind === "world") {
+      sketchPlanes.push({ sketchId, ...WORLD_XY_PLANE });
+      continue;
+    }
+    const resolved = resolvedFacePlanes.get(sketchId);
+    if (!resolved) continue; // 到達しないはずのガード。
+    const basis = facePlaneBasis(resolved.center, resolved.normal);
+    sketchPlanes.push({ sketchId, ...basis });
+  }
+
+  return { ok: true, shape: body, sketchPlanes };
 }
