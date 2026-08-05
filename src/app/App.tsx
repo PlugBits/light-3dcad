@@ -1,31 +1,31 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 
-import { findFeature, patchExtrudeFeature, updateSketchEntity } from "../model/document";
-import type { ExtrudeFeature, SketchFeature } from "../model/types";
+import { ExtrudeEditor } from "../components/ExtrudeEditor";
+import { FeatureTree } from "../components/FeatureTree";
+import { SketchEditor } from "../components/SketchEditor";
+import { downloadStl } from "../export/downloadStl";
+import { findFeature, getDependentFeatureIds } from "../model/document";
 import { useCadStore } from "../state/store";
 import { CadViewer } from "../viewer/CadViewer";
-import { downloadStl } from "../export/downloadStl";
 
 export default function App() {
   const viewerContainerRef = useRef<HTMLDivElement | null>(null);
   const viewerRef = useRef<CadViewer | null>(null);
-  const [exportError, setExportError] = useState<string | null>(null);
-  const [exporting, setExporting] = useState(false);
 
   const doc = useCadStore((s) => s.doc);
   const status = useCadStore((s) => s.status);
   const mesh = useCadStore((s) => s.mesh);
   const errorMessage = useCadStore((s) => s.errorMessage);
-  const initialSketchId = useCadStore((s) => s.initialSketchId);
-  const initialEntityId = useCadStore((s) => s.initialEntityId);
-  const initialExtrudeId = useCadStore((s) => s.initialExtrudeId);
+  const errorFeatureId = useCadStore((s) => s.errorFeatureId);
+  const selectedFeatureId = useCadStore((s) => s.selectedFeatureId);
+  const exporting = useCadStore((s) => s.exporting);
+  const exportError = useCadStore((s) => s.exportError);
   const initialize = useCadStore((s) => s.initialize);
-  const updateDocument = useCadStore((s) => s.updateDocument);
+  const selectFeature = useCadStore((s) => s.selectFeature);
+  const addSketch = useCadStore((s) => s.addSketch);
+  const addExtrude = useCadStore((s) => s.addExtrude);
+  const removeFeature = useCadStore((s) => s.removeFeature);
   const exportStl = useCadStore((s) => s.exportStl);
-
-  const sketch = findFeature(doc, initialSketchId) as SketchFeature;
-  const rectEntity = sketch.entities.find((e) => e.id === initialEntityId);
-  const extrude = findFeature(doc, initialExtrudeId) as ExtrudeFeature;
 
   // Workerを起動し、初期ドキュメントの評価を1回だけ要求する。
   useEffect(() => {
@@ -50,100 +50,119 @@ export default function App() {
     }
   }, [mesh]);
 
-  function handleRectChange(key: "width" | "height", value: string) {
-    const num = Number(value);
-    if (Number.isNaN(num) || num <= 0) return;
-    updateDocument((prev) => updateSketchEntity(prev, initialSketchId, initialEntityId, { [key]: num }));
+  const sketches = doc.features.filter((f) => f.type === "sketch");
+  const selectedFeature = selectedFeatureId ? findFeature(doc, selectedFeatureId) : undefined;
+
+  const busy = status === "initializing" || status === "evaluating";
+
+  function handleDelete(featureId: string) {
+    const dependentIds = getDependentFeatureIds(doc, featureId);
+    if (dependentIds.length > 0) {
+      const names = dependentIds
+        .map((id) => findFeature(doc, id)?.name ?? id)
+        .join(", ");
+      const ok = window.confirm(
+        `このフィーチャーには依存するフィーチャーがあります: ${names}\n一緒に削除します。よろしいですか?`,
+      );
+      if (!ok) return;
+    }
+    removeFeature(featureId);
   }
 
-  function handleDistanceChange(value: string) {
-    const num = Number(value);
-    if (Number.isNaN(num) || num <= 0) return;
-    updateDocument((prev) => patchExtrudeFeature(prev, initialExtrudeId, { distance: num }));
+  function handleAddExtrude() {
+    if (sketches.length === 0) return;
+    // デフォルトは最後のスケッチ。作成後の編集パネルで変更できる。
+    const target = sketches[sketches.length - 1];
+    addExtrude(target.id);
   }
 
   async function handleDownloadStl() {
-    setExportError(null);
-    setExporting(true);
     try {
       const blob = await exportStl();
       downloadStl(blob, "model.stl");
-    } catch (err) {
-      setExportError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setExporting(false);
+    } catch {
+      // エラーはストアのexportErrorに反映済み。
     }
   }
 
-  const rectWidth = rectEntity?.kind === "rectangle" ? rectEntity.width : 0;
-  const rectHeight = rectEntity?.kind === "rectangle" ? rectEntity.height : 0;
-  const busy = status === "initializing" || status === "evaluating" || exporting;
-
   return (
-    <div style={{ display: "flex", height: "100vh", fontFamily: "sans-serif" }}>
-      <aside
+    <div style={{ display: "flex", flexDirection: "column", height: "100vh", fontFamily: "sans-serif" }}>
+      <header
         style={{
-          width: 280,
-          padding: 16,
-          borderRight: "1px solid #444",
           display: "flex",
-          flexDirection: "column",
+          alignItems: "center",
           gap: 12,
+          padding: "8px 16px",
+          borderBottom: "1px solid #444",
         }}
       >
-        <h1 style={{ fontSize: 18, margin: 0 }}>light-3dcad — Phase 1</h1>
-        <p style={{ fontSize: 13, opacity: 0.8 }}>
+        <h1 style={{ fontSize: 16, margin: 0 }}>light-3dcad — Phase 2</h1>
+        <button type="button" onClick={addSketch}>
+          スケッチ追加
+        </button>
+        <button type="button" onClick={handleAddExtrude} disabled={sketches.length === 0}>
+          押し出し追加
+        </button>
+        <button type="button" onClick={handleDownloadStl} disabled={busy || exporting}>
+          {exporting ? "STL出力中…" : "STLダウンロード"}
+        </button>
+        <span style={{ fontSize: 12, opacity: 0.8, marginLeft: "auto" }}>
           状態: {status}
           {status === "initializing" && " (WASM初期化中…)"}
           {status === "evaluating" && " (形状計算中…)"}
-        </p>
+        </span>
+      </header>
 
-        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          幅 (mm)
-          <input
-            type="number"
-            value={rectWidth}
-            onChange={(e) => handleRectChange("width", e.target.value)}
-          />
-        </label>
-        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          高さ (mm)
-          <input
-            type="number"
-            value={rectHeight}
-            onChange={(e) => handleRectChange("height", e.target.value)}
-          />
-        </label>
-        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          押し出し距離 (mm)
-          <input
-            type="number"
-            value={extrude.distance}
-            onChange={(e) => handleDistanceChange(e.target.value)}
-          />
-        </label>
+      <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
+        <aside
+          style={{
+            width: 320,
+            padding: 16,
+            borderRight: "1px solid #444",
+            display: "flex",
+            flexDirection: "column",
+            gap: 12,
+            overflowY: "auto",
+          }}
+        >
+          <div>
+            <h2 style={{ fontSize: 13, margin: "0 0 8px", opacity: 0.8 }}>フィーチャーツリー</h2>
+            <FeatureTree
+              doc={doc}
+              selectedFeatureId={selectedFeatureId}
+              errorFeatureId={errorFeatureId}
+              onSelect={selectFeature}
+              onDelete={handleDelete}
+            />
+          </div>
 
-        <button onClick={handleDownloadStl} disabled={busy}>
-          STLダウンロード
-        </button>
+          {errorMessage && (
+            <p style={{ color: "#ff6b6b", fontSize: 12, whiteSpace: "pre-wrap", margin: 0 }}>
+              評価エラー: {errorMessage}
+            </p>
+          )}
+          {exportError && (
+            <p style={{ color: "#ff6b6b", fontSize: 12, whiteSpace: "pre-wrap", margin: 0 }}>
+              STL出力エラー: {exportError}
+            </p>
+          )}
 
-        {errorMessage && (
-          <p style={{ color: "#ff6b6b", fontSize: 12, whiteSpace: "pre-wrap" }}>{errorMessage}</p>
-        )}
-        {exportError && (
-          <p style={{ color: "#ff6b6b", fontSize: 12, whiteSpace: "pre-wrap" }}>
-            STL出力エラー: {exportError}
+          {selectedFeature && (
+            <div style={{ borderTop: "1px solid #444", paddingTop: 12 }}>
+              {selectedFeature.type === "sketch" && <SketchEditor sketch={selectedFeature} />}
+              {selectedFeature.type === "extrude" && <ExtrudeEditor extrude={selectedFeature} doc={doc} />}
+            </div>
+          )}
+
+          <p style={{ fontSize: 11, opacity: 0.6, marginTop: "auto" }}>
+            フィーチャーをクリックすると編集パネルが表示されます。値を変更すると自動的に再評価されます。
           </p>
-        )}
+        </aside>
 
-        <p style={{ fontSize: 11, opacity: 0.6, marginTop: "auto" }}>
-          寸法を変更すると自動的に再評価されます。面をクリックするとブラウザのコンソールにfaceIdが出力されます。
-        </p>
-      </aside>
-
-      <main style={{ flex: 1 }}>
-        <div ref={viewerContainerRef} style={{ width: "100%", height: "100%" }} />
-      </main>
+        <main style={{ flex: 1 }}>
+          <div ref={viewerContainerRef} style={{ width: "100%", height: "100%" }} />
+        </main>
+      </div>
     </div>
   );
 }

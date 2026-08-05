@@ -2,7 +2,13 @@
 // Three.jsシーン自体はReact stateに入れない(CadViewerが直接ストアをsubscribeする)。
 import { create } from "zustand";
 
-import { addExtrudeFeature, addSketchFeature, createEmptyDocument } from "../model/document";
+import {
+  addExtrudeFeature,
+  addSketchFeature,
+  createEmptyDocument,
+  findFeature,
+  removeFeatureCascade,
+} from "../model/document";
 import { createRectangleEntity } from "../model/entity";
 import type { CadDocument, FeatureId } from "../model/types";
 import type { FaceInfo, MeshData, MeshQuality, WorkerResponse } from "../protocol/messages";
@@ -50,7 +56,7 @@ function postRequest(request: { kind: "evaluate" | "exportStl"; doc: CadDocument
 }
 
 /** 初期ドキュメント: XYスケッチ(矩形60x40) -> 押し出し20mm(newBody)。 */
-function createInitialDocument(): { doc: CadDocument; sketchId: FeatureId; entityId: string; extrudeId: FeatureId } {
+function createInitialDocument(): CadDocument {
   const empty = createEmptyDocument();
   const rect = createRectangleEntity({ width: 60, height: 40 });
   const { doc: docWithSketch, feature: sketch } = addSketchFeature(empty, {
@@ -58,24 +64,31 @@ function createInitialDocument(): { doc: CadDocument; sketchId: FeatureId; entit
     plane: { kind: "world", plane: "XY" },
     entities: [rect],
   });
-  const { doc, feature: extrude } = addExtrudeFeature(docWithSketch, {
+  const { doc } = addExtrudeFeature(docWithSketch, {
     name: "Extrude1",
     sketchId: sketch.id,
     distance: 20,
     direction: 1,
     operation: "newBody",
   });
-  return { doc, sketchId: sketch.id, entityId: rect.id, extrudeId: extrude.id };
+  return doc;
 }
 
-const initial = createInitialDocument();
+/** name が prefix+数字の形式である既存フィーチャーの最大番号+1を返す(例: "Sketch" -> 既存Sketch1,Sketch2があれば3)。 */
+function nextFeatureName(doc: CadDocument, prefix: string): string {
+  let max = 0;
+  const re = new RegExp(`^${prefix}(\\d+)$`);
+  for (const f of doc.features) {
+    const m = re.exec(f.name);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return `${prefix}${max + 1}`;
+}
 
 interface CadStoreState {
   doc: CadDocument;
-  /** 初期ドキュメントの主要フィーチャーID(Phase1の簡易UIが直接編集する対象)。 */
-  initialSketchId: FeatureId;
-  initialEntityId: string;
-  initialExtrudeId: FeatureId;
+  /** フィーチャーツリーで選択中のフィーチャー(編集パネルの対象)。未選択はnull。 */
+  selectedFeatureId: FeatureId | null;
 
   status: EvalStatus;
   mesh: MeshData | null;
@@ -85,11 +98,22 @@ interface CadStoreState {
   /** 現在表示中のmesh/faceInfo/errorに対応する最新のevaluateリクエストID(古い応答の破棄に使う)。 */
   latestEvaluateRequestId: string | null;
 
+  exporting: boolean;
+  exportError: string | null;
+
   /** Workerを起動し、ready後に初期ドキュメントを評価する。複数回呼んでも安全(冪等)。 */
   initialize: () => void;
   /** ドキュメントを更新し、直ちに(デバウンスなしで)再評価を要求する。 */
   updateDocument: (updater: (doc: CadDocument) => CadDocument) => void;
-  /** 現在のドキュメントをSTLとしてエクスポートする。 */
+  /** フィーチャーツリーの選択を変更する。 */
+  selectFeature: (featureId: FeatureId | null) => void;
+  /** XY平面固定の空スケッチフィーチャーを追加し、選択状態にする。 */
+  addSketch: () => void;
+  /** 指定スケッチを対象にした押し出しフィーチャーを追加し、選択状態にする。 */
+  addExtrude: (sketchId: FeatureId) => void;
+  /** フィーチャーを削除する(依存する後続フィーチャーもカスケード削除)。 */
+  removeFeature: (featureId: FeatureId) => void;
+  /** 現在のドキュメントをSTLとしてエクスポートする(exporting/exportErrorはストアで管理)。 */
   exportStl: () => Promise<Blob>;
 }
 
@@ -114,10 +138,8 @@ function applyEvaluated(
 }
 
 export const useCadStore = create<CadStoreState>((set, get) => ({
-  doc: initial.doc,
-  initialSketchId: initial.sketchId,
-  initialEntityId: initial.entityId,
-  initialExtrudeId: initial.extrudeId,
+  doc: createInitialDocument(),
+  selectedFeatureId: null,
 
   status: "initializing",
   mesh: null,
@@ -125,6 +147,9 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   errorMessage: null,
   errorFeatureId: null,
   latestEvaluateRequestId: null,
+
+  exporting: false,
+  exportError: null,
 
   initialize: () => {
     // "evaluate" は Worker側で ensureOC() を経由するため、別途 "init" 往復は不要。
@@ -140,14 +165,58 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
     promise.then((response) => applyEvaluated(set, get, requestId, response));
   },
 
-  exportStl: () => {
-    const { promise } = postRequest({ kind: "exportStl", doc: get().doc });
-    return promise.then((response) => {
-      if (response.kind === "stl") return response.blob;
-      if (response.kind === "error") {
-        throw new Error(response.message);
-      }
-      throw new Error(`予期しない応答: ${response.kind}`);
+  selectFeature: (featureId) => set({ selectedFeatureId: featureId }),
+
+  addSketch: () => {
+    const doc = get().doc;
+    const { doc: nextDoc, feature } = addSketchFeature(doc, {
+      name: nextFeatureName(doc, "Sketch"),
+      plane: { kind: "world", plane: "XY" },
+      entities: [],
     });
+    get().updateDocument(() => nextDoc);
+    set({ selectedFeatureId: feature.id });
+  },
+
+  addExtrude: (sketchId) => {
+    const doc = get().doc;
+    const { doc: nextDoc, feature } = addExtrudeFeature(doc, {
+      name: nextFeatureName(doc, "Extrude"),
+      sketchId,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+    get().updateDocument(() => nextDoc);
+    set({ selectedFeatureId: feature.id });
+  },
+
+  removeFeature: (featureId) => {
+    const doc = get().doc;
+    const nextDoc = removeFeatureCascade(doc, featureId);
+    if (nextDoc === doc) return;
+    get().updateDocument(() => nextDoc);
+    const selected = get().selectedFeatureId;
+    if (selected && !findFeature(nextDoc, selected)) {
+      set({ selectedFeatureId: null });
+    }
+  },
+
+  exportStl: async () => {
+    set({ exporting: true, exportError: null });
+    try {
+      const { promise } = postRequest({ kind: "exportStl", doc: get().doc });
+      const response = await promise;
+      if (response.kind === "stl") {
+        set({ exporting: false });
+        return response.blob;
+      }
+      const message = response.kind === "error" ? response.message : `予期しない応答: ${response.kind}`;
+      throw new Error(message);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      set({ exporting: false, exportError: message });
+      throw err;
+    }
   },
 }));
