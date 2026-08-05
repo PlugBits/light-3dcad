@@ -98,6 +98,12 @@ export default function App() {
 
   const sketches = doc.features.filter((f) => f.type === "sketch");
   const selectedFeature = selectedFeatureId ? findFeature(doc, selectedFeatureId) : undefined;
+  // 選択中フィーチャーがスケッチで、かつWorkerが平面基底を解決済みの場合のみ取得できる。
+  // (未評価・面解決失敗中はundefinedになり、線描画・平面正対ボタンが無効化される)
+  const selectedSketchPlane =
+    selectedFeature?.type === "sketch"
+      ? sketchPlanes.find((p) => p.sketchId === selectedFeature.id)
+      : undefined;
 
   const busy = status === "initializing" || status === "evaluating";
   // WASM初期化は"evaluate"リクエストの中で行われる(initialize()参照)ため、
@@ -136,6 +142,11 @@ export default function App() {
     }
   }
 
+  function handleAlignToPlane() {
+    if (!selectedSketchPlane) return;
+    viewerRef.current?.lookAtPlane(selectedSketchPlane);
+  }
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", fontFamily: "sans-serif" }}>
       <header
@@ -169,6 +180,15 @@ export default function App() {
         </button>
         <button type="button" data-testid="btn-download-stl" onClick={handleDownloadStl} disabled={busy || exporting}>
           {exporting ? "STL出力中…" : "STLダウンロード"}
+        </button>
+        <button
+          type="button"
+          data-testid="btn-align-to-plane"
+          onClick={handleAlignToPlane}
+          disabled={!selectedSketchPlane}
+          title="選択中スケッチの平面に正対する視点へカメラを移動します"
+        >
+          平面に正対
         </button>
         <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
           <input

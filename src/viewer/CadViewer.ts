@@ -21,6 +21,12 @@ const GRID_SPACING = 10;
 /** グリッドの色・不透明度。 */
 const GRID_COLOR = 0xffcc80;
 const GRID_OPACITY = 0.45;
+/**
+ * 選択中スケッチの線・グリッドに使うrenderOrder。ソリッドは既定(0)で描画されるため、
+ * depthTest:falseと組み合わせて常にソリッドより手前に見せる(ベーススケッチがソリッド内部に
+ * 埋まっていても選択時は視認できるようにするため)。
+ */
+const SELECTED_SKETCH_RENDER_ORDER = 999;
 
 type Tuple3 = [number, number, number];
 
@@ -53,7 +59,7 @@ function toWorldPoint(entry: SketchOverlayEntry, u: number, v: number): Tuple3 {
   ];
 }
 
-/** rectangle/circleエンティティのローカル2D頂点列(閉ループ)を返す。 */
+/** rectangle/circle/polygonエンティティのローカル2D頂点列(閉ループ)を返す。 */
 function entityLocalPoints(entity: SketchEntity): [number, number][] {
   if (entity.kind === "rectangle") {
     const [cx, cy] = entity.center;
@@ -66,13 +72,17 @@ function entityLocalPoints(entity: SketchEntity): [number, number][] {
       [cx - hw, cy + hh],
     ];
   }
-  const [cx, cy] = entity.center;
-  const points: [number, number][] = [];
-  for (let i = 0; i < CIRCLE_SEGMENTS; i += 1) {
-    const t = (i / CIRCLE_SEGMENTS) * Math.PI * 2;
-    points.push([cx + entity.radius * Math.cos(t), cy + entity.radius * Math.sin(t)]);
+  if (entity.kind === "circle") {
+    const [cx, cy] = entity.center;
+    const points: [number, number][] = [];
+    for (let i = 0; i < CIRCLE_SEGMENTS; i += 1) {
+      const t = (i / CIRCLE_SEGMENTS) * Math.PI * 2;
+      points.push([cx + entity.radius * Math.cos(t), cy + entity.radius * Math.sin(t)]);
+    }
+    return points;
   }
-  return points;
+  // polygon: 頂点列そのものが閉ループ(LineLoopが最後→最初を自動的に結ぶ)。
+  return entity.points;
 }
 
 /** 平面基底に沿った方眼(LineSegments)を構築する。origin中心にhalfExtentの範囲、GRID_SPACING間隔。 */
@@ -93,8 +103,17 @@ function buildPlaneGrid(entry: SketchOverlayEntry, halfExtent: number): THREE.Li
 
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  const material = new THREE.LineBasicMaterial({ color: GRID_COLOR, transparent: true, opacity: GRID_OPACITY });
-  return new THREE.LineSegments(geometry, material);
+  // グリッドは選択中スケッチにのみ表示するため、常にdepthTest:false+高renderOrderでよい
+  // (ソリッド内部に埋もれても常に手前に見える)。
+  const material = new THREE.LineBasicMaterial({
+    color: GRID_COLOR,
+    transparent: true,
+    opacity: GRID_OPACITY,
+    depthTest: false,
+  });
+  const grid = new THREE.LineSegments(geometry, material);
+  grid.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
+  return grid;
 }
 
 /**
@@ -337,11 +356,15 @@ export class CadViewer {
     for (const entry of entries) {
       const isSelected = entry.sketchId === selectedSketchId;
       const color = isSelected ? SKETCH_SELECTED_COLOR : SKETCH_DEFAULT_COLOR;
+      // 選択中スケッチはdepthTest:falseにしてソリッドを透過して常に見えるようにする
+      // (ベーススケッチがソリッド内部に埋もれていても選択時は視認できることが狙い)。
+      // 非選択スケッチは従来通り深度ありで描画する。
       const material = new THREE.LineBasicMaterial({
         color,
         transparent: !isSelected,
         opacity: isSelected ? 1 : 0.5,
         linewidth: isSelected ? 2 : 1,
+        depthTest: !isSelected,
       });
       this.sketchOverlayMaterials.push(material);
 
@@ -359,6 +382,7 @@ export class CadViewer {
         this.sketchOverlayGeometries.push(geometry);
 
         const line = new THREE.LineLoop(geometry, material);
+        if (isSelected) line.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
         this.sketchOverlayGroup.add(line);
         this.sketchLineCount += 1;
       }
@@ -371,6 +395,24 @@ export class CadViewer {
         this.sketchGridBuilt = true;
       }
     }
+  }
+
+  /**
+   * カメラを指定平面の法線方向から見下ろす位置に移動し、注視点を平面原点にする(「平面に正対」)。
+   * カメラの up ベクトルには平面のyDirを使う(normalとほぼ平行になる世界upの代わりに、
+   * 常に法線と直交することが保証された基底ベクトルを使うことでジンバルロックを避ける)。
+   * OrbitControls の target/カメラ位置の設定のみで実現する小規模な変更。
+   */
+  lookAtPlane(basis: { origin: Tuple3; yDir: Tuple3; normal: Tuple3 }) {
+    const origin = new THREE.Vector3(...basis.origin);
+    const normal = new THREE.Vector3(...basis.normal).normalize();
+    const distance = Math.max(this.meshHalfExtent * 3, 100);
+    const eye = origin.clone().addScaledVector(normal, distance);
+
+    this.camera.up.set(basis.yDir[0], basis.yDir[1], basis.yDir[2]);
+    this.camera.position.copy(eye);
+    this.controls.target.copy(origin);
+    this.controls.update();
   }
 
   dispose() {
