@@ -2,15 +2,20 @@ import { describe, expect, it } from "vitest";
 
 import {
   addExtrudeFeature,
+  addSketchEntity,
   addSketchFeature,
   createEmptyDocument,
   createCircleEntity,
   createRectangleEntity,
   findFeature,
+  getDependentFeatureIds,
+  getDirectDependentFeatureIds,
   isDocumentValid,
   patchExtrudeFeature,
   patchSketchFeature,
   removeFeature,
+  removeFeatureCascade,
+  removeSketchEntity,
   updateSketchEntity,
   validateDocument,
   validateFeature,
@@ -130,6 +135,84 @@ describe("patchSketchFeature / updateSketchEntity", () => {
     const updated = updateSketchEntity(doc, sketch.id, "nope", { width: 999 });
     const found = findFeature(updated, sketch.id) as SketchFeature;
     expect(found.entities[0]).toMatchObject({ width: 60, height: 40 });
+  });
+});
+
+describe("addSketchEntity / removeSketchEntity", () => {
+  it("エンティティを追加できる", () => {
+    const { doc, sketch } = makeRectSketchDoc();
+    const circle = createCircleEntity({ radius: 10 });
+    const updated = addSketchEntity(doc, sketch.id, circle);
+    const found = findFeature(updated, sketch.id) as SketchFeature;
+    expect(found.entities).toHaveLength(2);
+    expect(found.entities[1]).toBe(circle);
+    // 非破壊
+    expect((findFeature(doc, sketch.id) as SketchFeature).entities).toHaveLength(1);
+  });
+
+  it("エンティティを削除できる", () => {
+    const { doc, sketch } = makeRectSketchDoc();
+    const entityId = sketch.entities[0].id;
+    const updated = removeSketchEntity(doc, sketch.id, entityId);
+    const found = findFeature(updated, sketch.id) as SketchFeature;
+    expect(found.entities).toHaveLength(0);
+  });
+
+  it("存在しないentityIdの削除は何もしない", () => {
+    const { doc, sketch } = makeRectSketchDoc();
+    const updated = removeSketchEntity(doc, sketch.id, "nope");
+    const found = findFeature(updated, sketch.id) as SketchFeature;
+    expect(found.entities).toHaveLength(1);
+  });
+});
+
+describe("getDirectDependentFeatureIds / getDependentFeatureIds / removeFeatureCascade", () => {
+  function makeSketchExtrudeChainDoc(): { doc: CadDocument; sketch: SketchFeature; extrude: ExtrudeFeature } {
+    const { doc, sketch } = makeRectSketchDoc();
+    const { doc: doc2, feature: extrude } = addExtrudeFeature(doc, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+    return { doc: doc2, sketch, extrude };
+  }
+
+  it("extrudeが参照するsketchの直接依存を検出する", () => {
+    const { doc, sketch, extrude } = makeSketchExtrudeChainDoc();
+    expect(getDirectDependentFeatureIds(doc, sketch.id)).toEqual([extrude.id]);
+    expect(getDirectDependentFeatureIds(doc, extrude.id)).toEqual([]);
+  });
+
+  it("依存の無いフィーチャーは空配列を返す", () => {
+    const { doc, extrude } = makeSketchExtrudeChainDoc();
+    expect(getDependentFeatureIds(doc, extrude.id)).toEqual([]);
+  });
+
+  it("removeFeatureCascadeはsketchと、それに依存するextrudeをまとめて削除する", () => {
+    const { doc, sketch, extrude } = makeSketchExtrudeChainDoc();
+    const updated = removeFeatureCascade(doc, sketch.id);
+    expect(findFeature(updated, sketch.id)).toBeUndefined();
+    expect(findFeature(updated, extrude.id)).toBeUndefined();
+    expect(updated.features).toHaveLength(0);
+    // 非破壊
+    expect(doc.features).toHaveLength(2);
+  });
+
+  it("removeFeatureCascadeは依存フィーチャーを持たない場合そのフィーチャーのみ削除する", () => {
+    const { doc, sketch, extrude } = makeSketchExtrudeChainDoc();
+    const updated = removeFeatureCascade(doc, extrude.id);
+    expect(findFeature(updated, sketch.id)).toBe(sketch);
+    expect(findFeature(updated, extrude.id)).toBeUndefined();
+    expect(updated.features).toHaveLength(1);
+  });
+
+  it("removeFeature(非カスケード)はsketchのみ削除しextrudeの参照が残る", () => {
+    const { doc, sketch, extrude } = makeSketchExtrudeChainDoc();
+    const updated = removeFeature(doc, sketch.id);
+    expect(findFeature(updated, sketch.id)).toBeUndefined();
+    expect(findFeature(updated, extrude.id)).toBe(extrude);
   });
 });
 
