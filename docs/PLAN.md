@@ -431,3 +431,30 @@ Vitest243件(ソルバ17件[長さ/水平/垂直/coincident伝播/矩形4辺リ�
 拘束バリデーション5件・addSketchSegments2件が新規)。20bへの申し送り: 拘束の追加・編集UI(SketchEditor
 への拘束一覧・寸法入力パネル)、既存entities(rectangle/circle等)を拘束対象にする場合はsegments化
 (分解)が前提になる点、ビューア上での拘束アイコン表示は未着手。
+
+## Phase 20b: 寸法ドリブン編集UI完了
+
+新設`src/sketch/constraintDimensions.ts`(純TS)に、寸法ツール・寸法ラベル編集が使う拘束の
+作成/更新(`upsertLengthConstraint`/`upsertRadiusConstraint`/`upsertDistanceConstraint`、既存の
+同一対象への拘束があれば値だけ差し替え)・削除(`removeConstraint`)・常時表示する拘束寸法一覧
+(`computeConstraintDimensions`、length=中点/radius=弧の中央外側/distance=2点の中間)を実装した。
+`CadViewer`に`startDimensionTool()`を追加し、ツールバーの「寸法」ボタンでモードに入る。クリックは
+まず全segmentsの端点をスクリーン距離10px以内で優先ヒット判定し(2つ順にクリックでdistance拘束)、
+無ければセグメント本体をヒット判定する(line→length、arc→radius拘束)。ヒット対象確定時は
+`DimensionToolPopup`(新設、現在値をデフォルトにした単一フィールドの数値ポップアップ)で値を入力する。
+`DimensionOverlay`に、選択中スケッチのlength/distance/radius拘束から常時表示する寸法ラベルを追加した
+(黒背景・白太字の強調スタイルで実測ラベル=オレンジと区別、クリックで同じポップアップを開いて編集)。
+`SketchEditor`に拘束一覧パネルを追加し、種類(一致/水平/垂直/長さ/距離/半径/固定)・対象(セグメント
+番号・端点)・値を1行で表示、削除ボタンで個別に取り消せる(値なし拘束も表示・削除可能)。
+新設`src/state/constraintUpdate.ts`の`updateDocumentWithConflictRollback()`が、拘束の追加・更新を
+伴う`updateDocument()`呼び出しを共通ラップし、結果が対象sketchIdの矛盾エラーになった場合は
+変更前のドキュメントへ即座に復元する(アンドゥ履歴は使わず「適用前ドキュメントを保持して復元」する
+方式のため、選択状態やツールのアクティブ状態は保たれる)。復元時は「拘束が矛盾するため取り消しました」
+の一時トースト(3秒で自動的に消える)を表示する。Vitest252件(拘束作成/更新ヘルパー・現在値計算・
+寸法一覧構築の9件が新規)。ブラウザ確認(`npm run dev`+プリインストールChromiumをPlaywright経由で
+操作、`window.__debugStore`は確認専用の一時フックでコミット前に削除済み)で、線分ツールでの矩形
+(L字相当の閉チェーン)作図→寸法ツールで下辺をクリック→デフォルト値40.00が表示されること→50mm
+指定で形状が実際に伸びる(セグメント端点座標が変化しlength=50を満たす)こと→拘束一覧パネルに
+「一致」「長さ」等が表示されること→同じ2点にlengthと矛盾するdistance(5mm)を追加すると
+「拘束が矛盾するため取り消しました」のトーストとともに直前の変更が自動的に取り消される(拘束配列が
+矛盾操作前と完全一致)こと、をスクリーンショット・DOM検証の両方で確認した。
