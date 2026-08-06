@@ -6,7 +6,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { setSketchConstraints, updateSketchEntity } from "../model/document";
-import type { SketchFeature } from "../model/types";
+import type { PointRef, SketchEntity, SketchFeature, SketchSegment } from "../model/types";
+import { arcGeometryFromBulge } from "../sketch/bulge";
 import {
   computeConstraintDimensions,
   constraintDimensionKey,
@@ -30,7 +31,86 @@ import {
 import { updateDocumentWithConflictRollback } from "../state/constraintUpdate";
 import { useCadStore } from "../state/store";
 import type { CadViewer, PlaneBasis } from "../viewer/CadViewer";
+import {
+  computeLinearDimensionGraphics,
+  computeRadiusDimensionGraphics,
+  DEFAULT_RADIUS_LABEL_OFFSET,
+  type DimensionGraphics,
+  type Point2,
+  type Segment,
+} from "../viewer/dimensionGraphics";
 import { DimensionToolPopup } from "./DimensionToolPopup";
+
+/**
+ * 実測寸法(SketchDimension、entities由来)1件分の引出線・寸法線・矢印を計算する
+ * (src/viewer/dimensionGraphics.tsのプリミティブに、entityの実座標を渡すアダプタ)。
+ * 対応する図形が見つからない/退化している場合はnull(その寸法は線を描かず、ラベルのみ
+ * dimension.anchorにフォールバックする)。
+ */
+function measuredDimensionGraphics(dimension: SketchDimension, entities: SketchEntity[]): DimensionGraphics | null {
+  const entity = entities.find((e) => e.id === dimension.entityId);
+  if (!entity) return null;
+  if (dimension.kind === "polygon-edge" && entity.kind === "polygon") {
+    const { points } = entity;
+    const p1 = points[dimension.edgeIndex];
+    const p2 = points[(dimension.edgeIndex + 1) % points.length];
+    if (!p1 || !p2) return null;
+    let cx = 0;
+    let cy = 0;
+    for (const [x, y] of points) {
+      cx += x;
+      cy += y;
+    }
+    const centroid: Point2 = [cx / points.length, cy / points.length];
+    return computeLinearDimensionGraphics(p1, p2, { awayFrom: centroid });
+  }
+  if (dimension.kind === "rect-width" && entity.kind === "rectangle") {
+    const [cx, cy] = entity.center;
+    const hw = entity.width / 2;
+    const hh = entity.height / 2;
+    return computeLinearDimensionGraphics([cx - hw, cy + hh], [cx + hw, cy + hh], { awayFrom: [cx, cy] });
+  }
+  if (dimension.kind === "rect-height" && entity.kind === "rectangle") {
+    const [cx, cy] = entity.center;
+    const hw = entity.width / 2;
+    const hh = entity.height / 2;
+    return computeLinearDimensionGraphics([cx + hw, cy - hh], [cx + hw, cy + hh], { awayFrom: [cx, cy] });
+  }
+  if (dimension.kind === "circle-radius" && entity.kind === "circle") {
+    return computeRadiusDimensionGraphics(entity.center, entity.radius, { angleDeg: 90 });
+  }
+  return null;
+}
+
+function pointFromRef(segments: readonly SketchSegment[], ref: PointRef): Point2 | null {
+  const seg = segments.find((s) => s.id === ref.segmentId);
+  if (!seg) return null;
+  return ref.end === "p1" ? seg.p1 : seg.p2;
+}
+
+/**
+ * 拘束寸法(ConstraintDimension、segments/constraints由来)1件分の引出線・寸法線・矢印を計算する。
+ * 参照先セグメントが見つからない/円弧情報が無い場合はnull。
+ */
+function constraintDimensionGraphics(dimension: ConstraintDimension, segments: SketchSegment[]): DimensionGraphics | null {
+  if (dimension.kind === "seg-length") {
+    const seg = segments.find((s) => s.id === dimension.segmentId);
+    if (!seg) return null;
+    return computeLinearDimensionGraphics(seg.p1, seg.p2);
+  }
+  if (dimension.kind === "seg-distance") {
+    const pa = pointFromRef(segments, dimension.a);
+    const pb = pointFromRef(segments, dimension.b);
+    if (!pa || !pb) return null;
+    return computeLinearDimensionGraphics(pa, pb);
+  }
+  const seg = segments.find((s) => s.id === dimension.segmentId);
+  if (!seg || seg.kind !== "arc" || !seg.bulge) return null;
+  const geo = arcGeometryFromBulge(seg.p1, seg.p2, seg.bulge);
+  if (!geo) return null;
+  const angleDeg = ((geo.startAngle + geo.sweep / 2) * 180) / Math.PI;
+  return computeRadiusDimensionGraphics(geo.center, geo.radius, { angleDeg, labelOffset: DEFAULT_RADIUS_LABEL_OFFSET });
+}
 
 interface DimensionOverlayProps {
   sketch: SketchFeature;
@@ -98,11 +178,36 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
     () => computeConstraintDimensions(sketch.segments ?? [], sketch.constraints ?? [], sketch.entities),
     [sketch.segments, sketch.constraints, sketch.entities],
   );
+
+  // 各寸法の引出線・寸法線・矢印(Phase 22)。ラベル位置(labelPos)は寸法線中央で、
+  // 図形が見つからない/退化している場合はnull(その寸法は線を描かず、ラベルはdimension.anchorに
+  // フォールバックする)。
+  const measuredGraphics = useMemo(() => {
+    const map = new Map<string, DimensionGraphics>();
+    for (const d of dimensions) {
+      const g = measuredDimensionGraphics(d, sketch.entities);
+      if (g) map.set(dimensionKey(d), g);
+    }
+    return map;
+  }, [dimensions, sketch.entities]);
+  const constraintGraphics = useMemo(() => {
+    const map = new Map<string, DimensionGraphics>();
+    for (const d of constraintDimensions) {
+      const g = constraintDimensionGraphics(d, sketch.segments ?? []);
+      if (g) map.set(constraintDimensionKey(d), g);
+    }
+    return map;
+  }, [constraintDimensions, sketch.segments]);
+
   // onFrameコールバックはマウント時に一度だけ登録するため、最新の寸法一覧・平面基底はrefで参照する。
   const dimensionsRef = useRef(dimensions);
   dimensionsRef.current = dimensions;
   const constraintDimensionsRef = useRef(constraintDimensions);
   constraintDimensionsRef.current = constraintDimensions;
+  const measuredGraphicsRef = useRef(measuredGraphics);
+  measuredGraphicsRef.current = measuredGraphics;
+  const constraintGraphicsRef = useRef(constraintGraphics);
+  constraintGraphicsRef.current = constraintGraphics;
   const basisRef = useRef(basis);
   basisRef.current = basis;
 
@@ -111,8 +216,14 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
     if (!viewer) return;
     const update = () => {
       const allDims: { key: string; anchor: [number, number] }[] = [
-        ...dimensionsRef.current.map((d) => ({ key: dimensionKey(d), anchor: d.anchor })),
-        ...constraintDimensionsRef.current.map((d) => ({ key: constraintDimensionKey(d), anchor: d.anchor })),
+        ...dimensionsRef.current.map((d) => ({
+          key: dimensionKey(d),
+          anchor: measuredGraphicsRef.current.get(dimensionKey(d))?.labelPos ?? d.anchor,
+        })),
+        ...constraintDimensionsRef.current.map((d) => ({
+          key: constraintDimensionKey(d),
+          anchor: constraintGraphicsRef.current.get(constraintDimensionKey(d))?.labelPos ?? d.anchor,
+        })),
       ];
       for (const dimension of allDims) {
         const el = labelRefs.current.get(dimension.key);
@@ -129,6 +240,26 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
       }
     };
     return viewer.onFrame(update);
+  }, [viewerRef]);
+
+  // 寸法線(引出線・寸法線・矢印)の3D描画を最新の状態に反映する(選択中スケッチのみ、
+  // 「スケッチ表示」トグルに従う)。既存のスケッチ線オーバーレイ(setSketchOverlay)と同じく、
+  // 変更のたびに全体を作り直す。
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    const measuredLines: Segment[] = [];
+    measuredGraphics.forEach((g) => measuredLines.push(...g.lines));
+    const constraintLines: Segment[] = [];
+    constraintGraphics.forEach((g) => constraintLines.push(...g.lines));
+    viewer.setDimensionOverlay(measuredLines, constraintLines, basis, visible);
+  }, [viewerRef, measuredGraphics, constraintGraphics, basis, visible]);
+
+  // アンマウント時(選択スケッチが切り替わる等)は寸法線を消す。
+  useEffect(() => {
+    return () => {
+      viewerRef.current?.setDimensionOverlay([], [], null, false);
+    };
   }, [viewerRef]);
 
   // 選択中スケッチが切り替わったら開いていた編集ポップアップは閉じる。

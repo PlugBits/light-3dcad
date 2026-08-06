@@ -5,6 +5,7 @@ import type { FeatureId, LineRef, PointRef, SketchEntity, SketchSegment } from "
 import type { FaceGroup, FaceInfo, MeshData, ReferenceEdgeLine } from "../protocol/messages";
 import { bulgeArcPoints, bulgeFromThreePoints, DEFAULT_BULGE_SEGMENTS } from "../sketch/bulge";
 import { findEntityDimensionHit, type EntityDimensionHit } from "../sketch/entityDimensionPick";
+import type { Segment as DimensionLineSegment } from "./dimensionGraphics";
 import { polygonOutlinePoints } from "../sketch/polygonOutline";
 import {
   circleRadiusFromPoints,
@@ -71,6 +72,15 @@ const GRID_OPACITY = 0.45;
  * 埋まっていても選択時は視認できるようにするため)。
  */
 const SELECTED_SKETCH_RENDER_ORDER = 999;
+/**
+ * 寸法線(引出線・寸法線・矢印、Phase 22)のrenderOrder。選択中スケッチの線より少し手前にして
+ * 寸法線が図形線に隠れないようにする(描画モードのフィードバックよりは奥でよい)。
+ */
+const DIMENSION_LINE_RENDER_ORDER = SELECTED_SKETCH_RENDER_ORDER + 1;
+/** 実測寸法(entities由来)の線色(グレー系)。 */
+const DIMENSION_MEASURED_COLOR = 0x9e9e9e;
+/** 拘束由来の寸法の線色(白系)。 */
+const DIMENSION_CONSTRAINT_COLOR = 0xf5f5f5;
 /**
  * 描画モードの動的フィードバック(確定済みプレビュー線・ラバーバンド・軸ロックガイド・スナップ
  * マーカー)のrenderOrder。原点マーカー・X/Y軸(SELECTED_SKETCH_RENDER_ORDER)と同じ値だと、
@@ -352,6 +362,21 @@ function distPointToRawSegment(p: [number, number], a: [number, number], b: [num
   return Math.hypot(p[0] - cx, p[1] - cy);
 }
 
+/**
+ * PlaneBasis(SketchOverlayEntryと同じorigin/xDir/yDir/normalを持つが、entities等は持たない)を
+ * 使ってローカル2D座標をワールド座標に変換する(法線方向に微小オフセット済み、toWorldPoint()と同じ
+ * 目的)。寸法線(src/viewer/dimensionGraphics.ts)はSketchOverlayEntryではなくPlaneBasisのみを
+ * 受け取るためtoWorldPoint()は使えず、この関数を使う。
+ */
+function toWorldPointFromBasis(basis: PlaneBasis, u: number, v: number): Tuple3 {
+  const { origin, xDir, yDir, normal } = basis;
+  return [
+    origin[0] + u * xDir[0] + v * yDir[0] + SKETCH_NORMAL_OFFSET * normal[0],
+    origin[1] + u * xDir[1] + v * yDir[1] + SKETCH_NORMAL_OFFSET * normal[1],
+    origin[2] + u * xDir[2] + v * yDir[2] + SKETCH_NORMAL_OFFSET * normal[2],
+  ];
+}
+
 /** 中心center・半径radiusの円をsegments分割のポリラインで近似したローカル2D頂点列を返す。 */
 function circleLocalPoints(center: [number, number], radius: number, segments: number): [number, number][] {
   const [cx, cy] = center;
@@ -600,6 +625,11 @@ export class CadViewer {
   /** 直近のsetSketchOverlay()でグリッドが描画されたかどうか。E2Eデバッグフックが参照する。 */
   private sketchGridBuilt = false;
 
+  /** 寸法線(引出線・寸法線・矢印、Phase 22)を乗せるグループ。選択中スケッチのみ表示する。 */
+  private dimensionOverlayGroup: THREE.Group;
+  private dimensionOverlayGeometries: THREE.BufferGeometry[] = [];
+  private dimensionOverlayMaterials: THREE.Material[] = [];
+
   /** 線描画モード中かどうか。trueの間はクリックを面選択でなく頂点追加として扱う。 */
   private drawingActive = false;
   /** 現在の描画モードが対象とする図形種別(polygon/rectangle/circle、Phase 14)。 */
@@ -757,6 +787,9 @@ export class CadViewer {
 
     this.referenceEdgeGroup = new THREE.Group();
     this.scene.add(this.referenceEdgeGroup);
+
+    this.dimensionOverlayGroup = new THREE.Group();
+    this.scene.add(this.dimensionOverlayGroup);
 
     this.drawingGroup = new THREE.Group();
     this.scene.add(this.drawingGroup);
@@ -1462,6 +1495,58 @@ export class CadViewer {
         });
       }
     }
+  }
+
+  private clearDimensionOverlay() {
+    while (this.dimensionOverlayGroup.children.length > 0) {
+      this.dimensionOverlayGroup.remove(this.dimensionOverlayGroup.children[0]);
+    }
+    this.dimensionOverlayGeometries.forEach((g) => g.dispose());
+    this.dimensionOverlayMaterials.forEach((m) => m.dispose());
+    this.dimensionOverlayGeometries = [];
+    this.dimensionOverlayMaterials = [];
+  }
+
+  /**
+   * 選択中スケッチの寸法(実測ラベル+拘束ラベル、Phase 22)の引出線・寸法線・矢印を描画する。
+   * 線分はDimensionOverlay側(src/viewer/dimensionGraphics.tsの計算結果)から
+   * スケッチローカル2D座標(u, v)のフラットな線分リストとして渡される。visible=falseなら消す
+   * (「スケッチ表示」トグルOFF時、またはselectedSketchPlaneが無い場合)。
+   */
+  setDimensionOverlay(
+    measuredLines: DimensionLineSegment[],
+    constraintLines: DimensionLineSegment[],
+    basis: PlaneBasis | null,
+    visible: boolean,
+  ) {
+    this.clearDimensionOverlay();
+    this.dimensionOverlayGroup.visible = visible;
+    if (!visible || !basis) return;
+    this.addDimensionLineSet(measuredLines, basis, DIMENSION_MEASURED_COLOR);
+    this.addDimensionLineSet(constraintLines, basis, DIMENSION_CONSTRAINT_COLOR);
+  }
+
+  private addDimensionLineSet(lines: DimensionLineSegment[], basis: PlaneBasis, color: number) {
+    if (lines.length === 0) return;
+    const positions = new Float32Array(lines.length * 2 * 3);
+    lines.forEach(([u1, v1, u2, v2], i) => {
+      const a = toWorldPointFromBasis(basis, u1, v1);
+      const b = toWorldPointFromBasis(basis, u2, v2);
+      positions[i * 6] = a[0];
+      positions[i * 6 + 1] = a[1];
+      positions[i * 6 + 2] = a[2];
+      positions[i * 6 + 3] = b[0];
+      positions[i * 6 + 4] = b[1];
+      positions[i * 6 + 5] = b[2];
+    });
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    this.dimensionOverlayGeometries.push(geometry);
+    const material = new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.9 });
+    this.dimensionOverlayMaterials.push(material);
+    const lineSegments = new THREE.LineSegments(geometry, material);
+    lineSegments.renderOrder = DIMENSION_LINE_RENDER_ORDER;
+    this.dimensionOverlayGroup.add(lineSegments);
   }
 
   /**
@@ -2898,6 +2983,7 @@ export class CadViewer {
       (this.edgesMesh.material as THREE.Material).dispose();
     }
     this.clearSketchOverlay();
+    this.clearDimensionOverlay();
     this.clearDrawingPreview();
     this.referenceEdgeGeometries.forEach((g) => g.dispose());
     this.referenceEdgeMaterials.forEach((m) => m.dispose());
