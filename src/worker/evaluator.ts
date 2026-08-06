@@ -22,6 +22,8 @@ import type {
   Fillet3DFeature,
   FilletEdgeRef,
   PolygonCorner,
+  ShellFaceRef,
+  ShellFeature,
   SketchEntity,
   SketchFeature,
   SketchSegment,
@@ -533,6 +535,89 @@ function applyFillet3D(body: Shape3D, feature: Fillet3DFeature): Shape3D {
 }
 
 /**
+ * bodyの現在の面群から、shellフィーチャーが選択時に記録した面スナップショット(targets)を
+ * 再解決する(Phase 25b)。resolveFilletEdges()と同じ2段階マッチング方針(resolveFaceGeometry()の
+ * 「面ID一致優先→平面かつ法線一致+中心最近傍」判定を、複数面かつ同一面の重複マッチ不可という
+ * 条件に拡張したもの)。
+ * 1. 第一候補: face.hashCode(選択時点のfaceId)が完全一致する、未使用の面。
+ * 2. フォールバック: 平面(isPlanar)かつ法線がほぼ一致(cos>FACE_NORMAL_COS_TOLERANCE)し、
+ *    中心距離が最も近い(バウンディングボックス対角長のFACE_DISTANCE_TOLERANCE_RATIO以内)、未使用の面。
+ * 3. どちらも失敗した場合はエラーを投げる(呼び出し側でallFacesを解放してから投げる)。
+ *
+ * 戻り値のmatched(targetsと同じ順序・長さ)とallFaces(bodyの全面、delete()の責務は呼び出し側)は
+ * 同じFaceインスタンスを共有する。使用replicad API: Shape.faces / Face.hashCode / Face.geomType /
+ * Face.center / Face.normalAt() / Shape.boundingBox。
+ */
+function resolveShellFaces(body: Shape3D, targets: ShellFaceRef[]): { matched: Face[]; allFaces: Face[] } {
+  const allFaces = body.faces;
+  const used = new Set<number>();
+
+  const bbox = body.boundingBox;
+  const diag = Math.sqrt(bbox.width ** 2 + bbox.height ** 2 + bbox.depth ** 2);
+  bbox.delete();
+  const maxDist = diag * FACE_DISTANCE_TOLERANCE_RATIO;
+
+  const matched: Face[] = [];
+  for (const target of targets) {
+    let matchIndex = -1;
+
+    for (let i = 0; i < allFaces.length; i += 1) {
+      if (used.has(i)) continue;
+      if (allFaces[i].hashCode === target.faceId) {
+        matchIndex = i;
+        break;
+      }
+    }
+
+    if (matchIndex === -1) {
+      let bestDist = Infinity;
+      for (let i = 0; i < allFaces.length; i += 1) {
+        if (used.has(i)) continue;
+        const face = allFaces[i];
+        if (face.geomType !== "PLANE") continue;
+        const info = faceCenterNormal(face);
+        if (dot(info.normal, target.normal) < FACE_NORMAL_COS_TOLERANCE) continue;
+        const dist = distance(info.center, target.center);
+        if (dist > maxDist || dist >= bestDist) continue;
+        bestDist = dist;
+        matchIndex = i;
+      }
+    }
+
+    if (matchIndex === -1) {
+      allFaces.forEach((f) => f.delete());
+      throw new Error("シェルの対象面を特定できませんでした。フィーチャーを作り直してください");
+    }
+    used.add(matchIndex);
+    matched.push(allFaces[matchIndex]);
+  }
+
+  return { matched, allFaces };
+}
+
+/**
+ * shellフィーチャーを現在のボディに適用し、新しいボディを返す(古いボディはこの関数内でdelete()する)。
+ * replicadの Shape3D#shell(thickness, finderFcn) は第2引数に「FaceFinderを受け取り、絞り込んだ
+ * FaceFinderを返す関数」を渡すことで開口する面を絞り込める。ここではFaceFinder#inList()
+ * (「渡したFace配列とisSame()な面のみを残す」フィルタ)にresolveShellFaces()で幾何マッチングした
+ * 面をそのまま渡す。thicknessは正の値で、node_modules/replicad/dist/replicad.jsのshell()実装が
+ * 内部で-thicknessをBRepOffsetAPI_MakeThickSolidへ渡すため、選択面を取り除いた残りの面から
+ * 内側へthickness(mm)の肉厚を残す(ボディの外形寸法は変わらない)規約になっている。
+ * 過大な厚み等でOCCTが構築に失敗した場合はshell()がそのままErrorをthrowし、呼び出し元の
+ * evaluateDocument()のtry/catchでfeatureId付きエラーに変換される。
+ */
+function applyShell3D(body: Shape3D, feature: ShellFeature): Shape3D {
+  const { matched, allFaces } = resolveShellFaces(body, feature.faces);
+  try {
+    const newBody = body.shell(feature.thickness, (finder) => finder.inList(matched));
+    body.delete();
+    return newBody;
+  } finally {
+    allFaces.forEach((f) => f.delete());
+  }
+}
+
+/**
  * 面の法線から、決定的なxDir(未正規化)を求める。
  * xDir は 法線とグローバルZの外積(normal × Z)。ほぼ平行(Z軸自体を向く面)な場合はグローバルXにフォールバックする。
  * buildFacePlane() と facePlaneBasis() の両方がこの関数を使うことで、
@@ -667,6 +752,129 @@ function extrudeSketchFeature(
 }
 
 /**
+ * 1つのDrawingを指定平面(名前付き平面文字列 または Plane インスタンス)・回転軸・角度で回転体にする
+ * (Phase 25b)。replicadの Sketch#revolve()/Sketches#revolve()/CompoundSketch#revolve()(いずれも
+ * SketchInterface#revolve(revolutionAxis?, {origin, angle})、node_modules/replicad/dist/replicad.d.ts
+ * で確認済み)は内部で revolution(face, origin, revolutionAxis, angle) を呼ぶ。revolutionAxis/origin は
+ * drawing.sketchOnPlane()が返すSketchのワールド座標系(wireそのものが既にプレーンの基底で
+ * ワールド座標に変換済み)で解釈されるため、呼び出し側(revolveSketchFeature)でスケッチ平面の
+ * ワールド基底(basis.origin / basis.xDir / basis.yDir)から求めたワールド方向・原点を渡す。
+ * extrudeDrawing()と同様、sketchOnPlane()の戻り値(SketchInterface | Sketches)は
+ * revolve()呼び出し時に自動的にdelete()される。
+ */
+function revolveDrawing(
+  drawing: Drawing,
+  plane: "XY" | "XZ" | "YZ" | Plane,
+  axisDir: Tuple3,
+  origin: Tuple3,
+  angle: number,
+): Shape3D {
+  const sketched = drawing.sketchOnPlane(plane as never);
+  // sketchOnPlane()の戻り値の型上、revolve()の戻り値はAnyShapeに広がる場合があるが、
+  // 実際には回転体は常に立体(Shape3D)を生む(extrudeDrawing()の同様のコメント参照)。
+  return sketched.revolve(axisDir, { origin, angle }) as Shape3D;
+}
+
+/**
+ * sketchFeatureをaxis("x"|"y")周りにangle度回転させる(Phase 25b)。extrudeSketchFeature()と
+ * 同様に外形(solid)と穴(holes)を別々に回転させ、穴があれば3D側のShape3D#cut()で減算する
+ * (2Dの穴減算がタンジェント形状で失敗しうる問題[Phase 21のextrudeSketchFeature参照]を避けるため、
+ * 押し出しと同じ設計を踏襲する)。
+ * 回転軸はsketchBasisById(evaluateDocument()がsketch評価時に記録したワールド基底)から、
+ * axis:"x"ならxDir、axis:"y"ならyDirを使う(いずれもスケッチ原点=basis.originを通る)。
+ */
+function revolveSketchFeature(
+  sketch: SketchFeature,
+  axis: "x" | "y",
+  angle: number,
+  resolvedFacePlanes: Map<FeatureId, { center: Tuple3; normal: Tuple3 }>,
+  sketchBasisById: Map<FeatureId, PlaneBasis>,
+): Shape3D {
+  const { solid, holes } = buildDrawingParts(sketch.entities, sketch.segments);
+
+  const plane: "XY" | "XZ" | "YZ" | Plane =
+    sketch.plane.kind === "world"
+      ? sketch.plane.plane
+      : (() => {
+          const resolved = resolvedFacePlanes.get(sketch.id);
+          if (!resolved) {
+            throw new Error("内部エラー: 面参照スケッチの平面が解決されていません");
+          }
+          return buildFacePlane(resolved.center, resolved.normal);
+        })();
+
+  const basis = sketchBasisById.get(sketch.id);
+  if (!basis) {
+    throw new Error("内部エラー: スケッチ平面の基底が見つかりません");
+  }
+  const axisDir = axis === "x" ? basis.xDir : basis.yDir;
+  const origin = basis.origin;
+
+  try {
+    let shape = revolveDrawing(solid, plane, axisDir, origin, angle);
+    if (holes) {
+      const holeShape = revolveDrawing(holes, plane, axisDir, origin, angle);
+      try {
+        const cutResult = shape.cut(holeShape);
+        shape.delete();
+        shape = cutResult;
+      } finally {
+        holeShape.delete();
+      }
+    }
+    return shape;
+  } finally {
+    if (sketch.plane.kind !== "world") (plane as Plane).delete();
+  }
+}
+
+/**
+ * extrude/revolve共通の「ボディへの適用(newBody/cut/add)」分岐(Phase 25b)。buildToolは
+ * 実際にDrawingから立体を組み立てるクロージャ(extrudeSketchFeature()/revolveSketchFeature()を渡す)で、
+ * newBody以外の場合にのみ呼ばれる(newBodyはbuildTool()の結果がそのまま新しいボディになる)。
+ * 戻り値は新しいボディ(古いbody/toolはこの関数内でdelete()される)。
+ */
+function applyBodyOperation(
+  body: Shape3D | null,
+  operation: "newBody" | "cut" | "add",
+  buildTool: () => Shape3D,
+): Shape3D {
+  if (operation === "newBody") {
+    if (body) {
+      throw new Error("単一ボディのみ対応です(既にボディが存在します)");
+    }
+    return buildTool();
+  }
+  if (operation === "cut") {
+    if (!body) {
+      throw new Error("カット対象のボディがありません");
+    }
+    const tool = buildTool();
+    let cutResult: Shape3D;
+    try {
+      cutResult = body.cut(tool);
+    } finally {
+      tool.delete();
+    }
+    body.delete();
+    return cutResult;
+  }
+  // operation === "add"
+  if (!body) {
+    throw new Error("追加対象のボディがありません");
+  }
+  const tool = buildTool();
+  let fuseResult: Shape3D;
+  try {
+    fuseResult = body.fuse(tool);
+  } finally {
+    tool.delete();
+  }
+  body.delete();
+  return fuseResult;
+}
+
+/**
  * ドキュメントを評価してひとつのAnyShapeを返す。
  * 失敗時は featureId(特定できれば) 付きのエラーを返す。
  * 成功時に返るshapeの解放は呼び出し側の責務。失敗時は内部で生成した中間形状をすべて解放する。
@@ -675,6 +883,9 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
   const sketches = new Map<FeatureId, SketchFeature>();
   // face参照スケッチの解決済み平面情報(sketchId -> center/normal)。sketch評価時に確定する。
   const resolvedFacePlanes = new Map<FeatureId, { center: Tuple3; normal: Tuple3 }>();
+  // 各スケッチの解決済みワールド基底(sketchId -> basis、Phase 25b)。回転体フィーチャーが
+  // 回転軸(スケッチローカルX/Y)のワールド方向・原点を求めるために使う。
+  const sketchBasisById = new Map<FeatureId, PlaneBasis>();
   // 各extrudeフィーチャー評価直後のボディのスナップショット(featureId -> クローン)。
   // 後続のface参照スケッチが面を再解決するために使う。Shape.clone()はOCCTの参照カウント
   // ベースの軽量コピーであり、live側のbodyを delete() してもスナップショット側は無効化されない
@@ -709,6 +920,7 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
           resolvedFacePlanes.set(feature.id, resolved);
           basis = facePlaneBasis(resolved.center, resolved.normal);
         }
+        sketchBasisById.set(feature.id, basis);
         if (body) {
           referenceEdgesById.set(feature.id, extractReferenceEdges(body, basis));
         }
@@ -726,46 +938,35 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
         continue;
       }
 
+      if (feature.type === "shell") {
+        if (!body) {
+          throw new Error("シェルの対象となるボディがありません");
+        }
+        body = applyShell3D(body, feature);
+        snapshots.set(feature.id, body.clone());
+        continue;
+      }
+
+      if (feature.type === "revolve") {
+        const sketch = sketches.get(feature.sketchId);
+        if (!sketch) {
+          throw new Error(`参照先のスケッチ(${feature.sketchId})が見つかりません`);
+        }
+        body = applyBodyOperation(body, feature.operation, () =>
+          revolveSketchFeature(sketch, feature.axis, feature.angle, resolvedFacePlanes, sketchBasisById),
+        );
+        snapshots.set(feature.id, body.clone());
+        continue;
+      }
+
       // feature.type === "extrude"
       const sketch = sketches.get(feature.sketchId);
       if (!sketch) {
         throw new Error(`参照先のスケッチ(${feature.sketchId})が見つかりません`);
       }
-
-      if (feature.operation === "newBody") {
-        if (body) {
-          throw new Error("単一ボディのみ対応です(既にボディが存在します)");
-        }
-        body = extrudeSketchFeature(sketch, feature.distance, feature.direction, resolvedFacePlanes);
-      } else if (feature.operation === "cut") {
-        if (!body) {
-          throw new Error("カット対象のボディがありません");
-        }
-        const tool = extrudeSketchFeature(sketch, feature.distance, feature.direction, resolvedFacePlanes);
-        let cutResult: Shape3D;
-        try {
-          cutResult = body.cut(tool);
-        } finally {
-          tool.delete();
-        }
-        body.delete();
-        body = cutResult;
-      } else {
-        // feature.operation === "add"
-        if (!body) {
-          throw new Error("追加対象のボディがありません");
-        }
-        const tool = extrudeSketchFeature(sketch, feature.distance, feature.direction, resolvedFacePlanes);
-        let fuseResult: Shape3D;
-        try {
-          fuseResult = body.fuse(tool);
-        } finally {
-          tool.delete();
-        }
-        body.delete();
-        body = fuseResult;
-      }
-
+      body = applyBodyOperation(body, feature.operation, () =>
+        extrudeSketchFeature(sketch, feature.distance, feature.direction, resolvedFacePlanes),
+      );
       snapshots.set(feature.id, body.clone());
     }
   } catch (err) {

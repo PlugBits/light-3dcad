@@ -257,8 +257,55 @@ export interface Fillet3DFeature {
   edges: FilletEdgeRef[];
 }
 
+/**
+ * シェル(中抜き)の対象面のスナップショット(Phase 25b)。FilletEdgeRefと同じ考え方で、
+ * faceIdは選択時点のB-Rep面ID(replicadのface.hashCode)であり再評価のたびに変わりうるため
+ * 第一候補としてのみ使う。center/normal(いずれもワールド座標、mm)は幾何マッチングの
+ * フォールバック(src/worker/evaluator.tsのresolveShellFaces参照。resolveFaceGeometryと同じ
+ * 「平面かつ法線一致+中心最近傍」判定を、複数面かつ重複マッチ不可の条件で行う)に使う。
+ */
+export interface ShellFaceRef {
+  faceId: number;
+  center: [number, number, number];
+  normal: [number, number, number];
+}
+
+/**
+ * シェル(中抜き)フィーチャー(Phase 25b)。直前までのボディに replicad の Shape3D#shell() を
+ * 適用し、facesで指定した面を開口したまま、残りの面から厚みthickness(mm)の殻状の形状を作る
+ * (replicadのshell()は正の厚みで内側へ肉厚を確保する規約。node_modules/replicad/dist/replicad.js
+ * のshell()実装[-thicknessをBRepOffsetAPI_MakeThickSolidへ渡す]で確認済み)。
+ * facesは選択時点のスナップショット配列(1つ以上必須)。再評価のたびにevaluator.tsの
+ * resolveShellFaces()が現在ボディの面から幾何マッチングして解決し直す(マッチできなければ
+ * featureId付きエラーになる。v1では面再選択UIを持たないため、作り直しが必要)。
+ */
+export interface ShellFeature {
+  type: "shell";
+  id: FeatureId;
+  name: string;
+  thickness: number;
+  faces: ShellFaceRef[];
+}
+
+/**
+ * 回転体(Revolve)フィーチャー(Phase 25b)。sketchIdのプロファイル(押し出しと同じ
+ * buildDrawingParts()の外形/穴)を、スケッチローカルのX軸またはY軸(いずれもスケッチ原点を通る)を
+ * 回転軸としてangle度だけ回転させる。angleの既定値は360(v1ではUIのデフォルト値として扱う。
+ * このフィールド自体は必須)。operationは押し出しと同じ newBody/add/cut の3種で、
+ * evaluator側の分岐(ボディへのfuse/cut)も押し出しと共通のロジックを使う。
+ */
+export interface RevolveFeature {
+  type: "revolve";
+  id: FeatureId;
+  name: string;
+  sketchId: FeatureId;
+  axis: "x" | "y";
+  angle: number;
+  operation: "newBody" | "add" | "cut";
+}
+
 /** フィーチャー(履歴列の1要素)。 */
-export type Feature = SketchFeature | ExtrudeFeature | Fillet3DFeature;
+export type Feature = SketchFeature | ExtrudeFeature | Fillet3DFeature | ShellFeature | RevolveFeature;
 
 /**
  * CADドキュメント全体。features は順序付き(=編集履歴)。

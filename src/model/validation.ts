@@ -382,6 +382,29 @@ export function validateFeature(feature: Feature, allFeatures: readonly Feature[
     if (feature.edges.length === 0) {
       errors.push({ featureId: feature.id, message: "フィレット/面取りの対象エッジが選択されていません" });
     }
+  } else if (feature.type === "shell") {
+    if (!isPositiveFiniteNumber(feature.thickness)) {
+      errors.push({ featureId: feature.id, message: "シェルの肉厚は正の数である必要があります" });
+    }
+    if (feature.faces.length === 0) {
+      errors.push({ featureId: feature.id, message: "シェルの対象面が選択されていません" });
+    }
+  } else if (feature.type === "revolve") {
+    if (feature.axis !== "x" && feature.axis !== "y") {
+      errors.push({ featureId: feature.id, message: "回転体の軸はxまたはyである必要があります" });
+    }
+    if (!Number.isFinite(feature.angle) || feature.angle <= 0 || feature.angle > 360) {
+      errors.push({ featureId: feature.id, message: "回転体の角度は0より大きく360以下である必要があります" });
+    }
+    if (feature.operation !== "newBody" && feature.operation !== "cut" && feature.operation !== "add") {
+      errors.push({ featureId: feature.id, message: "対応していない回転体操作です" });
+    }
+    const referenced = allFeatures.find((f) => f.id === feature.sketchId);
+    if (!referenced) {
+      errors.push({ featureId: feature.id, message: `参照先のスケッチ(${feature.sketchId})が存在しません` });
+    } else if (referenced.type !== "sketch") {
+      errors.push({ featureId: feature.id, message: `参照先(${feature.sketchId})はスケッチではありません` });
+    }
   }
 
   return errors;

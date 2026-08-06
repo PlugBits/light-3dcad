@@ -11,6 +11,9 @@ import type {
   FilletEdgeRef,
   PlaneRef,
   PolygonCorner,
+  RevolveFeature,
+  ShellFaceRef,
+  ShellFeature,
   SketchConstraint,
   SketchEntity,
   SketchFeature,
@@ -95,6 +98,62 @@ export function patchFillet3DFeature(
   patch: Partial<Pick<Fillet3DFeature, "name" | "size">>,
 ): CadDocument {
   return updateFeature<Fillet3DFeature>(doc, featureId, (f) => ({ ...f, ...patch }));
+}
+
+/** 新しいシェル(中抜き)フィーチャーを作成して末尾に追加する。IDは自動生成される(Phase 25b)。 */
+export function addShellFeature(
+  doc: CadDocument,
+  params: { name: string; thickness: number; faces: ShellFaceRef[] },
+): { doc: CadDocument; feature: ShellFeature } {
+  const feature: ShellFeature = {
+    type: "shell",
+    id: generateId("shell"),
+    name: params.name,
+    thickness: params.thickness,
+    faces: params.faces,
+  };
+  return { doc: addFeature(doc, feature), feature };
+}
+
+/** shell フィーチャーの一部フィールド(name, thickness)を更新する。faces(対象面)は再選択が必要なため対象外(v1)。 */
+export function patchShellFeature(
+  doc: CadDocument,
+  featureId: FeatureId,
+  patch: Partial<Pick<ShellFeature, "name" | "thickness">>,
+): CadDocument {
+  return updateFeature<ShellFeature>(doc, featureId, (f) => ({ ...f, ...patch }));
+}
+
+/** 新しい回転体(Revolve)フィーチャーを作成して末尾に追加する。IDは自動生成される(Phase 25b)。 */
+export function addRevolveFeature(
+  doc: CadDocument,
+  params: {
+    name: string;
+    sketchId: FeatureId;
+    axis: "x" | "y";
+    angle: number;
+    operation: RevolveFeature["operation"];
+  },
+): { doc: CadDocument; feature: RevolveFeature } {
+  const feature: RevolveFeature = {
+    type: "revolve",
+    id: generateId("revolve"),
+    name: params.name,
+    sketchId: params.sketchId,
+    axis: params.axis,
+    angle: params.angle,
+    operation: params.operation,
+  };
+  return { doc: addFeature(doc, feature), feature };
+}
+
+/** revolve フィーチャーの一部フィールドを更新する。 */
+export function patchRevolveFeature(
+  doc: CadDocument,
+  featureId: FeatureId,
+  patch: Partial<Pick<RevolveFeature, "name" | "sketchId" | "axis" | "angle" | "operation">>,
+): CadDocument {
+  return updateFeature<RevolveFeature>(doc, featureId, (f) => ({ ...f, ...patch }));
 }
 
 /** 指定IDのフィーチャーを探す。見つからなければ undefined。 */
@@ -355,7 +414,7 @@ export function removeFeature(doc: CadDocument, featureId: FeatureId): CadDocume
 export function getDirectDependentFeatureIds(doc: CadDocument, featureId: FeatureId): FeatureId[] {
   const dependents: FeatureId[] = [];
   for (const feature of doc.features) {
-    if (feature.type === "extrude" && feature.sketchId === featureId) {
+    if ((feature.type === "extrude" || feature.type === "revolve") && feature.sketchId === featureId) {
       dependents.push(feature.id);
     }
     if (feature.type === "sketch" && feature.plane.kind === "face" && feature.plane.featureId === featureId) {

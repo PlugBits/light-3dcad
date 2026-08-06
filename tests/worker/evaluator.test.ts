@@ -12,6 +12,8 @@ import type { OpenCascadeInstance } from "replicad-opencascadejs/src/replicad_si
 import {
   addExtrudeFeature,
   addFillet3DFeature,
+  addRevolveFeature,
+  addShellFeature,
   addSketchFeature,
   createArcSegment,
   createCircleEntity,
@@ -1811,6 +1813,224 @@ describe("evaluateDocument (WASM統合): 3Dフィレット/面取り(Phase 25a)"
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.featureId).toBe(feature.id);
+    expect(result.message.length).toBeGreaterThan(0);
+  });
+});
+
+describe("evaluateDocument (WASM統合): シェル(中抜き、Phase 25b)", () => {
+  /** 60x40x20の箱(XY原点中心、Z方向に押し出し)のドキュメントを作る共通セットアップ。 */
+  function buildBoxDoc(distance = 20) {
+    const empty = createEmptyDocument();
+    const rect = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+    });
+    const { doc, feature: extrude } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance,
+      direction: 1,
+      operation: "newBody",
+    });
+    return { doc, extrude };
+  }
+
+  it("上面を開口して肉厚2のシェルを適用すると体積が薄肉相当まで減る", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: boxDoc } = buildBoxDoc(20);
+    const boxResult = evaluateDocument(boxDoc);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const boxVolume = measureVolume(boxResult.shape);
+    expect(boxVolume).toBeCloseTo(60 * 40 * 20, 3);
+    const topFace = findTopFace(boxResult.shape);
+    boxResult.shape.delete();
+
+    const { doc } = addShellFeature(boxDoc, {
+      name: "シェル1",
+      thickness: 2,
+      faces: [topFace],
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const volume = measureVolume(result.shape);
+    result.shape.delete();
+    // 外形寸法60x40x20から、肉厚2mmの殻(底面+側面4枚、上面は開口)を残した程度まで減るはず
+    // (手計算の目安: 内側キャビティ56x36x18=36288 → 殻の体積は48000-36288=11712程度)。
+    // 幾何計算の詳細差異を避けるため、緩めの範囲(半分以下・0より大)のみを検証する。
+    expect(volume).toBeGreaterThan(0);
+    expect(volume).toBeLessThan(boxVolume / 2);
+  });
+
+  it("寸法変更(押し出し距離)後も幾何マッチングで同じ面にシェルが追従する", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: boxDoc, extrude } = buildBoxDoc(20);
+    const boxResult = evaluateDocument(boxDoc);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const topFace = findTopFace(boxResult.shape);
+    boxResult.shape.delete();
+
+    const { doc: shellDoc } = addShellFeature(boxDoc, {
+      name: "シェル1",
+      thickness: 2,
+      faces: [topFace],
+    });
+
+    // 高さを20→22へ変更する(faceIdはOCCTの再構築で変わりうるため、resolveShellFacesの
+    // フォールバック[平面かつ法線一致+中心最近傍]で再解決される想定)。
+    const changedDoc = patchExtrudeFeature(shellDoc, extrude.id, { distance: 22 });
+    const result = evaluateDocument(changedDoc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const volume = measureVolume(result.shape);
+    result.shape.delete();
+    // シェルが追従して適用されていれば、無加工の60x40x22の箱より体積が小さいはず。
+    expect(volume).toBeLessThan(60 * 40 * 22);
+    expect(volume).toBeGreaterThan(0);
+  });
+
+  it("過大な肉厚を指定するとfeatureId付きのエラーになる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: boxDoc } = buildBoxDoc(20);
+    const boxResult = evaluateDocument(boxDoc);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const topFace = findTopFace(boxResult.shape);
+    boxResult.shape.delete();
+
+    const { doc, feature } = addShellFeature(boxDoc, {
+      name: "シェル1",
+      thickness: 100,
+      faces: [topFace],
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.featureId).toBe(feature.id);
+    expect(result.message.length).toBeGreaterThan(0);
+  });
+});
+
+describe("evaluateDocument (WASM統合): 回転体(Revolve、Phase 25b)", () => {
+  /** 軸から離れた矩形(スケッチX軸周りに回転すると、major radius=30・断面20x10のトーラス相当になる)。 */
+  function buildOffsetRectDoc(angle: number) {
+    const empty = createEmptyDocument();
+    const rect = createRectangleEntity({ center: [0, 30], width: 20, height: 10 });
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+    });
+    const { doc, feature: revolve } = addRevolveFeature(doc1, {
+      name: "Revolve1",
+      sketchId: sketch.id,
+      axis: "x",
+      angle,
+      operation: "newBody",
+    });
+    return { doc, revolve };
+  }
+
+  it("軸から離れた矩形を360°回転すると、パップスの定理どおりの体積のトーラスになる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc } = buildOffsetRectDoc(360);
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const volume = measureVolume(result.shape);
+    result.shape.delete();
+    // パップスの定理: V = 2π * 重心の軸からの距離(30) * 断面積(20*10=200)。
+    expect(volume).toBeCloseTo(2 * Math.PI * 30 * 200, 1);
+  });
+
+  it("90°回転すると、360°回転の1/4の体積になる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc } = buildOffsetRectDoc(90);
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const volume = measureVolume(result.shape);
+    result.shape.delete();
+    // パップスの定理(部分回転): V = 回転角(ラジアン) * 重心の軸からの距離(30) * 断面積(200)。
+    expect(volume).toBeCloseTo((Math.PI / 2) * 30 * 200, 1);
+  });
+
+  it("cut操作: 箱を回転体でくり抜くと体積が減る", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const boxRect = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: doc1, feature: boxSketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [boxRect],
+    });
+    const { doc: doc2 } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: boxSketch.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const boxResult = evaluateDocument(doc2);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const boxVolume = measureVolume(boxResult.shape);
+    boxResult.shape.delete();
+
+    // 軸(世界X軸)から離れた円(トーラス状のツール、major radius=10・tube radius=8)を、
+    // 箱と重なるように箱の底面スケッチ(XY、z=0)上に描く。
+    const circle = createCircleEntity({ center: [0, 10], radius: 8 });
+    const { doc: doc3, feature: toolSketch } = addSketchFeature(doc2, {
+      name: "Sketch2",
+      plane: { kind: "world", plane: "XY" },
+      entities: [circle],
+    });
+    const { doc: cutDoc } = addRevolveFeature(doc3, {
+      name: "Revolve1",
+      sketchId: toolSketch.id,
+      axis: "x",
+      angle: 360,
+      operation: "cut",
+    });
+
+    const result = evaluateDocument(cutDoc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const volume = measureVolume(result.shape);
+    result.shape.delete();
+    expect(volume).toBeGreaterThan(0);
+    expect(volume).toBeLessThan(boxVolume);
+  });
+
+  it("プロファイルが回転軸をまたぐとOCCTエラーになりfeatureId付きで返る", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    // center=(0,0)の矩形はスケッチX軸(y=0)をまたぐため、自己交差する回転体になり失敗する。
+    const rect = createRectangleEntity({ center: [0, 0], width: 20, height: 10 });
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+    });
+    const { doc, feature: revolve } = addRevolveFeature(doc1, {
+      name: "Revolve1",
+      sketchId: sketch.id,
+      axis: "x",
+      angle: 360,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.featureId).toBe(revolve.id);
     expect(result.message.length).toBeGreaterThan(0);
   });
 });
