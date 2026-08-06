@@ -15,6 +15,7 @@ import {
   type SnapCandidate,
   type SnapKind,
 } from "../sketch/snapping";
+import { getStandardViewOrientation, type StandardView } from "./standardViews";
 
 /** SolidWorks風の明るいグレー系ボディ色。 */
 const BASE_COLOR = 0xc8ccd2;
@@ -134,6 +135,21 @@ export interface CircleDrawingCallbacks {
 
 /** 描画モードの対象図形種別。polygonは既存の複数頂点線描画、rectangle/circleは2クリック作図(Phase 14)。 */
 type DrawingShapeKind = "polygon" | "rectangle" | "circle";
+
+/** フィレット/面取りツール(Phase 18)の開始/終了時に呼ばれるコールバック。 */
+export interface CornerToolCallbacks {
+  /**
+   * polygon頂点付近(スクリーン距離10px程度以内)がクリックされたときに呼ばれる。
+   * 実際にcorners配列を更新する(トグルを含む)のはApp側の責務とする
+   * (CadViewerはジオメトリのヒット判定のみを行い、ドキュメントの正本は持たないため)。
+   */
+  onVertexClick: (entityId: string, vertexIndex: number) => void;
+  /** Escapeキーまたはcancel呼び出しで終了したときに呼ばれる。 */
+  onCancel: () => void;
+}
+
+/** フィレット/面取りツールの頂点ヒット判定の許容スクリーン距離(px)。 */
+const CORNER_HIT_TOLERANCE_PX = 10;
 
 declare global {
   interface Window {
@@ -439,6 +455,13 @@ export class CadViewer {
    */
   private frameCallbacks = new Set<() => void>();
 
+  /** フィレット/面取りツール(Phase 18)がアクティブかどうか。trueの間はクリックを頂点ヒット判定として扱う。 */
+  private cornerToolActive = false;
+  private cornerToolBasis: PlaneBasis | null = null;
+  /** ヒット判定対象のエンティティ(対象スケッチのentities、polygon以外は無視する)。 */
+  private cornerToolEntities: SketchEntity[] = [];
+  private cornerToolCallbacks: CornerToolCallbacks | null = null;
+
   constructor(
     container: HTMLElement,
     onFaceSelect?: (face: FaceInfo | null) => void,
@@ -596,6 +619,12 @@ export class CadViewer {
    * 衝突しないよう、入力欄が開いている間はEscapeを入力キャンセルに限定する)。
    */
   private handleKeyDown = (event: KeyboardEvent) => {
+    if (this.cornerToolActive) {
+      if (event.key === "Escape") {
+        this.cancelCornerTool();
+      }
+      return;
+    }
     if (this.drawingActive) {
       if (event.key === "Escape") {
         if (this.lengthInputActive) {
@@ -676,6 +705,10 @@ export class CadViewer {
   }
 
   private handleClick = (event: MouseEvent) => {
+    if (this.cornerToolActive) {
+      this.handleCornerToolClick(event);
+      return;
+    }
     if (this.drawingActive) {
       if (this.drawingShape === "polygon") {
         this.handlePolygonClick(event);
@@ -1004,6 +1037,50 @@ export class CadViewer {
     this.controls.update();
   }
 
+  /**
+   * SolidWorks風の標準ビュー(正面/背面/左/右/上/下/等角)へカメラを切り替える(Phase 16)。
+   * 注視点は現在のメッシュがあればそのバウンディングスフィア中心、無ければ原点。距離は
+   * fitToView()と同様にバウンディングスフィア半径(メッシュが無ければmeshHalfExtent)から
+   * 画角に収まるよう計算する。upベクトルは向きごとに軸が退化しないものを使う
+   * (src/viewer/standardViews.ts参照)。
+   */
+  setStandardView(view: StandardView) {
+    const target = this.getStandardViewTarget();
+    const { direction, up } = getStandardViewOrientation(view);
+    const distance = this.computeStandardViewDistance();
+    const dir = new THREE.Vector3(direction[0], direction[1], direction[2]).normalize();
+
+    this.camera.up.set(up[0], up[1], up[2]);
+    this.camera.position.copy(target.clone().addScaledVector(dir, distance));
+    this.controls.target.copy(target);
+    this.controls.update();
+  }
+
+  /** 標準ビューの注視点(メッシュがあればバウンディングスフィア中心、無ければ原点)。 */
+  private getStandardViewTarget(): THREE.Vector3 {
+    if (this.mesh) {
+      this.mesh.geometry.computeBoundingSphere();
+      const sphere = this.mesh.geometry.boundingSphere;
+      if (sphere && sphere.radius > 0) return sphere.center.clone();
+    }
+    return new THREE.Vector3(0, 0, 0);
+  }
+
+  /** 標準ビューのカメラ距離(fitToView()と同じ「画角に収まる+15%余白」の考え方)。 */
+  private computeStandardViewDistance(): number {
+    let radius = this.meshHalfExtent;
+    if (this.mesh) {
+      this.mesh.geometry.computeBoundingSphere();
+      const sphere = this.mesh.geometry.boundingSphere;
+      if (sphere && sphere.radius > 0) radius = sphere.radius;
+    }
+    radius = Math.max(radius, 1);
+    const vFov = (this.camera.fov * Math.PI) / 180;
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * this.camera.aspect);
+    const fitFov = Math.min(vFov, hFov);
+    return (radius / Math.sin(fitFov / 2)) * 1.15;
+  }
+
   /** 直前のsetSketchOverlay()呼び出しで生成した線・グリッドをsceneから取り除き、リソースを解放する。 */
   private clearSketchOverlay() {
     while (this.sketchOverlayGroup.children.length > 0) {
@@ -1142,6 +1219,84 @@ export class CadViewer {
     this.circleCallbacks = callbacks;
   }
 
+  /**
+   * フィレット/面取りツール(Phase 18)を開始する。既存の線描画モード・面選択は中断/解除する。
+   * 以後のクリックは面選択ではなく、対象スケッチのpolygonエンティティの頂点付近ヒット判定として
+   * 扱われ、ヒットすると`callbacks.onVertexClick`が呼ばれる(実際のcorners更新はApp側の責務)。
+   */
+  startCornerTool(basis: PlaneBasis, entities: SketchEntity[], callbacks: CornerToolCallbacks) {
+    this.cancelCornerTool();
+    this.cancelPolygonDrawing();
+    this.clearSelection();
+    this.setHoverGroup(null);
+    this.cornerToolActive = true;
+    this.cornerToolBasis = basis;
+    this.cornerToolEntities = entities;
+    this.cornerToolCallbacks = callbacks;
+    this.renderer.domElement.style.cursor = "crosshair";
+  }
+
+  /**
+   * ヒット判定対象のエンティティ一覧を更新する(フィレット/面取り適用でcornersが変わった後、
+   * 呼び出し側の最新entitiesを反映するために使う想定)。ツール非アクティブ時は何もしない。
+   */
+  updateCornerToolEntities(entities: SketchEntity[]) {
+    if (!this.cornerToolActive) return;
+    this.cornerToolEntities = entities;
+  }
+
+  isCornerToolActive(): boolean {
+    return this.cornerToolActive;
+  }
+
+  /** フィレット/面取りツールを終了する(onCancelが呼ばれる)。非アクティブなら何もしない。 */
+  cancelCornerTool() {
+    if (!this.cornerToolActive) return;
+    const callbacks = this.cornerToolCallbacks;
+    this.cornerToolActive = false;
+    this.cornerToolBasis = null;
+    this.cornerToolEntities = [];
+    this.cornerToolCallbacks = null;
+    this.renderer.domElement.style.cursor = "";
+    callbacks?.onCancel();
+  }
+
+  /**
+   * フィレット/面取りツール中のクリック処理。対象スケッチのpolygonエンティティの全頂点を
+   * スクリーン座標に投影し、クリック位置からCORNER_HIT_TOLERANCE_PX以内で最も近い頂点が
+   * あれば`onVertexClick`を呼ぶ(複数候補がある場合は最も近いものを採用)。ヒットが無ければ何もしない
+   * (連続クリックで複数頂点に適用できるよう、ツール自体は終了しない)。
+   */
+  private handleCornerToolClick(event: MouseEvent) {
+    if (!this.cornerToolBasis) return;
+    const basis = this.cornerToolBasis;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+
+    type Hit = { entityId: string; vertexIndex: number; distSq: number };
+    let best: Hit | null = null;
+    for (const entity of this.cornerToolEntities) {
+      if (entity.kind !== "polygon") continue;
+      for (let vertexIndex = 0; vertexIndex < entity.points.length; vertexIndex += 1) {
+        const point = entity.points[vertexIndex];
+        const world = planeLocalToWorld(basis, point[0], point[1]);
+        const screen = this.projectPoint(world);
+        if (!screen) continue;
+        const dx = screen.x - px;
+        const dy = screen.y - py;
+        const distSq = dx * dx + dy * dy;
+        if (distSq > CORNER_HIT_TOLERANCE_PX * CORNER_HIT_TOLERANCE_PX) continue;
+        if (best === null || distSq < best.distSq) {
+          best = { entityId: entity.id, vertexIndex, distSq };
+        }
+      }
+    }
+    if (best) {
+      this.cornerToolCallbacks?.onVertexClick(best.entityId, best.vertexIndex);
+    }
+  }
+
   /** 描画モード中のスナップ(グリッド+点スナップ)有効/無効をリアルタイムに切り替える。軸ロックはこれと独立。 */
   setPolygonDrawingSnap(enabled: boolean) {
     this.drawingSnap = enabled;
@@ -1273,6 +1428,8 @@ export class CadViewer {
    * 更新し、描画モード外であれば面ホバーハイライトを更新する。
    */
   private handleDrawingMouseMove = (event: MouseEvent) => {
+    // フィレット/面取りツール中は面ホバーハイライトも描画プレビューも不要(クリックのみで完結する)。
+    if (this.cornerToolActive) return;
     if (!this.drawingActive || !this.drawingBasis) {
       this.handleHoverMouseMove(event);
       return;

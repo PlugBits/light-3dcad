@@ -5,14 +5,27 @@ import { ExtrudeEditor } from "../components/ExtrudeEditor";
 import { FeatureTree } from "../components/FeatureTree";
 import { SketchEditor } from "../components/SketchEditor";
 import { downloadStl } from "../export/downloadStl";
-import { addSketchEntity, findFeature, getDependentFeatureIds } from "../model/document";
+import { addSketchEntity, findFeature, getDependentFeatureIds, setPolygonVertexCorner } from "../model/document";
 import { createCircleEntity, createPolygonEntity, createRectangleEntity } from "../model/entity";
+import type { PolygonCorner } from "../model/types";
 import { rectangleFromCorners } from "../sketch/shapeFromPoints";
 import { useCadStore } from "../state/store";
 import { CadViewer, type SketchOverlayEntry } from "../viewer/CadViewer";
+import type { StandardView } from "../viewer/standardViews";
 
 /** ツールバーで選択中の作図ツール(未選択はnull)。line=既存の複数頂点線描画、rect/circleはPhase 14の2クリック作図。 */
 type DrawingTool = "line" | "rect" | "circle" | null;
+
+/** ツールバーの標準ビューボタン(正面/背面/左/右/上/下/等角、Phase 16)。 */
+const STANDARD_VIEW_BUTTONS: { view: StandardView; label: string; title: string }[] = [
+  { view: "front", label: "正面", title: "正面(-Y側)から見る" },
+  { view: "back", label: "背面", title: "背面(+Y側)から見る" },
+  { view: "left", label: "左", title: "左側面(-X側)から見る" },
+  { view: "right", label: "右", title: "右側面(+X側)から見る" },
+  { view: "top", label: "上", title: "上面(+Z側)から見る" },
+  { view: "bottom", label: "下", title: "下面(-Z側)から見る" },
+  { view: "iso", label: "等角", title: "等角(アイソメトリック)ビュー" },
+];
 
 export default function App() {
   const viewerContainerRef = useRef<HTMLDivElement | null>(null);
@@ -47,12 +60,20 @@ export default function App() {
 
   // 現在アクティブな作図ツール(line/rect/circle、未選択はnull)。実体(頂点列・プレビュー)はCadViewerが持つ。
   const [activeTool, setActiveTool] = useState<DrawingTool>(null);
-  // 描画モード開始時点で対象だったスケッチID。選択が他に移ったら自動キャンセルするために使う。
+  // 描画モード開始時点で対象だったスケッチID。選択が他に移ったら自動キャンセルするために使う
+  // (フィレット/面取りツールの開始時にも同じフィールドを使い回す)。
   const [drawingSketchId, setDrawingSketchId] = useState<string | null>(null);
   // 1mmグリッドスナップ(デフォルトON)。
   const [gridSnap, setGridSnap] = useState(true);
   // 「スケッチ追加」ボタンで使う平面選択(Phase 13)。基準平面クリックと同等の機能をUIからも操作できるようにする。
   const [newSketchPlane, setNewSketchPlane] = useState<"XY" | "XZ" | "YZ">("XY");
+  // 現在アクティブなフィレット/面取りツール(未選択はnull、Phase 18)。
+  const [cornerTool, setCornerTool] = useState<"fillet" | "chamfer" | null>(null);
+  // フィレット/面取りツールで頂点クリック時に適用するサイズ(mm、デフォルト5)。
+  const [cornerSize, setCornerSize] = useState(5);
+  // クリックコールバック(マウント時に一度だけ渡す)から最新のcornerSizeを参照するためのref。
+  const cornerSizeRef = useRef(cornerSize);
+  cornerSizeRef.current = cornerSize;
 
   // Workerを起動し、初期ドキュメントの評価を1回だけ要求する。
   useEffect(() => {
@@ -133,12 +154,25 @@ export default function App() {
 
   // 描画モード中にフィーチャーツリーの選択が別のフィーチャーに移った場合は、描画モードを
   // 自動的にキャンセルする(ビューア側のcancelPolygonDrawing()がonCancelを呼び、
-  // activeToolのReact stateもそこで null に戻る)。
+  // activeToolのReact stateもそこで null に戻る)。フィレット/面取りツール(cornerTool)も同様。
   useEffect(() => {
     if (activeTool && selectedFeatureId !== drawingSketchId) {
       viewerRef.current?.cancelPolygonDrawing();
     }
-  }, [activeTool, selectedFeatureId, drawingSketchId]);
+    if (cornerTool && selectedFeatureId !== drawingSketchId) {
+      viewerRef.current?.cancelCornerTool();
+    }
+  }, [activeTool, cornerTool, selectedFeatureId, drawingSketchId]);
+
+  // フィレット/面取りツール中、対象スケッチのentitiesが変わった場合はヒット判定対象を更新する
+  // (フィレット/面取りは頂点座標自体は変えないため必須ではないが、将来の変更に備えて同期しておく)。
+  useEffect(() => {
+    if (!cornerTool) return;
+    const feature = selectedFeatureId ? findFeature(doc, selectedFeatureId) : undefined;
+    if (feature?.type === "sketch") {
+      viewerRef.current?.updateCornerToolEntities(feature.entities);
+    }
+  }, [cornerTool, doc, selectedFeatureId]);
 
   // Ctrl+Z(Mac: Cmd+Z)でアンドゥ、Ctrl+Shift+Z(Mac: Cmd+Shift+Z)でリドゥ(Phase 14)。
   // テキスト入力欄にフォーカスがある間はブラウザ標準のテキスト編集アンドゥを優先し、何もしない。
@@ -281,7 +315,49 @@ export default function App() {
 
   /** 指定ツールのボタンをdisabledにすべきか(他のツールが実行中、または対象スケッチ平面が未確定)。 */
   function isToolDisabled(tool: Exclude<DrawingTool, null>): boolean {
+    if (cornerTool) return true;
     if (activeTool) return activeTool !== tool;
+    return !selectedSketchPlane;
+  }
+
+  /**
+   * フィレット/面取りツール(Phase 18)を開始する。ビューア上でpolygon頂点付近をクリックすると
+   * その頂点にcornerSizeで指定したサイズのフィレット/面取りを適用する(既に同種が設定済みなら
+   * トグルで解除)。onVertexClickはstartCornerTool呼び出し時に一度だけ渡すコールバックのため、
+   * 最新のドキュメント・サイズはgetState()/refから読む(古いクロージャを掴まないようにするため)。
+   */
+  function handleStartCornerTool(kind: "fillet" | "chamfer") {
+    if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
+    const sketchId = selectedFeature.id;
+    viewerRef.current.startCornerTool(selectedSketchPlane, selectedFeature.entities, {
+      onVertexClick: (entityId, vertexIndex) => {
+        const currentDoc = useCadStore.getState().doc;
+        const feature = findFeature(currentDoc, sketchId);
+        if (!feature || feature.type !== "sketch") return;
+        const entity = feature.entities.find((e) => e.id === entityId);
+        if (!entity || entity.kind !== "polygon") return;
+        const current = entity.corners?.[vertexIndex] ?? null;
+        // 既に同種のコーナーが設定済みならトグルで解除、それ以外は現在のサイズで新規/種別変更する。
+        const next: PolygonCorner = current && current.kind === kind ? null : { kind, size: cornerSizeRef.current };
+        useCadStore.getState().updateDocument((d) => setPolygonVertexCorner(d, sketchId, entityId, vertexIndex, next));
+      },
+      onCancel: () => {
+        setCornerTool(null);
+        setDrawingSketchId(null);
+      },
+    });
+    setDrawingSketchId(sketchId);
+    setCornerTool(kind);
+  }
+
+  function handleCancelCornerTool() {
+    viewerRef.current?.cancelCornerTool();
+  }
+
+  /** フィレット/面取りボタンをdisabledにすべきか(他の作図ツール実行中、または対象スケッチ平面が未確定)。 */
+  function isCornerToolDisabled(kind: "fillet" | "chamfer"): boolean {
+    if (activeTool) return true;
+    if (cornerTool) return cornerTool !== kind;
     return !selectedSketchPlane;
   }
 
@@ -348,6 +424,23 @@ export default function App() {
         >
           平面に正対
         </button>
+        <span
+          style={{ display: "flex", gap: 4, alignItems: "center", paddingLeft: 8, borderLeft: "1px solid #444" }}
+          title="標準ビュー(SolidWorks風)へカメラを切り替えます"
+        >
+          {STANDARD_VIEW_BUTTONS.map(({ view, label, title }) => (
+            <button
+              key={view}
+              type="button"
+              data-testid={`btn-view-${view}`}
+              onClick={() => viewerRef.current?.setStandardView(view)}
+              title={title}
+              style={{ fontSize: 11, padding: "2px 6px" }}
+            >
+              {label}
+            </button>
+          ))}
+        </span>
         <button
           type="button"
           data-testid="btn-draw-polygon"
@@ -375,6 +468,46 @@ export default function App() {
         >
           {activeTool === "circle" ? "円キャンセル(Esc)" : "円"}
         </button>
+        <span
+          style={{ display: "flex", gap: 4, alignItems: "center", paddingLeft: 8, borderLeft: "1px solid #444" }}
+        >
+          <button
+            type="button"
+            data-testid="btn-corner-fillet"
+            onClick={cornerTool === "fillet" ? handleCancelCornerTool : () => handleStartCornerTool("fillet")}
+            disabled={isCornerToolDisabled("fillet")}
+            title="ビューア上でpolygonの頂点付近をクリックしてフィレット(丸め)を適用します(適用済みの頂点をクリックすると解除、Escで終了)"
+          >
+            {cornerTool === "fillet" ? "フィレットキャンセル(Esc)" : "フィレット"}
+          </button>
+          <button
+            type="button"
+            data-testid="btn-corner-chamfer"
+            onClick={cornerTool === "chamfer" ? handleCancelCornerTool : () => handleStartCornerTool("chamfer")}
+            disabled={isCornerToolDisabled("chamfer")}
+            title="ビューア上でpolygonの頂点付近をクリックして面取りを適用します(適用済みの頂点をクリックすると解除、Escで終了)"
+          >
+            {cornerTool === "chamfer" ? "面取りキャンセル(Esc)" : "面取り"}
+          </button>
+          {cornerTool && (
+            <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }} title="頂点クリックで適用するサイズ(mm)">
+              サイズ
+              <input
+                type="number"
+                data-testid="corner-tool-size"
+                value={cornerSize}
+                min={0.1}
+                step="any"
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  if (Number.isFinite(v) && v > 0) setCornerSize(v);
+                }}
+                style={{ width: 50 }}
+              />
+              mm
+            </label>
+          )}
+        </span>
         <button
           type="button"
           data-testid="btn-undo"
@@ -417,6 +550,11 @@ export default function App() {
         {activeTool && (
           <span data-testid="drawing-shift-hint" style={{ fontSize: 11, opacity: 0.7 }}>
             Shift押下中はスナップ・軸ロックを一時無効化(フリー入力)
+          </span>
+        )}
+        {cornerTool && (
+          <span data-testid="corner-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
+            頂点付近をクリックして適用/解除(連続クリック可、Escで終了)
           </span>
         )}
         <span data-testid="status-text" style={{ fontSize: 12, opacity: 0.8, marginLeft: "auto" }}>
@@ -514,7 +652,7 @@ export default function App() {
               sketch={selectedFeature}
               basis={selectedSketchPlane}
               viewerRef={viewerRef}
-              visible={showSketches && !activeTool}
+              visible={showSketches && !activeTool && !cornerTool}
             />
           )}
           {showInitOverlay && (

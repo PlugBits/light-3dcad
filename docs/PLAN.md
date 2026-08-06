@@ -343,3 +343,18 @@ Vitest138件(履歴・2点→矩形/円変換の新規11件)。
 `evaluator.ts`の`buildDrawing`をこの分類に基づき「外枠同士をfuse→穴をまとめてcut」する構成に変更
 (部分交差する図形は従来どおりfuse)。Vitest149件(包含判定単体6件+分類3件+矩形内円/ドーナツの
 体積検証2件が新規)。
+
+## Phase 16: 標準ビュー切替(SolidWorks風)完了
+
+`src/viewer/standardViews.ts`(純TS、three.js非依存)に正面/背面/左/右/上/下/等角のカメラ方向・up
+ベクトル定義を新設し、`CadViewer.setStandardView()`で現在のメッシュ(無ければ原点)を注視点に
+フィット距離でカメラを配置するようにした。ツールバーに短いテキストの7ボタン(正面/背面/左/右/上/
+下/等角)を追加。Vitest153件(方向計算の新規4件)。
+
+## Phase 18: スケッチフィレット/面取りの専用ツール化完了
+
+`CadViewer`に`startCornerTool()`/`cancelCornerTool()`を追加。ツールバーの「フィレット」「面取り」
+ボタンでモードに入り、サイズ入力欄(デフォルト5mm)を出しつつビューア上でpolygon頂点付近
+(スクリーン距離10px以内、既存の`projectPoint`を流用)をクリックすると、既存の
+`setPolygonVertexCorner`でcornersデータを更新する(同種コーナー適用済みならトグルで解除)。
+連続クリック可・Escで終了。SketchEditorの既存頂点コーナーUIはそのまま残した。
