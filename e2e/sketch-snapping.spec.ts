@@ -18,7 +18,7 @@ test("線描画モードで原点付近をクリックすると原点(0,0)にス
 
   await page.getByTestId("btn-align-to-plane").click();
   await page.getByTestId("btn-draw-polygon").click();
-  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("線描画キャンセル(Esc)");
+  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形キャンセル(Esc)");
 
   // 原点(0,0)から0.4mm程度ずれた位置をクリックする(点スナップ許容距離内)。
   // 1頂点目は原点スナップ(origin候補)で(0,0)になるはず。
@@ -37,7 +37,7 @@ test("線描画モードで原点付近をクリックすると原点(0,0)にス
   }
   const start = await screenPointForWorld(page, [0, 0, 0]);
   await page.mouse.click(start.x + 2, start.y + 2);
-  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("線描画");
+  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形");
 
   // 1頂点目が原点スナップにより厳密に(0,0)になっていることを確認する。
   await expect(page.getByTestId("entity-polygon-0-vertex-0-x")).toHaveValue("0");
@@ -58,7 +58,7 @@ test("水平から3度ずれたクリックは軸ロックにより正確に水�
 
   await page.getByTestId("btn-align-to-plane").click();
   await page.getByTestId("btn-draw-polygon").click();
-  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("線描画キャンセル(Esc)");
+  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形キャンセル(Esc)");
 
   // 1頂点目: クリックすると1mmグリッドスナップにより(-10,-10)に丸められる。
   const v0 = { x: -10.3, y: -9.7 };
@@ -82,7 +82,7 @@ test("水平から3度ずれたクリックは軸ロックにより正確に水�
   // 始点(v0)付近をクリックして閉じる。
   const start = await screenPointForWorld(page, [v0.x, v0.y, 0]);
   await page.mouse.click(start.x + 2, start.y + 2);
-  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("線描画");
+  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形");
 
   const y0 = await page.getByTestId("entity-polygon-0-vertex-0-y").inputValue();
   const y1 = await page.getByTestId("entity-polygon-0-vertex-1-y").inputValue();

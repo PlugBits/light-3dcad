@@ -5,9 +5,11 @@ import { ExtrudeEditor } from "../components/ExtrudeEditor";
 import { FeatureTree } from "../components/FeatureTree";
 import { SketchEditor } from "../components/SketchEditor";
 import { downloadStl } from "../export/downloadStl";
-import { addSketchEntity, findFeature, getDependentFeatureIds, setPolygonVertexCorner } from "../model/document";
+import { addSketchEntity, addSketchSegments, findFeature, getDependentFeatureIds, setPolygonVertexCorner, setSketchSegments } from "../model/document";
 import {
+  createArcSegment,
   createCircleEntity,
+  createLineSegment,
   createPolygonEntity,
   createRectangleEntity,
   createRegularPolygonEntity,
@@ -15,15 +17,17 @@ import {
 } from "../model/entity";
 import type { PolygonCorner } from "../model/types";
 import { rectangleFromCorners } from "../sketch/shapeFromPoints";
+import { trimSegmentAtPoint } from "../sketch/trim";
 import { useCadStore } from "../state/store";
 import { CadViewer, type SketchOverlayEntry } from "../viewer/CadViewer";
 import type { StandardView } from "../viewer/standardViews";
 
 /**
- * ツールバーで選択中の作図ツール(未選択はnull)。line=既存の複数頂点線描画、rect/circleはPhase 14の
- * 2クリック作図、slot/regularPolygonはPhase 17の2クリック作図(幅/辺数はツール開始時に固定)。
+ * ツールバーで選択中の作図ツール(未選択はnull)。line=既存の複数頂点閉多角形描画、rect/circleは
+ * Phase 14の2クリック作図、slot/regularPolygonはPhase 17の2クリック作図(幅/辺数はツール開始時に
+ * 固定)、segmentはPhase 19bの自由な線分・円弧チェーン作図(閉じる必要が無い)。
  */
-type DrawingTool = "line" | "rect" | "circle" | "slot" | "regularPolygon" | null;
+type DrawingTool = "line" | "rect" | "circle" | "slot" | "regularPolygon" | "segment" | null;
 
 /** ツールバーの標準ビューボタン(正面/背面/左/右/上/下/等角、Phase 16)。 */
 const STANDARD_VIEW_BUTTONS: { view: StandardView; label: string; title: string }[] = [
@@ -78,6 +82,8 @@ export default function App() {
   const [newSketchPlane, setNewSketchPlane] = useState<"XY" | "XZ" | "YZ">("XY");
   // 現在アクティブなフィレット/面取りツール(未選択はnull、Phase 18)。
   const [cornerTool, setCornerTool] = useState<"fillet" | "chamfer" | null>(null);
+  // トリムツール(未選択はfalse、Phase 19b)。
+  const [trimTool, setTrimTool] = useState(false);
   // フィレット/面取りツールで頂点クリック時に適用するサイズ(mm、デフォルト5)。
   const [cornerSize, setCornerSize] = useState(5);
   // スロットツール開始時に固定する全幅(mm、デフォルト10、Phase 17)。
@@ -171,7 +177,8 @@ export default function App() {
 
   // 描画モード中にフィーチャーツリーの選択が別のフィーチャーに移った場合は、描画モードを
   // 自動的にキャンセルする(ビューア側のcancelPolygonDrawing()がonCancelを呼び、
-  // activeToolのReact stateもそこで null に戻る)。フィレット/面取りツール(cornerTool)も同様。
+  // activeToolのReact stateもそこで null に戻る)。フィレット/面取りツール(cornerTool)・
+  // トリムツール(trimTool)も同様。
   useEffect(() => {
     if (activeTool && selectedFeatureId !== drawingSketchId) {
       viewerRef.current?.cancelPolygonDrawing();
@@ -179,7 +186,10 @@ export default function App() {
     if (cornerTool && selectedFeatureId !== drawingSketchId) {
       viewerRef.current?.cancelCornerTool();
     }
-  }, [activeTool, cornerTool, selectedFeatureId, drawingSketchId]);
+    if (trimTool && selectedFeatureId !== drawingSketchId) {
+      viewerRef.current?.cancelTrimTool();
+    }
+  }, [activeTool, cornerTool, trimTool, selectedFeatureId, drawingSketchId]);
 
   // フィレット/面取りツール中、対象スケッチのentitiesが変わった場合はヒット判定対象を更新する
   // (フィレット/面取りは頂点座標自体は変えないため必須ではないが、将来の変更に備えて同期しておく)。
@@ -190,6 +200,16 @@ export default function App() {
       viewerRef.current?.updateCornerToolEntities(feature.entities);
     }
   }, [cornerTool, doc, selectedFeatureId]);
+
+  // トリムツール中、対象スケッチのsegmentsが変わった場合(トリム適用・アンドゥ等)はヒット判定対象を
+  // 最新化する(Phase 19b)。
+  useEffect(() => {
+    if (!trimTool) return;
+    const feature = selectedFeatureId ? findFeature(doc, selectedFeatureId) : undefined;
+    if (feature?.type === "sketch") {
+      viewerRef.current?.updateTrimSegments(feature.segments ?? []);
+    }
+  }, [trimTool, doc, selectedFeatureId]);
 
   // Ctrl+Z(Mac: Cmd+Z)でアンドゥ、Ctrl+Shift+Z(Mac: Cmd+Shift+Z)でリドゥ(Phase 14)。
   // テキスト入力欄にフォーカスがある間はブラウザ標準のテキスト編集アンドゥを優先し、何もしない。
@@ -285,6 +305,40 @@ export default function App() {
     setActiveTool("line");
   }
 
+  function handleStartSegmentDrawing() {
+    if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
+    const sketchId = selectedFeature.id;
+    viewerRef.current.startSegmentDrawing(
+      selectedSketchPlane,
+      gridSnap,
+      selectedFeature.entities,
+      selectedFeature.segments ?? [],
+      {
+        onComplete: (points, bulges) => {
+          const segments: ReturnType<typeof createLineSegment>[] = [];
+          for (let i = 0; i < points.length - 1; i += 1) {
+            const bulge = bulges[i];
+            segments.push(
+              bulge ? createArcSegment({ p1: points[i], p2: points[i + 1], bulge }) : createLineSegment({ p1: points[i], p2: points[i + 1] }),
+            );
+          }
+          updateDocument((d) => addSketchSegments(d, sketchId, segments));
+          setActiveTool(null);
+          setDrawingSketchId(null);
+          setArcModeActive(false);
+        },
+        onCancel: () => {
+          setActiveTool(null);
+          setDrawingSketchId(null);
+          setArcModeActive(false);
+        },
+        onArcModeChange: (active) => setArcModeActive(active),
+      },
+    );
+    setDrawingSketchId(sketchId);
+    setActiveTool("segment");
+  }
+
   function handleStartSlotDrawing() {
     if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
     const sketchId = selectedFeature.id;
@@ -378,7 +432,7 @@ export default function App() {
 
   /** 指定ツールのボタンをdisabledにすべきか(他のツールが実行中、または対象スケッチ平面が未確定)。 */
   function isToolDisabled(tool: Exclude<DrawingTool, null>): boolean {
-    if (cornerTool) return true;
+    if (cornerTool || trimTool) return true;
     if (activeTool) return activeTool !== tool;
     return !selectedSketchPlane;
   }
@@ -419,8 +473,44 @@ export default function App() {
 
   /** フィレット/面取りボタンをdisabledにすべきか(他の作図ツール実行中、または対象スケッチ平面が未確定)。 */
   function isCornerToolDisabled(kind: "fillet" | "chamfer"): boolean {
-    if (activeTool) return true;
+    if (activeTool || trimTool) return true;
     if (cornerTool) return cornerTool !== kind;
+    return !selectedSketchPlane;
+  }
+
+  /**
+   * トリムツール(Phase 19b)を開始する。ビューア上でセグメントの区間をクリックすると
+   * その区間を削除する(実際のtrimSegmentAtPoint()適用はここで行う。onTrimClickは
+   * startTrimTool呼び出し時に一度だけ渡すコールバックのため、最新のドキュメントはgetState()から読む)。
+   */
+  function handleStartTrimTool() {
+    if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
+    const sketchId = selectedFeature.id;
+    viewerRef.current.startTrimTool(selectedSketchPlane, selectedFeature.segments ?? [], {
+      onTrimClick: (targetId, clickPoint) => {
+        const currentDoc = useCadStore.getState().doc;
+        const feature = findFeature(currentDoc, sketchId);
+        if (!feature || feature.type !== "sketch") return;
+        const nextSegments = trimSegmentAtPoint(feature.segments ?? [], targetId, clickPoint);
+        useCadStore.getState().updateDocument((d) => setSketchSegments(d, sketchId, nextSegments));
+      },
+      onCancel: () => {
+        setTrimTool(false);
+        setDrawingSketchId(null);
+      },
+    });
+    setDrawingSketchId(sketchId);
+    setTrimTool(true);
+  }
+
+  function handleCancelTrimTool() {
+    viewerRef.current?.cancelTrimTool();
+  }
+
+  /** トリムボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
+  function isTrimToolDisabled(): boolean {
+    if (activeTool || cornerTool) return true;
+    if (trimTool) return false;
     return !selectedSketchPlane;
   }
 
@@ -509,11 +599,20 @@ export default function App() {
           data-testid="btn-draw-polygon"
           onClick={activeTool === "line" ? handleCancelDrawing : handleStartLineDrawing}
           disabled={isToolDisabled("line")}
-          title="クリックで頂点を追加して閉じた多角形を描きます(始点付近クリックまたはEnterで確定、Escでキャンセル)"
+          title="クリックで頂点を追加して閉じた多角形を描きます(始点付近クリックまたはEnterで確定、Escでキャンセル)。フィレット/面取りツールの対象にできます"
         >
-          {activeTool === "line" ? "線描画キャンセル(Esc)" : "線描画"}
+          {activeTool === "line" ? "多角形キャンセル(Esc)" : "多角形"}
         </button>
-        {activeTool === "line" && (
+        <button
+          type="button"
+          data-testid="btn-draw-segment"
+          onClick={activeTool === "segment" ? handleCancelDrawing : handleStartSegmentDrawing}
+          disabled={isToolDisabled("segment")}
+          title="クリックで頂点を連結して線分・円弧のチェーンを描きます(閉じる必要はありません。Enter/ダブルクリックで確定、始点付近クリックで閉チェーンとして確定、Escでキャンセル)。トリムツールの対象にできます"
+        >
+          {activeTool === "segment" ? "線分キャンセル(Esc)" : "線分"}
+        </button>
+        {(activeTool === "line" || activeTool === "segment") && (
           <button
             type="button"
             data-testid="btn-toggle-arc-mode"
@@ -634,6 +733,19 @@ export default function App() {
             </label>
           )}
         </span>
+        <span
+          style={{ display: "flex", gap: 4, alignItems: "center", paddingLeft: 8, borderLeft: "1px solid #444" }}
+        >
+          <button
+            type="button"
+            data-testid="btn-trim"
+            onClick={trimTool ? handleCancelTrimTool : handleStartTrimTool}
+            disabled={isTrimToolDisabled()}
+            title="ビューア上でセグメント(線分ツールで描いた線分・円弧、または「分解」したエンティティ)の区間をクリックして削除します(赤色プレビューが削除対象、Escで終了)"
+          >
+            {trimTool ? "トリムキャンセル(Esc)" : "トリム"}
+          </button>
+        </span>
         <button
           type="button"
           data-testid="btn-undo"
@@ -681,6 +793,11 @@ export default function App() {
         {cornerTool && (
           <span data-testid="corner-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
             頂点付近をクリックして適用/解除(連続クリック可、Escで終了)
+          </span>
+        )}
+        {trimTool && (
+          <span data-testid="trim-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
+            赤色プレビューの区間をクリックして削除(連続クリック可、Escで終了)
           </span>
         )}
         <span data-testid="status-text" style={{ fontSize: 12, opacity: 0.8, marginLeft: "auto" }}>
@@ -778,7 +895,7 @@ export default function App() {
               sketch={selectedFeature}
               basis={selectedSketchPlane}
               viewerRef={viewerRef}
-              visible={showSketches && !activeTool && !cornerTool}
+              visible={showSketches && !activeTool && !cornerTool && !trimTool}
             />
           )}
           {showInitOverlay && (

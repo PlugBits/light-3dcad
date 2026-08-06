@@ -18,7 +18,7 @@ test("寸法ラベルをクリックして長さを変更すると、始点を�
 
   await page.getByTestId("btn-align-to-plane").click();
   await page.getByTestId("btn-draw-polygon").click();
-  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("線描画キャンセル(Esc)");
+  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形キャンセル(Esc)");
 
   // 一辺20mmの正方形を描く(辺0は頂点0(-10,-10)→頂点1(10,-10)の水平な下辺)。
   const corners: [number, number, number][] = [
@@ -33,7 +33,7 @@ test("寸法ラベルをクリックして長さを変更すると、始点を�
   }
   const start = await screenPointForWorld(page, corners[0]);
   await page.mouse.click(start.x + 2, start.y + 2);
-  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("線描画");
+  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形");
 
   await expect(page.getByTestId("entity-polygon-0-vertex-0-x")).toHaveValue("-10");
   await expect(page.getByTestId("entity-polygon-0-vertex-1-x")).toHaveValue("10");
@@ -79,7 +79,7 @@ test("線描画モード中に数字キー入力+Enterで指定長の辺を引�
 
   await page.getByTestId("btn-align-to-plane").click();
   await page.getByTestId("btn-draw-polygon").click();
-  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("線描画キャンセル(Esc)");
+  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形キャンセル(Esc)");
 
   // 1頂点目: 原点付近をクリックする(原点スナップにより厳密に(0,0)になる)。
   const p0 = await screenPointForWorld(page, [0.3, -0.2, 0]);
@@ -107,7 +107,7 @@ test("線描画モード中に数字キー入力+Enterで指定長の辺を引�
   await page.mouse.click(p3.x, p3.y);
   const start = await screenPointForWorld(page, [0, 0, 0]);
   await page.mouse.click(start.x + 2, start.y + 2);
-  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("線描画");
+  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形");
 
   await expect(page.getByTestId("entity-polygon-0-vertex-0-x")).toHaveValue("0");
   await expect(page.getByTestId("entity-polygon-0-vertex-0-y")).toHaveValue("0");

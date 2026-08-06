@@ -24,7 +24,7 @@ test("線描画モードでクリックして矩形を描き、閉じて押し�
   // 平面に正対してから線描画モードに入る。
   await page.getByTestId("btn-align-to-plane").click();
   await page.getByTestId("btn-draw-polygon").click();
-  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("線描画キャンセル(Esc)");
+  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形キャンセル(Esc)");
 
   // 一辺20mmの正方形(4頂点、初期ボックスの60x40の範囲内)をクリックで描く。
   // 1mmスナップはデフォルトONのまま。
@@ -42,7 +42,7 @@ test("線描画モードでクリックして矩形を描き、閉じて押し�
   // 始点付近(数px以内)をクリックして閉じる。5クリック目で確定し、描画モードを抜ける。
   const start = await screenPointForWorld(page, corners[0]);
   await page.mouse.click(start.x + 2, start.y + 2);
-  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("線描画");
+  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形");
 
   // 多角形エンティティがスケッチ編集パネルに反映されている(頂点4点)。
   await expect(page.getByTestId("entity-polygon-0-vertex-0-x")).toHaveValue("-10");
@@ -74,7 +74,7 @@ test("多角形の頂点にフィレットを設定すると、エラーなく�
 
   await page.getByTestId("btn-align-to-plane").click();
   await page.getByTestId("btn-draw-polygon").click();
-  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("線描画キャンセル(Esc)");
+  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形キャンセル(Esc)");
 
   // 一辺20mmの正方形(4頂点)をクリックで描く。
   const corners: [number, number, number][] = [
@@ -89,7 +89,7 @@ test("多角形の頂点にフィレットを設定すると、エラーなく�
   }
   const start = await screenPointForWorld(page, corners[0]);
   await page.mouse.click(start.x + 2, start.y + 2);
-  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("線描画");
+  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形");
   await expect(page.getByTestId("entity-polygon-0-vertex-0-x")).toHaveValue("-10");
 
   // 頂点0にフィレット(サイズ5)を設定する。
@@ -120,13 +120,13 @@ test("Escキーで描画中の頂点列を破棄してモードを終了でき�
   await page.getByTestId("feature-item-Sketch1").click();
   await page.getByTestId("btn-align-to-plane").click();
   await page.getByTestId("btn-draw-polygon").click();
-  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("線描画キャンセル(Esc)");
+  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形キャンセル(Esc)");
 
   const pt = await screenPointForWorld(page, [5, 5, 0]);
   await page.mouse.click(pt.x, pt.y);
 
   await page.keyboard.press("Escape");
-  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("線描画");
+  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形");
 
   // 頂点1点のみでキャンセルしたため、多角形エンティティは追加されていない。
   await expect(page.locator('[data-testid^="entity-polygon-"]')).toHaveCount(0);

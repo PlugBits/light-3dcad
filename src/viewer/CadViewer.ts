@@ -13,6 +13,7 @@ import {
   slotOutlinePoints,
 } from "../sketch/shapeFromPoints";
 import {
+  collectSegmentSnapCandidates,
   collectSketchSnapCandidates,
   ORIGIN_CANDIDATE,
   pointsToVertexCandidates,
@@ -22,6 +23,7 @@ import {
   type SnapCandidate,
   type SnapKind,
 } from "../sketch/snapping";
+import { distPointToSegmentShape, findClosestSegmentPiece } from "../sketch/trim";
 import { getStandardViewOrientation, type StandardView } from "./standardViews";
 
 /** SolidWorks風の明るいグレー系ボディ色。 */
@@ -165,10 +167,41 @@ export interface RegularPolygonDrawingCallbacks {
 }
 
 /**
- * 描画モードの対象図形種別。polygonは既存の複数頂点線描画、rectangle/circleは2クリック作図(Phase 14)、
- * slot/regularPolygonも2クリック作図(Phase 17。幅/辺数はツール開始時に固定するパラメータ)。
+ * セグメント線分ツール(Phase 19b)の完了/キャンセル時に呼ばれるコールバック。
+ * polygonツールと異なり閉じる必要がない(開いたチェーンのまま確定できる)。
  */
-type DrawingShapeKind = "polygon" | "rectangle" | "circle" | "slot" | "regularPolygon";
+export interface SegmentDrawingCallbacks {
+  /**
+   * Enter・始点付近クリックでの自動close・ダブルクリックのいずれかでチェーンが確定したときに呼ばれる
+   * (points.length >= 2 が保証される)。bulges[i]はpoints[i]→points[i+1]の辺のふくらみ(nullは直線、
+   * 長さは常に points.length-1)。始点付近クリックで閉じた場合はpoints[0]と同じ座標が末尾に追加され、
+   * 実質的な閉チェーンになる(polygonエンティティへの変換はしない)。
+   */
+  onComplete: (points: [number, number][], bulges: (number | null)[]) => void;
+  /** Escapeキーまたはcancel呼び出しで中断したときに呼ばれる(頂点0でも呼ばれうる)。 */
+  onCancel: () => void;
+  /** 円弧モード(Phase 17と同じ仕組み)のON/OFFが切り替わるたびに呼ばれる。省略可。 */
+  onArcModeChange?: (active: boolean) => void;
+}
+
+/** トリムツール(Phase 19b)の開始/終了時に呼ばれるコールバック。 */
+export interface TrimToolCallbacks {
+  /**
+   * ホバー中の削除候補区間の上でクリックされたときに呼ばれる(targetIdは対象セグメントの元のid、
+   * clickPointはスケッチのローカル2D座標)。実際のtrimSegmentAtPoint()適用・ドキュメント更新は
+   * App側の責務とする(CadViewerはヒット判定・プレビューのみを行い、正本は持たないため)。
+   */
+  onTrimClick: (targetId: string, clickPoint: [number, number]) => void;
+  /** Escapeキーまたはcancel呼び出しで終了したときに呼ばれる。 */
+  onCancel: () => void;
+}
+
+/**
+ * 描画モードの対象図形種別。polygonは既存の複数頂点線描画、rectangle/circleは2クリック作図(Phase 14)、
+ * slot/regularPolygonも2クリック作図(Phase 17。幅/辺数はツール開始時に固定するパラメータ)、
+ * segmentは自由な線分・円弧チェーン作図(Phase 19b。閉じる必要が無い点がpolygonと異なる)。
+ */
+type DrawingShapeKind = "polygon" | "rectangle" | "circle" | "slot" | "regularPolygon" | "segment";
 
 /** 線描画モード中の円弧セグメント(Phase 17)プレビューの弧分割数。 */
 const ARC_PREVIEW_SEGMENTS = 24;
@@ -187,6 +220,11 @@ export interface CornerToolCallbacks {
 
 /** フィレット/面取りツールの頂点ヒット判定の許容スクリーン距離(px)。 */
 const CORNER_HIT_TOLERANCE_PX = 10;
+
+/** トリムツール(Phase 19b)の削除候補プレビュー色(赤系)。 */
+const TRIM_PREVIEW_COLOR = 0xff1744;
+/** トリムツールでホバー対象とみなす許容スクリーン距離(px)。 */
+const TRIM_HOVER_TOLERANCE_PX = 16;
 
 declare global {
   interface Window {
@@ -490,6 +528,9 @@ export class CadViewer {
   private circleCallbacks: CircleDrawingCallbacks | null = null;
   private slotCallbacks: SlotDrawingCallbacks | null = null;
   private regularPolygonCallbacks: RegularPolygonDrawingCallbacks | null = null;
+  private segmentCallbacks: SegmentDrawingCallbacks | null = null;
+  /** 描画対象スケッチの既存segments(Phase 19b)。segmentツールのスナップ候補収集元として使う。 */
+  private drawingSegments: SketchSegment[] = [];
   /** スロットツール開始時に固定した全幅(mm、Phase 17)。プレビュー描画にのみ使う(確定値はApp側が把握)。 */
   private drawingSlotWidth = 10;
   /** 正多角形ツール開始時に固定した辺数(Phase 17)。プレビュー描画にのみ使う。 */
@@ -534,6 +575,15 @@ export class CadViewer {
   /** ヒット判定対象のエンティティ(対象スケッチのentities、polygon以外は無視する)。 */
   private cornerToolEntities: SketchEntity[] = [];
   private cornerToolCallbacks: CornerToolCallbacks | null = null;
+
+  /** トリムツール(Phase 19b)がアクティブかどうか。trueの間はクリックを面選択でなくトリム対象クリックとして扱う。 */
+  private trimActive = false;
+  private trimBasis: PlaneBasis | null = null;
+  /** ヒット判定対象のセグメント(対象スケッチのsegments)。 */
+  private trimSegments: SketchSegment[] = [];
+  private trimCallbacks: TrimToolCallbacks | null = null;
+  /** 直近のホバーで求めた削除候補区間の元セグメントid(ヒット無しはnull)。クリック時にこれをonTrimClickへ渡す。 */
+  private trimHoverTargetId: string | null = null;
 
   constructor(
     container: HTMLElement,
@@ -633,6 +683,7 @@ export class CadViewer {
     container.appendChild(this.lengthInputEl);
 
     this.renderer.domElement.addEventListener("click", this.handleClick);
+    this.renderer.domElement.addEventListener("dblclick", this.handleSegmentDoubleClick);
     this.renderer.domElement.addEventListener("mousemove", this.handleDrawingMouseMove);
     this.renderer.domElement.addEventListener("mouseleave", this.handleMouseLeave);
     window.addEventListener("keydown", this.handleKeyDown);
@@ -692,6 +743,12 @@ export class CadViewer {
    * 衝突しないよう、入力欄が開いている間はEscapeを入力キャンセルに限定する)。
    */
   private handleKeyDown = (event: KeyboardEvent) => {
+    if (this.trimActive) {
+      if (event.key === "Escape") {
+        this.cancelTrimTool();
+      }
+      return;
+    }
     if (this.cornerToolActive) {
       if (event.key === "Escape") {
         this.cancelCornerTool();
@@ -699,6 +756,7 @@ export class CadViewer {
       return;
     }
     if (this.drawingActive) {
+      const isChainShape = this.drawingShape === "polygon" || this.drawingShape === "segment";
       if (event.key === "Escape") {
         if (this.lengthInputActive) {
           this.resetLengthInput();
@@ -712,7 +770,8 @@ export class CadViewer {
           this.commitLengthInput();
           return;
         }
-        this.finishPolygonDrawing();
+        if (this.drawingShape === "polygon") this.finishPolygonDrawing();
+        else if (this.drawingShape === "segment") this.finishSegmentDrawing();
         return;
       }
       if (event.key === "Backspace" && this.lengthInputActive) {
@@ -723,16 +782,11 @@ export class CadViewer {
         this.updateLengthInputOverlay();
         return;
       }
-      if (
-        this.drawingShape === "polygon" &&
-        !this.lengthInputActive &&
-        this.drawingPoints.length > 0 &&
-        event.key.toLowerCase() === "a"
-      ) {
+      if (isChainShape && !this.lengthInputActive && this.drawingPoints.length > 0 && event.key.toLowerCase() === "a") {
         this.togglePolygonArcMode();
         return;
       }
-      if (this.drawingShape === "polygon" && this.drawingPoints.length > 0 && /^[0-9.]$/.test(event.key)) {
+      if (isChainShape && this.drawingPoints.length > 0 && /^[0-9.]$/.test(event.key)) {
         this.lengthInputActive = true;
         this.lengthInputValue += event.key;
         this.updateLengthInputOverlay();
@@ -787,6 +841,10 @@ export class CadViewer {
   }
 
   private handleClick = (event: MouseEvent) => {
+    if (this.trimActive) {
+      this.handleTrimClick(event);
+      return;
+    }
     if (this.cornerToolActive) {
       this.handleCornerToolClick(event);
       return;
@@ -794,6 +852,8 @@ export class CadViewer {
     if (this.drawingActive) {
       if (this.drawingShape === "polygon") {
         this.handlePolygonClick(event);
+      } else if (this.drawingShape === "segment") {
+        this.handleSegmentClick(event);
       } else {
         this.handleShapeClick(event);
       }
@@ -1280,8 +1340,16 @@ export class CadViewer {
    * 描画モードの共通の開始処理(進行中の描画があればキャンセルしてから新しいモードに入る)。
    * 個別のstartXxxDrawing()から呼ぶ内部ヘルパー。
    */
-  private beginDrawing(shape: DrawingShapeKind, basis: PlaneBasis, snap: boolean, existingEntities: SketchEntity[]) {
+  private beginDrawing(
+    shape: DrawingShapeKind,
+    basis: PlaneBasis,
+    snap: boolean,
+    existingEntities: SketchEntity[],
+    existingSegments: SketchSegment[] = [],
+  ) {
     this.cancelPolygonDrawing();
+    this.cancelTrimTool();
+    this.cancelCornerTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.drawingActive = true;
@@ -1289,6 +1357,7 @@ export class CadViewer {
     this.drawingBasis = basis;
     this.drawingSnap = snap;
     this.drawingEntities = existingEntities;
+    this.drawingSegments = existingSegments;
     this.drawingPoints = [];
     this.drawingBulges = [];
     this.drawingArcMode = false;
@@ -1360,18 +1429,36 @@ export class CadViewer {
   }
 
   /**
-   * 円弧セグメントモード(Phase 17)のON/OFFを切り替える。線描画モード(polygon)がアクティブで、
-   * かつ確定済み頂点が1つ以上ある場合のみ有効(それ以外は何もせず現在の状態を返す)。
-   * トグル時は保留中の通過点(drawingArcPending)をリセットする。
+   * 自由な線分・円弧セグメントのチェーン作図ツール(Phase 19b)を開始する。polygonツールと異なり
+   * 閉じる必要が無く、Enter・始点付近クリック・ダブルクリックのいずれでも確定できる(頂点2つ以上)。
+   * existingSegmentsは対象スケッチに既にあるsegments(点スナップ候補の収集元、Phase 19a)。
+   */
+  startSegmentDrawing(
+    basis: PlaneBasis,
+    snap: boolean,
+    existingEntities: SketchEntity[],
+    existingSegments: SketchSegment[],
+    callbacks: SegmentDrawingCallbacks,
+  ) {
+    this.beginDrawing("segment", basis, snap, existingEntities, existingSegments);
+    this.segmentCallbacks = callbacks;
+  }
+
+  /**
+   * 円弧セグメントモード(Phase 17、Phase 19bでsegmentツールにも対応)のON/OFFを切り替える。
+   * 線描画モード(polygon/segment)がアクティブで、かつ確定済み頂点が1つ以上ある場合のみ有効
+   * (それ以外は何もせず現在の状態を返す)。トグル時は保留中の通過点(drawingArcPending)をリセットする。
    */
   togglePolygonArcMode(): boolean {
-    if (!this.drawingActive || this.drawingShape !== "polygon" || this.drawingPoints.length === 0) {
+    const isChainShape = this.drawingShape === "polygon" || this.drawingShape === "segment";
+    if (!this.drawingActive || !isChainShape || this.drawingPoints.length === 0) {
       return this.drawingArcMode;
     }
     this.drawingArcMode = !this.drawingArcMode;
     this.drawingArcPending = null;
     this.updateDrawingPreview();
-    this.polygonCallbacks?.onArcModeChange?.(this.drawingArcMode);
+    if (this.drawingShape === "polygon") this.polygonCallbacks?.onArcModeChange?.(this.drawingArcMode);
+    else this.segmentCallbacks?.onArcModeChange?.(this.drawingArcMode);
     return this.drawingArcMode;
   }
 
@@ -1387,6 +1474,7 @@ export class CadViewer {
   startCornerTool(basis: PlaneBasis, entities: SketchEntity[], callbacks: CornerToolCallbacks) {
     this.cancelCornerTool();
     this.cancelPolygonDrawing();
+    this.cancelTrimTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.cornerToolActive = true;
@@ -1457,6 +1545,127 @@ export class CadViewer {
     }
   }
 
+  /**
+   * トリムツール(Phase 19b)を開始する。既存の線描画モード・フィレット/面取りツール・面選択は
+   * 中断/解除する。以後、マウス移動はホバー中の削除候補区間の赤色プレビュー、クリックは
+   * `callbacks.onTrimClick`(実際のtrimSegmentAtPoint()適用・segments更新はApp側の責務)。
+   */
+  startTrimTool(basis: PlaneBasis, segments: SketchSegment[], callbacks: TrimToolCallbacks) {
+    this.cancelTrimTool();
+    this.cancelPolygonDrawing();
+    this.cancelCornerTool();
+    this.clearSelection();
+    this.setHoverGroup(null);
+    this.trimActive = true;
+    this.trimBasis = basis;
+    this.trimSegments = segments;
+    this.trimCallbacks = callbacks;
+    this.trimHoverTargetId = null;
+    this.renderer.domElement.style.cursor = "crosshair";
+  }
+
+  /**
+   * ヒット判定対象のsegments一覧を更新する(トリム適用でsegmentsが変わった後、呼び出し側の
+   * 最新値を反映するために使う想定)。ツール非アクティブ時は何もしない。
+   */
+  updateTrimSegments(segments: SketchSegment[]) {
+    if (!this.trimActive) return;
+    this.trimSegments = segments;
+    this.clearDrawingPreview();
+    this.trimHoverTargetId = null;
+  }
+
+  isTrimToolActive(): boolean {
+    return this.trimActive;
+  }
+
+  /** トリムツールを終了する(onCancelが呼ばれる)。非アクティブなら何もしない。 */
+  cancelTrimTool() {
+    if (!this.trimActive) return;
+    const callbacks = this.trimCallbacks;
+    this.trimActive = false;
+    this.trimBasis = null;
+    this.trimSegments = [];
+    this.trimCallbacks = null;
+    this.trimHoverTargetId = null;
+    this.renderer.domElement.style.cursor = "";
+    this.clearDrawingPreview();
+    callbacks?.onCancel();
+  }
+
+  /**
+   * トリムツール中のマウス移動処理。カーソル位置に最も近いセグメント(スクリーン距離
+   * TRIM_HOVER_TOLERANCE_PX以内)を求め、そのセグメント上でカーソルに最も近い「区間」
+   * (src/sketch/trim.ts の findClosestSegmentPiece())を赤色でプレビュー表示する。
+   */
+  private handleTrimMouseMove(event: MouseEvent) {
+    if (!this.trimBasis) return;
+    const basis = this.trimBasis;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+    const hit = this.raycastDrawingPlane(basis, px, py, rect);
+    if (!hit) {
+      this.clearDrawingPreview();
+      this.trimHoverTargetId = null;
+      return;
+    }
+    const local = planeWorldToLocal(basis, hit);
+    const toleranceMm = this.pxToMm(TRIM_HOVER_TOLERANCE_PX, hit);
+
+    let nearestId: string | null = null;
+    let nearestDist = Infinity;
+    for (const segment of this.trimSegments) {
+      const d = distPointToSegmentShape(local, segment);
+      if (d < nearestDist) {
+        nearestDist = d;
+        nearestId = segment.id;
+      }
+    }
+
+    this.clearDrawingPreview();
+    if (nearestId === null || nearestDist > toleranceMm) {
+      this.trimHoverTargetId = null;
+      return;
+    }
+    const piece = findClosestSegmentPiece(this.trimSegments, nearestId, local);
+    if (!piece) {
+      this.trimHoverTargetId = null;
+      return;
+    }
+    this.trimHoverTargetId = nearestId;
+    this.drawTrimPreview(basis, piece);
+  }
+
+  /** トリムツール中のクリック処理。直近のホバーでヒットした対象セグメントがあれば`onTrimClick`を呼ぶ。 */
+  private handleTrimClick(event: MouseEvent) {
+    if (!this.trimBasis || this.trimHoverTargetId === null) return;
+    const basis = this.trimBasis;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+    const hit = this.raycastDrawingPlane(basis, px, py, rect);
+    if (!hit) return;
+    const local = planeWorldToLocal(basis, hit);
+    this.trimCallbacks?.onTrimClick(this.trimHoverTargetId, local);
+  }
+
+  /** トリムの削除候補区間(piece)を赤色のプレビュー線として描画する(drawingGroupを流用)。 */
+  private drawTrimPreview(basis: PlaneBasis, piece: SketchSegment) {
+    const localPoints = segmentLocalPoints(piece);
+    const worldPts = localPoints.map(([u, v]) => planeLocalToWorld(basis, u, v));
+    const positions = new Float32Array(worldPts.length * 3);
+    worldPts.forEach((p, i) => positions.set(p, i * 3));
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    const material = new THREE.LineBasicMaterial({ color: TRIM_PREVIEW_COLOR, linewidth: 3, depthTest: false });
+    const line = new THREE.Line(geometry, material);
+    line.renderOrder = DRAWING_FEEDBACK_RENDER_ORDER + 2;
+    this.drawingGroup.add(line);
+    this.drawingPreviewGeometries.push(geometry);
+    this.drawingPreviewMaterials.push(material);
+  }
+
   /** 描画モード中のスナップ(グリッド+点スナップ)有効/無効をリアルタイムに切り替える。軸ロックはこれと独立。 */
   setPolygonDrawingSnap(enabled: boolean) {
     this.drawingSnap = enabled;
@@ -1479,12 +1688,14 @@ export class CadViewer {
     const circleCallbacks = this.circleCallbacks;
     const slotCallbacks = this.slotCallbacks;
     const regularPolygonCallbacks = this.regularPolygonCallbacks;
+    const segmentCallbacks = this.segmentCallbacks;
     this.exitDrawingState();
     if (shape === "polygon") polygonCallbacks?.onCancel();
     else if (shape === "rectangle") rectCallbacks?.onCancel();
     else if (shape === "circle") circleCallbacks?.onCancel();
     else if (shape === "slot") slotCallbacks?.onCancel();
-    else regularPolygonCallbacks?.onCancel();
+    else if (shape === "regularPolygon") regularPolygonCallbacks?.onCancel();
+    else segmentCallbacks?.onCancel();
   }
 
   /**
@@ -1496,6 +1707,19 @@ export class CadViewer {
     const points = [...this.drawingPoints];
     const bulges = this.drawingBulges.some((b) => !!b) ? [...this.drawingBulges] : undefined;
     const callbacks = this.polygonCallbacks;
+    this.exitDrawingState();
+    callbacks?.onComplete(points, bulges);
+  }
+
+  /**
+   * セグメントチェーン(Phase 19b)を確定する(onCompleteが呼ばれる)。polygonと異なり
+   * 3点以上である必要は無く、頂点2つ(=セグメント1本)以上あれば確定できる。
+   */
+  private finishSegmentDrawing() {
+    if (!this.drawingActive || this.drawingShape !== "segment" || this.drawingPoints.length < 2) return;
+    const points = [...this.drawingPoints];
+    const bulges = [...this.drawingBulges];
+    const callbacks = this.segmentCallbacks;
     this.exitDrawingState();
     callbacks?.onComplete(points, bulges);
   }
@@ -1532,6 +1756,7 @@ export class CadViewer {
     this.drawingActive = false;
     this.drawingBasis = null;
     this.drawingEntities = [];
+    this.drawingSegments = [];
     this.drawingPoints = [];
     this.drawingBulges = [];
     this.drawingArcMode = false;
@@ -1541,6 +1766,7 @@ export class CadViewer {
     this.circleCallbacks = null;
     this.slotCallbacks = null;
     this.regularPolygonCallbacks = null;
+    this.segmentCallbacks = null;
     this.lastHoverLocal = null;
     this.renderer.domElement.style.cursor = "";
     this.clearDrawingPreview();
@@ -1645,10 +1871,92 @@ export class CadViewer {
   }
 
   /**
+   * セグメントチェーンツール(Phase 19b)のクリック処理。基本はhandlePolygonClick()と同様
+   * (スナップ・軸ロック・円弧セグメントモードを共有する)だが、閉じる必要が無い点が異なる:
+   * 始点付近クリックはpolygonと同様に自動closeするが、閉じずにfinishSegmentDrawing()を呼ぶ経路
+   * (Enter・ダブルクリック)もあるため3点未満でも成立する。
+   */
+  private handleSegmentClick(event: MouseEvent) {
+    if (!this.drawingBasis) return;
+    this.resetLengthInput();
+    const basis = this.drawingBasis;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+
+    // 始点付近(スクリーン距離10px程度以内)のクリックは、始点へ戻る辺を追加してそのまま
+    // 閉チェーンとして確定する(polygonへの変換はしない)。円弧セグメント入力中は近接closeしない。
+    if (!this.drawingArcMode && this.drawingPoints.length >= 3) {
+      const startWorld = planeLocalToWorld(basis, this.drawingPoints[0][0], this.drawingPoints[0][1]);
+      const startScreen = this.projectPoint(startWorld);
+      if (startScreen) {
+        const dx = startScreen.x - px;
+        const dy = startScreen.y - py;
+        if (Math.sqrt(dx * dx + dy * dy) <= CLOSE_TO_START_PX) {
+          this.pushDrawingPoint(this.drawingPoints[0], null);
+          this.finishSegmentDrawing();
+          return;
+        }
+      }
+    }
+
+    const hit = this.raycastDrawingPlane(basis, px, py, rect);
+    if (!hit) return;
+    const resolved = this.resolveDrawingCursor(basis, hit, event.shiftKey);
+
+    if (this.drawingArcMode) {
+      if (this.drawingArcPending === null) {
+        this.drawingArcPending = resolved.point;
+        this.updateDrawingPreview();
+        this.updateCoordOverlay(px, py, resolved.point);
+        return;
+      }
+      const start = this.drawingPoints[this.drawingPoints.length - 1];
+      const via = this.drawingArcPending;
+      const end = resolved.point;
+      const bulge = bulgeFromThreePoints(start, via, end);
+      this.pushDrawingPoint(end, bulge);
+      this.drawingArcPending = null;
+      this.drawingArcMode = false;
+      this.segmentCallbacks?.onArcModeChange?.(false);
+      this.updateDrawingPreview();
+      this.updateCoordOverlay(px, py, end);
+      return;
+    }
+
+    this.pushDrawingPoint(resolved.point, null);
+    this.updateDrawingPreview();
+    this.updateCoordOverlay(px, py, resolved.point);
+  }
+
+  /**
+   * セグメントチェーンツール(Phase 19b)のダブルクリック処理。ネイティブのdblclickは直前に
+   * 通常のclickが2回発火し、ほぼ同一座標に頂点が2つ連続で追加された状態で届くため、
+   * 最後の1点(2回目のクリック分、直前の点とほぼ同一座標)を取り除いてから確定する。
+   */
+  private handleSegmentDoubleClick = (event: MouseEvent) => {
+    if (!this.drawingActive || this.drawingShape !== "segment" || this.lengthInputActive) return;
+    event.preventDefault();
+    if (this.drawingPoints.length >= 2) {
+      const last = this.drawingPoints[this.drawingPoints.length - 1];
+      const prev = this.drawingPoints[this.drawingPoints.length - 2];
+      if (Math.hypot(last[0] - prev[0], last[1] - prev[1]) < 1e-6) {
+        this.drawingPoints.pop();
+        this.drawingBulges.pop();
+      }
+    }
+    this.finishSegmentDrawing();
+  };
+
+  /**
    * マウス移動時、描画モード中であればスナップ・軸ロックを適用したラバーバンド・ガイド・座標表示を
    * 更新し、描画モード外であれば面ホバーハイライトを更新する。
    */
   private handleDrawingMouseMove = (event: MouseEvent) => {
+    if (this.trimActive) {
+      this.handleTrimMouseMove(event);
+      return;
+    }
     // フィレット/面取りツール中は面ホバーハイライトも描画プレビューも不要(クリックのみで完結する)。
     if (this.cornerToolActive) return;
     if (!this.drawingActive || !this.drawingBasis) {
@@ -1671,7 +1979,7 @@ export class CadViewer {
     const resolved = this.resolveDrawingCursor(basis, hit, event.shiftKey);
     this.lastHoverLocal = resolved.point;
     this.updateDrawingPreview({ local: resolved.point, snapKind: resolved.snapKind, axis: resolved.axis });
-    if (this.drawingShape === "polygon") {
+    if (this.drawingShape === "polygon" || this.drawingShape === "segment") {
       this.updateCoordOverlay(px, py, resolved.point);
       // 数値長さ入力中はカーソル追従で位置を再計算する(内容は変わらない)。
       this.updateLengthInputOverlay();
@@ -1691,12 +1999,13 @@ export class CadViewer {
     const cursor = planeWorldToLocal(basis, hitWorld);
     const snapEnabled = this.drawingSnap && !shiftHeld;
     // 軸ロックは連続する直線セグメントの水平/垂直吸着を狙ったもので、矩形/円の2クリック作図では
-    // (特に矩形は)幅または高さが0に縮退しうるため適用しない(polygonのみ)。
-    const axisLockEnabled = !shiftHeld && this.drawingShape === "polygon";
+    // (特に矩形は)幅または高さが0に縮退しうるため適用しない(polygon/segmentのみ)。
+    const axisLockEnabled = !shiftHeld && (this.drawingShape === "polygon" || this.drawingShape === "segment");
     const tolerance = this.pxToMm(SNAP_TOLERANCE_PX, hitWorld);
     const candidates: SnapCandidate[] = snapEnabled
       ? [
           ...collectSketchSnapCandidates(this.drawingEntities),
+          ...collectSegmentSnapCandidates(this.drawingSegments),
           ORIGIN_CANDIDATE,
           ...pointsToVertexCandidates(this.drawingPoints),
         ]
@@ -1747,7 +2056,7 @@ export class CadViewer {
   private updateDrawingPreview(hover?: { local: [number, number]; snapKind: SnapKind | null; axis: AxisLockKind }) {
     this.clearDrawingPreview();
     if (!this.drawingBasis) return;
-    if (this.drawingShape !== "polygon") {
+    if (this.drawingShape !== "polygon" && this.drawingShape !== "segment") {
       this.updateShapePreview(hover);
       return;
     }
@@ -1982,6 +2291,7 @@ export class CadViewer {
     cancelAnimationFrame(this.animationFrameId);
     this.resizeObserver.disconnect();
     this.renderer.domElement.removeEventListener("click", this.handleClick);
+    this.renderer.domElement.removeEventListener("dblclick", this.handleSegmentDoubleClick);
     this.renderer.domElement.removeEventListener("mousemove", this.handleDrawingMouseMove);
     this.renderer.domElement.removeEventListener("mouseleave", this.handleMouseLeave);
     window.removeEventListener("keydown", this.handleKeyDown);

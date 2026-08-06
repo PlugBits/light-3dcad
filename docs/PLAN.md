@@ -392,3 +392,22 @@ theoremの扇形補正項)で有界面を判別し、隣接twin対のスタッ�
 追加した(ツール変更なし、UI/トリムは19bで対応)。Vitest202件(交点計算21件・閉領域検出9件
 [矩形/穴あき/交差2矩形→3領域/開いた線分0件/半円+直線/ぶら下がり枝2種/円弧のみループ]・
 evaluator統合5件が新規)。
+
+## Phase 19b: トリムツールとセグメント作図UI完了
+
+ツールバーに「線分」ボタン(自由な線分・円弧チェーン作図、`CadViewer.startSegmentDrawing`)を追加した。
+既存の「線描画」(polygon、閉多角形専用)は「多角形」に改名して残し、フィレット/面取りツールの対象として
+維持した。線分ツールはクリックで頂点を連結し、Enter/始点付近クリック/ダブルクリックのいずれでも
+(3点未満でも)チェーンを確定できる点がpolygonと異なる(確定時にpoints/bulgesから`createLineSegment`/
+`createArcSegment`でsegmentsを組み立てる)。既存のスナップ・軸ロック・グリッド・数値長さ入力・円弧
+セグメント(Aキー)をそのまま流用し、`collectSegmentSnapCandidates`(新設、snapping.ts)でセグメント
+端点もスナップ候補にした。新設`src/sketch/trim.ts`の`trimSegmentAtPoint`(他segmentsとの交点で
+`splitSegmentAt`した区間のうち、クリック位置に最も近い1区間を削除。区間が1つ(=交点なし)ならセグメント
+全体を削除)を使うトリムツール(`CadViewer.startTrimTool`)を追加し、ホバー中の削除候補区間を
+赤色プレビュー表示する。新設`src/sketch/explode.ts`の`explodeEntity`(rectangle→4line、circle→半円
+arc×2、slot→2line+2arc、regularPolygon→line列、polygon→`computeCornerGeometry`/`effectivePolygonBulges`
+を再利用した正確なarc/line、フィレット/面取り込み)でSketchEditorに各エンティティの「分解」ボタンを
+追加し、分解後はトリム可能になる。SketchEditorにセグメント件数表示+「全削除」を追加した。
+Vitest210件(トリム5件・分解3件が新規)。ブラウザ確認: 線分ツールで十字の交差線を描く→トリムで
+右腕の交点より先を削除(赤プレビュー→クリックで実削除、残り半分は保持)→別の場所で線分ツールの
+始点付近クリックによる閉チェーンで正方形を作図→押し出しが成功、を確認した。

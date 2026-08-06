@@ -1,6 +1,16 @@
 // スケッチフィーチャー選択時の編集パネル。矩形/円/多角形エンティティの追加(多角形は描画モード)・
 // 数値編集・削除を行う。多角形は頂点ごとのフィレット/面取り(コーナー)編集も提供する(Phase 11)。
-import { addSketchEntity, patchSketchFeature, removeSketchEntity, setPolygonVertexCorner, updateSketchEntity } from "../model/document";
+// 各エンティティは「分解」で等価なsegments(線分・円弧)に変換できる(Phase 19b、トリム対象になる)。
+import { explodeEntity } from "../sketch/explode";
+import {
+  addSketchEntity,
+  explodeSketchEntity,
+  patchSketchFeature,
+  removeSketchEntity,
+  setPolygonVertexCorner,
+  setSketchSegments,
+  updateSketchEntity,
+} from "../model/document";
 import { createCircleEntity, createRectangleEntity, createRegularPolygonEntity, createSlotEntity } from "../model/entity";
 import type { FeatureId, PolygonCorner, SketchEntity, SketchFeature } from "../model/types";
 import { useCadStore } from "../state/store";
@@ -66,6 +76,17 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
 
   function handleRemoveEntity(entityId: string) {
     updateDocument((doc) => removeSketchEntity(doc, sketch.id, entityId));
+  }
+
+  /** エンティティを等価なsegments(線分・円弧、Phase 19a)に変換して置き換える(「分解」、Phase 19b)。 */
+  function handleExplodeEntity(entity: SketchEntity) {
+    const segments = explodeEntity(entity);
+    updateDocument((doc) => explodeSketchEntity(doc, sketch.id, entity.id, segments));
+  }
+
+  /** sketchのsegments(Phase 19a)を全削除する。 */
+  function handleClearSegments() {
+    updateDocument((doc) => setSketchSegments(doc, sketch.id, []));
   }
 
   function handleCenterChange(entityId: string, axis: 0 | 1, value: number, center: [number, number]) {
@@ -157,15 +178,26 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
                         ? "正多角形"
                         : "多角形"}
               </strong>
-              <button
-                type="button"
-                title="削除"
-                data-testid={`entity-${entity.kind}-${index}-delete`}
-                onClick={() => handleRemoveEntity(entity.id)}
-                style={{ fontSize: 11 }}
-              >
-                削除
-              </button>
+              <span style={{ display: "flex", gap: 6 }}>
+                <button
+                  type="button"
+                  title="等価な線分・円弧セグメントに変換します(変換後はトリムツールで編集できます)"
+                  data-testid={`entity-${entity.kind}-${index}-explode`}
+                  onClick={() => handleExplodeEntity(entity)}
+                  style={{ fontSize: 11 }}
+                >
+                  分解
+                </button>
+                <button
+                  type="button"
+                  title="削除"
+                  data-testid={`entity-${entity.kind}-${index}-delete`}
+                  onClick={() => handleRemoveEntity(entity.id)}
+                  style={{ fontSize: 11 }}
+                >
+                  削除
+                </button>
+              </span>
             </div>
             {entity.kind === "polygon" ? (
               <PolygonVertexEditor sketchId={sketch.id} entityIndex={index} entity={entity} />
@@ -282,6 +314,34 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
             )}
           </div>
         ))}
+      </div>
+
+      <div
+        style={{
+          borderTop: "1px solid #444",
+          paddingTop: 10,
+          display: "flex",
+          flexDirection: "column",
+          gap: 6,
+        }}
+      >
+        <h3 style={{ margin: 0, fontSize: 13 }}>セグメント(線分・円弧)</h3>
+        <p style={{ fontSize: 11, opacity: 0.7, margin: 0 }}>
+          ツールバーの「線分」で直接作図するか、上のエンティティを「分解」して作ります。個別の座標編集はまだ
+          対応していません(トリムツールで区間ごと削除できます)。
+        </p>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12 }}>
+          <span data-testid="segment-count">セグメント数: {sketch.segments?.length ?? 0}</span>
+          <button
+            type="button"
+            data-testid="btn-clear-segments"
+            onClick={handleClearSegments}
+            disabled={!sketch.segments || sketch.segments.length === 0}
+            style={{ fontSize: 11 }}
+          >
+            全削除
+          </button>
+        </div>
       </div>
     </div>
   );
