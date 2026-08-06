@@ -14,7 +14,8 @@ import {
 } from "../model/document";
 import { createCircleEntity, createRectangleEntity, createRegularPolygonEntity, createSlotEntity } from "../model/entity";
 import type { FeatureId, PointRef, PolygonCorner, SketchConstraint, SketchEntity, SketchFeature } from "../model/types";
-import { removeConstraint } from "../sketch/constraintDimensions";
+import { isEntityFixed, removeConstraint, setEntityFixed } from "../sketch/constraintDimensions";
+import { updateDocumentWithConflictRollback } from "../state/constraintUpdate";
 import { useCadStore } from "../state/store";
 
 function NumberField({
@@ -95,6 +96,19 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
     const nextCenter: [number, number] = [...center];
     nextCenter[axis] = value;
     updateDocument((doc) => updateSketchEntity(doc, sketch.id, entityId, { center: nextCenter }));
+  }
+
+  /**
+   * circleエンティティの中心を固定/解除する(fixEntity拘束のon/off、Phase 22)。
+   * 既存の位置寸法拘束(distanceEntityOrigin等)と矛盾する場合は自動的に取り消す
+   * (App.tsxのhandleApplyDimensionTargetと同じupdateDocumentWithConflictRollback経路)。
+   */
+  function handleToggleEntityFixed(entityId: string, fixed: boolean) {
+    updateDocumentWithConflictRollback(
+      sketch.id,
+      (doc) => setSketchConstraints(doc, sketch.id, setEntityFixed(sketch.constraints ?? [], entityId, fixed)),
+      (message) => window.alert(message),
+    );
   }
 
   function handlePointChange(
@@ -314,6 +328,20 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
                 )}
               </div>
             )}
+            {entity.kind === "circle" && (
+              <label
+                style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11 }}
+                title="中心を現在位置に固定します(fixEntity拘束のon/off)。他の位置寸法拘束と矛盾する場合は取り消されます"
+              >
+                <input
+                  type="checkbox"
+                  data-testid={`entity-${entity.kind}-${index}-fixed`}
+                  checked={isEntityFixed(sketch.constraints ?? [], entity.id)}
+                  onChange={(e) => handleToggleEntityFixed(entity.id, e.target.checked)}
+                />
+                固定
+              </label>
+            )}
           </div>
         ))}
       </div>
@@ -370,10 +398,24 @@ const CONSTRAINT_KIND_LABELS: Record<SketchConstraint["kind"], string> = {
   distance: "距離",
   radius: "半径",
   fix: "固定",
+  distanceEntityOrigin: "中心↔原点距離",
+  distanceEntityEntity: "中心間距離",
+  distanceEntityLine: "中心↔辺距離",
+  fixEntity: "円の固定",
 };
 
+/** entityIdから「円1」のような表示用の短いラベルを作る(順序はentities配列準拠)。 */
+function entityLabel(entities: SketchFeature["entities"], entityId: string): string {
+  const index = entities.findIndex((e) => e.id === entityId);
+  return index >= 0 ? `円${index + 1}` : entityId;
+}
+
 /** 拘束の対象・値を1行で表す説明文を作る。 */
-function describeConstraint(segments: SketchFeature["segments"], constraint: SketchConstraint): string {
+function describeConstraint(
+  segments: SketchFeature["segments"],
+  entities: SketchFeature["entities"],
+  constraint: SketchConstraint,
+): string {
   switch (constraint.kind) {
     case "coincident":
       return `${pointRefLabel(segments, constraint.a)} = ${pointRefLabel(segments, constraint.b)}`;
@@ -388,6 +430,14 @@ function describeConstraint(segments: SketchFeature["segments"], constraint: Ske
       return `${pointRefLabel(segments, constraint.a)} - ${pointRefLabel(segments, constraint.b)} = ${constraint.value.toFixed(2)}mm`;
     case "fix":
       return pointRefLabel(segments, constraint.point);
+    case "distanceEntityOrigin":
+      return `${entityLabel(entities, constraint.entity.entityId)} - 原点 = ${constraint.value.toFixed(2)}mm`;
+    case "distanceEntityEntity":
+      return `${entityLabel(entities, constraint.a.entityId)} - ${entityLabel(entities, constraint.b.entityId)} = ${constraint.value.toFixed(2)}mm`;
+    case "distanceEntityLine":
+      return `${entityLabel(entities, constraint.entity.entityId)} - 辺 = ${constraint.value.toFixed(2)}mm`;
+    case "fixEntity":
+      return entityLabel(entities, constraint.entity.entityId);
   }
 }
 
@@ -438,7 +488,7 @@ function ConstraintListPanel({ sketch }: { sketch: SketchFeature }) {
             >
               <span>
                 <strong>{CONSTRAINT_KIND_LABELS[constraint.kind]}</strong>{" "}
-                <span style={{ opacity: 0.8 }}>{describeConstraint(sketch.segments, constraint)}</span>
+                <span style={{ opacity: 0.8 }}>{describeConstraint(sketch.segments, sketch.entities, constraint)}</span>
               </span>
               <button
                 type="button"

@@ -22,7 +22,7 @@ import { effectivePolygonBulges } from "../sketch/bulge";
 import { classifySketchEntities } from "../sketch/containment";
 import { findClosedRegions, loopPolyline } from "../sketch/regions";
 import { regularPolygonVertices, slotAxisNormal, SLOT_CAP_BULGE } from "../sketch/shapeFromPoints";
-import type { SketchPlaneInfo } from "../protocol/messages";
+import type { ReferenceEdgeLine, ReferenceEdgeSet, SketchPlaneInfo } from "../protocol/messages";
 
 export interface EvaluationSuccess {
   ok: true;
@@ -39,6 +39,13 @@ export interface EvaluationSuccess {
    * この配列が返る時点(ok:true)では全スケッチが解決済みである。
    */
   sketchPlanes: SketchPlaneInfo[];
+  /**
+   * 各スケッチフィーチャーの、評価時点の「現在ボディ」から抽出したスケッチ平面上の直線エッジ
+   * (Phase 22、ボディ端面参照寸法用)。そのスケッチより前にボディが1つも組み立てられていない
+   * (押し出しフィーチャーがまだ無い)スケッチは含まれない(空配列ではなく、この配列自体に
+   * エントリが無い)。
+   */
+  referenceEdges: ReferenceEdgeSet[];
 }
 
 export interface EvaluationFailure {
@@ -55,6 +62,8 @@ type Tuple3 = [number, number, number];
 const FACE_NORMAL_COS_TOLERANCE = 0.999;
 /** 面中心の距離許容(バウンディングボックス対角長に対する比率)。 */
 const FACE_DISTANCE_TOLERANCE_RATIO = 0.5;
+/** ボディ端面参照エッジ(Phase 22): 端点がスケッチ平面上に載っているとみなす平面距離許容(mm)。 */
+const REFERENCE_EDGE_PLANE_TOLERANCE = 1e-4;
 
 function subtract(a: Tuple3, b: Tuple3): Tuple3 {
   return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -445,6 +454,40 @@ function facePlaneBasis(center: Tuple3, normal: Tuple3): PlaneBasis {
 }
 
 /**
+ * bodyの中から、平面basis上に載っている(両端点の平面距離がREFERENCE_EDGE_PLANE_TOLERANCE未満)
+ * 直線エッジ(geomType==="LINE")を抽出し、スケッチローカル2D座標(basisのxDir/yDir成分)に投影する
+ * (Phase 22、ボディ端面参照寸法)。円弧・自由曲線エッジは対象外(v1)。
+ * 使用replicad API: Shape.edges / Edge.geomType / Edge.startPoint / Edge.endPoint(いずれもVectorを
+ * 返すため toTuple() 後に delete() する)。
+ */
+function extractReferenceEdges(body: Shape3D, basis: PlaneBasis): ReferenceEdgeLine[] {
+  const result: ReferenceEdgeLine[] = [];
+  const edges = body.edges;
+  try {
+    for (const edge of edges) {
+      if (edge.geomType !== "LINE") continue;
+      const startVec = edge.startPoint;
+      const endVec = edge.endPoint;
+      const start = startVec.toTuple();
+      const end = endVec.toTuple();
+      startVec.delete();
+      endVec.delete();
+      const relStart = subtract(start, basis.origin);
+      const relEnd = subtract(end, basis.origin);
+      const dStart = dot(relStart, basis.normal);
+      const dEnd = dot(relEnd, basis.normal);
+      if (Math.abs(dStart) > REFERENCE_EDGE_PLANE_TOLERANCE || Math.abs(dEnd) > REFERENCE_EDGE_PLANE_TOLERANCE) continue;
+      const p1: [number, number] = [dot(relStart, basis.xDir), dot(relStart, basis.yDir)];
+      const p2: [number, number] = [dot(relEnd, basis.xDir), dot(relEnd, basis.yDir)];
+      result.push({ p1, p2 });
+    }
+  } finally {
+    edges.forEach((e) => e.delete());
+  }
+  return result;
+}
+
+/**
  * 1つのDrawingを指定平面(名前付き平面文字列 または Plane インスタンス)・距離・方向で押し出す。
  * replicadの Sketch#extrude() / Sketches#extrude() は内部で押し出し元の sketch(wire)を
  * 自動的に delete() する実装になっている(CompoundSketchを除く)ため、呼び出し側で
@@ -522,6 +565,9 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
   // ベースの軽量コピーであり、live側のbodyを delete() してもスナップショット側は無効化されない
   // (逆も同様)。評価終了時(成功/失敗いずれでも)にすべて delete() する。
   const snapshots = new Map<FeatureId, Shape3D>();
+  // 各スケッチが評価された時点の「現在ボディ」から抽出したスケッチ平面上の直線エッジ(Phase 22)。
+  // その時点でボディが存在しない(押し出しがまだ無い)スケッチはエントリを作らない。
+  const referenceEdgesById = new Map<FeatureId, ReferenceEdgeLine[]>();
   let body: Shape3D | null = null;
   let currentFeatureId: FeatureId | undefined;
 
@@ -530,8 +576,10 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
       currentFeatureId = feature.id;
 
       if (feature.type === "sketch") {
+        let basis: PlaneBasis;
         if (feature.plane.kind === "world") {
           // world平面はXY/XZ/YZの3枚(PlaneRefの型で保証済み)。追加の検証は不要。
+          basis = WORLD_PLANE_BASES[feature.plane.plane];
         } else {
           const refShape = snapshots.get(feature.plane.featureId);
           if (!refShape) {
@@ -544,6 +592,10 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
             feature.plane.normal,
           );
           resolvedFacePlanes.set(feature.id, resolved);
+          basis = facePlaneBasis(resolved.center, resolved.normal);
+        }
+        if (body) {
+          referenceEdgesById.set(feature.id, extractReferenceEdges(body, basis));
         }
         validateSketchPolygonCorners(feature);
         sketches.set(feature.id, feature);
@@ -620,5 +672,10 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
     sketchPlanes.push({ sketchId, ...basis });
   }
 
-  return { ok: true, shape: body, sketchPlanes };
+  const referenceEdges: ReferenceEdgeSet[] = [];
+  for (const [sketchId, edges] of referenceEdgesById) {
+    referenceEdges.push({ sketchId, edges });
+  }
+
+  return { ok: true, shape: body, sketchPlanes, referenceEdges };
 }

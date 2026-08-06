@@ -12,6 +12,9 @@ import {
   constraintDimensionKey,
   formatConstraintDimensionLabel,
   upsertDistanceConstraint,
+  upsertDistanceEntityEntityConstraint,
+  upsertDistanceEntityLineConstraint,
+  upsertDistanceEntityOriginConstraint,
   upsertLengthConstraint,
   upsertRadiusConstraint,
   type ConstraintDimension,
@@ -79,6 +82,9 @@ const CONSTRAINT_DIMENSION_LABELS: Record<ConstraintDimension["kind"], string> =
   "seg-length": "長さ (mm)",
   "seg-radius": "半径 (mm)",
   "seg-distance": "距離 (mm)",
+  "entity-distance-origin": "中心↔原点の距離 (mm)",
+  "entity-distance-entity": "中心間の距離 (mm)",
+  "entity-distance-line": "中心↔辺の距離 (mm)",
 };
 
 export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflictRollback }: DimensionOverlayProps) {
@@ -89,8 +95,8 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
 
   const dimensions = useMemo(() => computeSketchDimensions(sketch.entities), [sketch.entities]);
   const constraintDimensions = useMemo(
-    () => computeConstraintDimensions(sketch.segments ?? [], sketch.constraints ?? []),
-    [sketch.segments, sketch.constraints],
+    () => computeConstraintDimensions(sketch.segments ?? [], sketch.constraints ?? [], sketch.entities),
+    [sketch.segments, sketch.constraints, sketch.entities],
   );
   // onFrameコールバックはマウント時に一度だけ登録するため、最新の寸法一覧・平面基底はrefで参照する。
   const dimensionsRef = useRef(dimensions);
@@ -160,7 +166,13 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
             ? upsertLengthConstraint(constraints, dimension.segmentId, value)
             : dimension.kind === "seg-radius"
               ? upsertRadiusConstraint(constraints, dimension.segmentId, value)
-              : upsertDistanceConstraint(constraints, dimension.a, dimension.b, value);
+              : dimension.kind === "seg-distance"
+                ? upsertDistanceConstraint(constraints, dimension.a, dimension.b, value)
+                : dimension.kind === "entity-distance-origin"
+                  ? upsertDistanceEntityOriginConstraint(constraints, dimension.entityId, value)
+                  : dimension.kind === "entity-distance-entity"
+                    ? upsertDistanceEntityEntityConstraint(constraints, dimension.aEntityId, dimension.bEntityId, value)
+                    : upsertDistanceEntityLineConstraint(constraints, dimension.entityId, dimension.line, value);
         return setSketchConstraints(doc, sketch.id, next);
       },
       onConflictRollback,

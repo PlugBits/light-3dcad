@@ -103,11 +103,27 @@ export type SketchSegment = {
  */
 export type PointRef = { segmentId: string; end: "p1" | "p2" };
 
+/** entities配列内の1エンティティを指す参照(Phase 22、circleのみ対象v1)。 */
+export type EntityRef = { entityId: string };
+
+/**
+ * 円の中心↔辺の距離拘束(distanceEntityLine)が参照する「辺」(Phase 22)。
+ * "entityEdge" は rectangle/polygon エンティティの辺(edgeIndex: rectangleは0=下/1=右/2=上/3=左、
+ * polygonはpoints[i]→points[i+1 mod n])を指し、エンティティが動けば辺も追従する(常に生値から解決)。
+ * "refEdge" はボディ端面参照(Phase 22、src/worker/evaluator.tsのreferenceEdges)のスナップショットで、
+ * p1/p2はピック時点のスケッチローカル2D座標を凍結したもの。再評価のたびに
+ * src/sketch/referenceEdgeMatch.ts が最新のreferenceEdgesと幾何マッチングして更新を試みる
+ * (マッチしなければスナップショットを維持する。既知の制限)。
+ */
+export type LineRef =
+  | { kind: "entityEdge"; entityId: string; edgeIndex: number }
+  | { kind: "refEdge"; p1: [number, number]; p2: [number, number] };
+
 /**
  * スケッチ拘束(Phase 20a、寸法ドリブン編集[Phase 20b]の土台)。座標系はSketchSegmentと同じく
  * スケッチのローカル2D(mm)。src/sketch/solver.ts の solveSketch() がこの配列を解として満たす
- * segments(端点座標)を求める(coincidentでの端点マージは行わず、各セグメントの端点は独立変数の
- * まま残差として扱う。詳細はsolver.tsのコメント参照)。
+ * segments(端点座標)・circleエンティティの中心座標を求める(coincidentでの端点マージは行わず、
+ * 各セグメントの端点は独立変数のまま残差として扱う。詳細はsolver.tsのコメント参照)。
  */
 export type SketchConstraint =
   | { id: string; kind: "coincident"; a: PointRef; b: PointRef }
@@ -120,7 +136,15 @@ export type SketchConstraint =
   /** kind:"arc" のセグメントにのみ指定できる半径拘束(mm)。bulge(挟角)は維持したまま端点間距離を調整して解く。 */
   | { id: string; kind: "radius"; segmentId: string; value: number }
   /** 点を(拘束追加時点の)現在位置に固定する。値はsolveSketch呼び出し時の入力座標から都度求める(拘束自体には持たない)。 */
-  | { id: string; kind: "fix"; point: PointRef };
+  | { id: string; kind: "fix"; point: PointRef }
+  /** circleエンティティの中心↔スケッチ原点([0,0])の距離(mm、Phase 22)。 */
+  | { id: string; kind: "distanceEntityOrigin"; entity: EntityRef; value: number }
+  /** circleエンティティの中心↔中心の距離(mm、Phase 22)。 */
+  | { id: string; kind: "distanceEntityEntity"; a: EntityRef; b: EntityRef; value: number }
+  /** circleエンティティの中心↔辺(直線、動かない)の垂直距離(mm、Phase 22)。 */
+  | { id: string; kind: "distanceEntityLine"; entity: EntityRef; line: LineRef; value: number }
+  /** circleエンティティの中心を(拘束追加時点の)現在位置に固定する(Phase 22、固定トグル)。 */
+  | { id: string; kind: "fixEntity"; entity: EntityRef };
 
 /**
  * 2Dスケッチフィーチャー。

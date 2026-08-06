@@ -31,15 +31,13 @@ import {
   segmentLength,
   segmentRadius,
   upsertDistanceConstraint,
+  upsertDistanceEntityEntityConstraint,
+  upsertDistanceEntityLineConstraint,
+  upsertDistanceEntityOriginConstraint,
   upsertLengthConstraint,
   upsertRadiusConstraint,
 } from "../sketch/constraintDimensions";
-import {
-  distanceBetweenPoints,
-  distancePointToLine,
-  moveCenterAlongDirection,
-  moveCenterToLineDistance,
-} from "../sketch/positionDimensions";
+import { distanceBetweenPoints, distancePointToLine } from "../sketch/positionDimensions";
 import { rectangleFromCorners, regularPolygonVertices } from "../sketch/shapeFromPoints";
 import { trimSegmentAtPoint } from "../sketch/trim";
 import { updateDocumentWithConflictRollback } from "../state/constraintUpdate";
@@ -80,6 +78,7 @@ export default function App() {
   const mesh = useCadStore((s) => s.mesh);
   const faceInfo = useCadStore((s) => s.faceInfo);
   const sketchPlanes = useCadStore((s) => s.sketchPlanes);
+  const referenceEdges = useCadStore((s) => s.referenceEdges);
   const errorMessage = useCadStore((s) => s.errorMessage);
   const errorFeatureId = useCadStore((s) => s.errorFeatureId);
   const selectedFeatureId = useCadStore((s) => s.selectedFeatureId);
@@ -276,6 +275,20 @@ export default function App() {
       viewerRef.current?.updateDimensionToolTargets(feature.segments ?? [], feature.entities);
     }
   }, [dimensionTool, doc, selectedFeatureId]);
+
+  // ボディ端面参照エッジ(Phase 22)のオーバーレイ+寸法ツールのピック対象を、選択中スケッチの
+  // referenceEdges(Worker評価応答)が変わるたびに同期する。選択中フィーチャーがスケッチでない、
+  // または平面が未解決の場合は表示・ピック対象ともクリアする。
+  useEffect(() => {
+    const feature = selectedFeatureId ? findFeature(doc, selectedFeatureId) : undefined;
+    const plane = feature?.type === "sketch" ? sketchPlanes.find((p) => p.sketchId === feature.id) : undefined;
+    if (!feature || feature.type !== "sketch" || !plane) {
+      viewerRef.current?.setReferenceEdges(null, []);
+      return;
+    }
+    const edges = referenceEdges.find((r) => r.sketchId === feature.id)?.edges ?? [];
+    viewerRef.current?.setReferenceEdges(plane, edges);
+  }, [doc, selectedFeatureId, sketchPlanes, referenceEdges]);
 
   // Ctrl+Z(Mac: Cmd+Z)でアンドゥ、Ctrl+Shift+Z(Mac: Cmd+Shift+Z)でリドゥ(Phase 14)。
   // テキスト入力欄にフォーカスがある間はブラウザ標準のテキスト編集アンドゥを優先し、何もしない。
@@ -636,8 +649,8 @@ export default function App() {
           initialValue =
             from?.kind === "circle" && to?.kind === "circle" ? distanceBetweenPoints(from.center, to.center) : 0;
           hintLabel = "後にクリックした円(この円)が移動します";
-        } else if (target.kind === "circle-distance-edge") {
-          titleLabel = "中心↔辺の距離 (mm)";
+        } else if (target.kind === "circle-distance-edge" || target.kind === "circle-distance-refedge") {
+          titleLabel = target.kind === "circle-distance-refedge" ? "中心↔参照エッジの距離 (mm)" : "中心↔辺の距離 (mm)";
           const entity = entities.find((e) => e.id === target.entityId);
           initialValue = entity?.kind === "circle" ? distancePointToLine(entity.center, target.edgeA, target.edgeB) : 0;
           hintLabel = "辺は動かず、円の中心だけが移動します";
@@ -671,9 +684,10 @@ export default function App() {
    * 自動的に巻き戻す。entity系(entity-radius/entity-width/entity-height、Phase 21)は拘束を
    * 経由せずrectangle/circleエンティティのradius/width/heightフィールドを直接更新する
    * (SketchEditorの数値編集と同じ経路。ソルバを経由しないため矛盾巻き戻しの対象外)。
-   * circle-distance-*(Phase 21b、位置寸法)も同様に拘束・ソルバを経由せず、
-   * src/sketch/positionDimensions.ts の純関数で新しいcenterを計算してentityを直接更新する
-   * (半径は不変、相手側=原点/1点目の円/辺は動かさない)。
+   * circle-distance-*(Phase 22)は distanceEntityOrigin/distanceEntityEntity/distanceEntityLine
+   * 拘束のupsertに置き換えた(以前は円のcenterを直接書き換えていたが、ソルバに乗せることで
+   * 他の拘束[矩形のサイズ変更等]と共存できるようにするため)。他のsegments系と同じく
+   * updateDocumentWithConflictRollbackを通すため、矛盾すれば自動的に取り消される。
    */
   function handleApplyDimensionTarget(value: number) {
     if (!dimensionPopup || !selectedFeature || selectedFeature.type !== "sketch") return;
@@ -691,41 +705,6 @@ export default function App() {
       setDimensionPopup(null);
       return;
     }
-    if (target.kind === "circle-distance-origin") {
-      updateDocument((doc) => {
-        const feature = findFeature(doc, sketchId);
-        const entity = feature?.type === "sketch" ? feature.entities.find((e) => e.id === target.entityId) : null;
-        if (!entity || entity.kind !== "circle") return doc;
-        const center = moveCenterAlongDirection(entity.center, [0, 0], value);
-        return updateSketchEntity(doc, sketchId, target.entityId, { center });
-      });
-      setDimensionPopup(null);
-      return;
-    }
-    if (target.kind === "circle-distance-circle") {
-      updateDocument((doc) => {
-        const feature = findFeature(doc, sketchId);
-        const entities = feature?.type === "sketch" ? feature.entities : [];
-        const from = entities.find((e) => e.id === target.fromEntityId);
-        const to = entities.find((e) => e.id === target.toEntityId);
-        if (!from || from.kind !== "circle" || !to || to.kind !== "circle") return doc;
-        const center = moveCenterAlongDirection(to.center, from.center, value);
-        return updateSketchEntity(doc, sketchId, target.toEntityId, { center });
-      });
-      setDimensionPopup(null);
-      return;
-    }
-    if (target.kind === "circle-distance-edge") {
-      updateDocument((doc) => {
-        const feature = findFeature(doc, sketchId);
-        const entity = feature?.type === "sketch" ? feature.entities.find((e) => e.id === target.entityId) : null;
-        if (!entity || entity.kind !== "circle") return doc;
-        const center = moveCenterToLineDistance(entity.center, target.edgeA, target.edgeB, value);
-        return updateSketchEntity(doc, sketchId, target.entityId, { center });
-      });
-      setDimensionPopup(null);
-      return;
-    }
 
     updateDocumentWithConflictRollback(
       sketchId,
@@ -738,7 +717,13 @@ export default function App() {
             ? upsertLengthConstraint(constraints, target.segmentId, value)
             : target.kind === "radius"
               ? upsertRadiusConstraint(constraints, target.segmentId, value)
-              : upsertDistanceConstraint(constraints, target.a, target.b, value);
+              : target.kind === "distance"
+                ? upsertDistanceConstraint(constraints, target.a, target.b, value)
+                : target.kind === "circle-distance-origin"
+                  ? upsertDistanceEntityOriginConstraint(constraints, target.entityId, value)
+                  : target.kind === "circle-distance-circle"
+                    ? upsertDistanceEntityEntityConstraint(constraints, target.fromEntityId, target.toEntityId, value)
+                    : upsertDistanceEntityLineConstraint(constraints, target.entityId, target.line, value);
         return setSketchConstraints(doc, sketchId, next);
       },
       showTransientMessage,

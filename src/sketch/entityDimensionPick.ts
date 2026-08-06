@@ -22,6 +22,8 @@ export interface EntityDimensionHit {
   dist: number;
   /** ホバーハイライト用の境界ポリライン(ローカル2D)。circleは円周の近似、rectangleは該当辺の2点。 */
   highlightPoints: Point2[];
+  /** rectangleの辺ヒットの場合、その辺のインデックス(0=下,1=右,2=上,3=左、Phase 22)。circleはundefined。 */
+  edgeIndex?: number;
 }
 
 const CIRCLE_HIGHLIGHT_SEGMENTS = 48;
@@ -67,27 +69,29 @@ function nearestRectangleEdgeHit(
     [cx + hw, cy + hh],
     [cx - hw, cy + hh],
   ];
-  const edges: { a: Point2; b: Point2; kind: "entity-width" | "entity-height" }[] = [
-    { a: corners[0], b: corners[1], kind: "entity-width" },
-    { a: corners[1], b: corners[2], kind: "entity-height" },
-    { a: corners[2], b: corners[3], kind: "entity-width" },
-    { a: corners[3], b: corners[0], kind: "entity-height" },
+  const edges: { a: Point2; b: Point2; kind: "entity-width" | "entity-height"; edgeIndex: number }[] = [
+    { a: corners[0], b: corners[1], kind: "entity-width", edgeIndex: 0 },
+    { a: corners[1], b: corners[2], kind: "entity-height", edgeIndex: 1 },
+    { a: corners[2], b: corners[3], kind: "entity-width", edgeIndex: 2 },
+    { a: corners[3], b: corners[0], kind: "entity-height", edgeIndex: 3 },
   ];
-  let best: { dist: number; kind: "entity-width" | "entity-height"; a: Point2; b: Point2 } = {
+  let best: { dist: number; kind: "entity-width" | "entity-height"; a: Point2; b: Point2; edgeIndex: number } = {
     dist: Infinity,
     kind: "entity-width",
     a: edges[0].a,
     b: edges[0].b,
+    edgeIndex: 0,
   };
   for (const edge of edges) {
     const d = distPointToSegment(point, edge.a, edge.b);
-    if (d < best.dist) best = { dist: d, kind: edge.kind, a: edge.a, b: edge.b };
+    if (d < best.dist) best = { dist: d, kind: edge.kind, a: edge.a, b: edge.b, edgeIndex: edge.edgeIndex };
   }
   return {
     entityId: entity.id,
     kind: best.kind,
     dist: best.dist,
     highlightPoints: [best.a, best.b],
+    edgeIndex: best.edgeIndex,
   };
 }
 

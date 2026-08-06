@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { arcGeometryFromBulge } from "../../src/sketch/bulge";
 import { solveDocumentSketches, solveSketch } from "../../src/sketch/solver";
-import type { CadDocument, SketchConstraint, SketchFeature, SketchSegment } from "../../src/model/types";
+import type { CadDocument, SketchConstraint, SketchEntity, SketchFeature, SketchSegment } from "../../src/model/types";
 
 function dist(a: [number, number], b: [number, number]): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1]);
@@ -258,6 +258,132 @@ describe("solveSketch", () => {
     expect(out.id).toBe("arc-x");
     expect(out.kind).toBe("arc");
     expect(out.bulge).toBe(0.5);
+  });
+});
+
+describe("solveSketch circleエンティティの位置拘束(Phase 22)", () => {
+  function circle(id: string, center: [number, number], radius = 5): Extract<SketchEntity, { kind: "circle" }> {
+    return { kind: "circle", id, center, radius };
+  }
+
+  it("① distanceEntityOrigin: 円の中心↔原点の距離が指定値に解ける(方向は維持)", () => {
+    const c = circle("c1", [10, 0]);
+    const constraints: SketchConstraint[] = [
+      { id: "d1", kind: "distanceEntityOrigin", entity: { entityId: "c1" }, value: 25 },
+    ];
+    const result = solveSketch([], constraints, [c]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.entities[0];
+    expect(out.kind).toBe("circle");
+    if (out.kind !== "circle") return;
+    expect(dist(out.center, [0, 0])).toBeCloseTo(25, 4);
+    // 方向(+X)が維持されている。
+    expect(out.center[1]).toBeCloseTo(0, 4);
+  });
+
+  it("② distanceEntityEntity: 2円の中心間距離が指定値に解ける", () => {
+    const a = circle("a", [0, 0]);
+    const b = circle("b", [5, 0]);
+    const constraints: SketchConstraint[] = [
+      { id: "d1", kind: "distanceEntityEntity", a: { entityId: "a" }, b: { entityId: "b" }, value: 40 },
+    ];
+    const result = solveSketch([], constraints, [a, b]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outA = result.entities.find((e) => e.id === "a")!;
+    const outB = result.entities.find((e) => e.id === "b")!;
+    if (outA.kind !== "circle" || outB.kind !== "circle") throw new Error("not circle");
+    expect(dist(outA.center, outB.center)).toBeCloseTo(40, 4);
+  });
+
+  it("③ distanceEntityLine(entityEdge): 円の中心↔rectangle辺の垂直距離が指定値に解ける(辺は動かない)", () => {
+    const c = circle("c1", [5, 5]);
+    const rect: SketchEntity = { kind: "rectangle", id: "r1", center: [0, 0], width: 20, height: 20 };
+    // rectangleのedgeIndex0(下辺、y=-10の水平線)からの距離を30に指定 => 中心のy座標が20になる(現在+y側)。
+    const constraints: SketchConstraint[] = [
+      {
+        id: "d1",
+        kind: "distanceEntityLine",
+        entity: { entityId: "c1" },
+        line: { kind: "entityEdge", entityId: "r1", edgeIndex: 0 },
+        value: 30,
+      },
+    ];
+    const result = solveSketch([], constraints, [c, rect]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outC = result.entities.find((e) => e.id === "c1")!;
+    const outR = result.entities.find((e) => e.id === "r1")!;
+    if (outC.kind !== "circle") throw new Error("not circle");
+    expect(outC.center[1]).toBeCloseTo(20, 3);
+    // rectangle自体は動いていない。
+    expect(outR).toEqual(rect);
+  });
+
+  it("④ distanceEntityLine(refEdge): ボディ端面参照エッジのスナップショット座標を固定線として解く", () => {
+    const c = circle("c1", [0, 5]);
+    const constraints: SketchConstraint[] = [
+      {
+        id: "d1",
+        kind: "distanceEntityLine",
+        entity: { entityId: "c1" },
+        line: { kind: "refEdge", p1: [-10, 0], p2: [10, 0] },
+        value: 15,
+      },
+    ];
+    const result = solveSketch([], constraints, [c]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.entities[0];
+    if (out.kind !== "circle") throw new Error("not circle");
+    expect(out.center[1]).toBeCloseTo(15, 4);
+  });
+
+  it("⑤ fixEntity: 固定した円は他の円との距離拘束があっても動かず、もう一方が動く", () => {
+    const fixed = circle("fixed", [0, 0]);
+    const movable = circle("movable", [5, 0]);
+    const constraints: SketchConstraint[] = [
+      { id: "fix1", kind: "fixEntity", entity: { entityId: "fixed" } },
+      { id: "d1", kind: "distanceEntityEntity", a: { entityId: "fixed" }, b: { entityId: "movable" }, value: 50 },
+    ];
+    const result = solveSketch([], constraints, [fixed, movable]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outFixed = result.entities.find((e) => e.id === "fixed")!;
+    const outMovable = result.entities.find((e) => e.id === "movable")!;
+    if (outFixed.kind !== "circle" || outMovable.kind !== "circle") throw new Error("not circle");
+    expect(outFixed.center[0]).toBeCloseTo(0, 6);
+    expect(outFixed.center[1]).toBeCloseTo(0, 6);
+    expect(dist(outFixed.center, outMovable.center)).toBeCloseTo(50, 3);
+  });
+
+  it("⑥ fixEntityと矛盾するdistanceEntityOriginでconflictingになる(固定点は原点そのものだが距離30を要求)", () => {
+    const c = circle("c1", [0, 0]);
+    const constraints: SketchConstraint[] = [
+      { id: "fix1", kind: "fixEntity", entity: { entityId: "c1" } },
+      { id: "d1", kind: "distanceEntityOrigin", entity: { entityId: "c1" }, value: 30 },
+    ];
+    const result = solveSketch([], constraints, [c]);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.conflicting).toBe(true);
+  });
+
+  it("⑦ segmentsとcircleが混在していても、それぞれの拘束が独立に解ける", () => {
+    const seg: SketchSegment = { id: "s1", kind: "line", p1: [0, 0], p2: [10, 0] };
+    const c = circle("c1", [3, 3]);
+    const constraints: SketchConstraint[] = [
+      { id: "len1", kind: "length", segmentId: "s1", value: 20 },
+      { id: "d1", kind: "distanceEntityOrigin", entity: { entityId: "c1" }, value: 10 },
+    ];
+    const result = solveSketch([seg], constraints, [c]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(dist(result.segments[0].p1, result.segments[0].p2)).toBeCloseTo(20, 4);
+    const outC = result.entities[0];
+    if (outC.kind !== "circle") throw new Error("not circle");
+    expect(dist(outC.center, [0, 0])).toBeCloseTo(10, 4);
   });
 });
 

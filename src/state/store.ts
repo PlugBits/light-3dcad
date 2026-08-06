@@ -11,7 +11,8 @@ import {
 } from "../model/document";
 import { createRectangleEntity } from "../model/entity";
 import type { CadDocument, ExtrudeFeature, FeatureId, WorldPlaneName } from "../model/types";
-import type { FaceInfo, MeshData, MeshQuality, SketchPlaneInfo, WorkerResponse } from "../protocol/messages";
+import type { FaceInfo, MeshData, MeshQuality, ReferenceEdgeSet, SketchPlaneInfo, WorkerResponse } from "../protocol/messages";
+import { updateReferenceEdgeSnapshots } from "../sketch/referenceEdgeMatch";
 import { solveDocumentSketches } from "../sketch/solver";
 import { createHistoryState, pushHistory, redoHistory, undoHistory, type HistoryState } from "./history";
 
@@ -100,6 +101,11 @@ interface CadStoreState {
   faceInfo: FaceInfo[];
   /** 各スケッチの解決済み平面基底(origin/xDir/yDir/normal)。ビューアのスケッチ線描画に使う派生状態。 */
   sketchPlanes: SketchPlaneInfo[];
+  /**
+   * 各スケッチの評価時点の「現在ボディ」から抽出したスケッチ平面上の直線エッジ(Phase 22、
+   * ボディ端面参照寸法のオーバーレイ・寸法ツールのピック対象に使う派生状態)。
+   */
+  referenceEdges: ReferenceEdgeSet[];
   errorMessage: string | null;
   errorFeatureId: FeatureId | null;
   /** 現在表示中のmesh/faceInfo/errorに対応する最新のevaluateリクエストID(古い応答の破棄に使う)。 */
@@ -162,11 +168,19 @@ function applyEvaluated(
   if (get().latestEvaluateRequestId !== requestId) return;
 
   if (response.kind === "evaluated") {
+    // 既存のdistanceEntityLine(refEdge)拘束のスナップショットを、最新のreferenceEdgesと
+    // 幾何マッチングして追従させる(Phase 22)。ここではsolveDocumentSketches()やWorker再評価は
+    // 発行しない(スナップショット更新自体は現在のジオメトリに影響しないため。マッチした新しい
+    // スナップショットは次回のupdateDocument()呼び出しから反映される。既知の制限として
+    // docs/PLAN.mdに記載)。
+    const nextDoc = updateReferenceEdgeSnapshots(get().doc, response.referenceEdges);
     set({
+      doc: nextDoc,
       status: "ready",
       mesh: response.mesh,
       faceInfo: response.faceInfo,
       sketchPlanes: response.sketchPlanes,
+      referenceEdges: response.referenceEdges,
       errorMessage: null,
       errorFeatureId: null,
     });
@@ -187,6 +201,7 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   mesh: null,
   faceInfo: [],
   sketchPlanes: [],
+  referenceEdges: [],
   errorMessage: null,
   errorFeatureId: null,
   latestEvaluateRequestId: null,

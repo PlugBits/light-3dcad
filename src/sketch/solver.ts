@@ -11,9 +11,13 @@
 // さらに「各変数の初期位置からの移動量」に弱い正則化(小さい重み)をかけた擬似残差を加えることで、
 // 拘束が不足している(劣拘束)自由度については「入力形状に最も近い解」を選ぶ(SolidWorks等の
 // スケッチソルバに倣った自然な挙動。無関係な点が意図せず動かないようにする効果もある)。
-import type { CadDocument, FeatureId, PointRef, SketchConstraint, SketchSegment } from "../model/types";
+import type { CadDocument, EntityRef, FeatureId, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
+import { resolveLineRefPoints } from "./entityEdges";
 
 export type Point2 = [number, number];
+
+/** circleエンティティのみを抜き出す型ガード(solverの変数対象、Phase 22)。 */
+type CircleEntity = Extract<SketchEntity, { kind: "circle" }>;
 
 /** 収束判定: 全残差(拘束+正則化)のノルムがこれを下回れば打ち切る。 */
 const CONVERGE_NORM = 1e-8;
@@ -29,10 +33,16 @@ const MIN_SAFE_LENGTH = 1e-9;
 const INITIAL_LAMBDA = 1e-3;
 const MAX_LAMBDA = 1e12;
 
-/** ソルバの成功結果。segmentsは入力と同じ順序・同じid・kind・bulgeを保ち、p1/p2のみ更新される。 */
+/**
+ * ソルバの成功結果。segmentsは入力と同じ順序・同じid・kind・bulgeを保ち、p1/p2のみ更新される。
+ * entities(Phase 22)は入力と同じ順序・同じ内容を保つが、circleエンティティのcenterのみ
+ * 解いた座標に更新される(circle以外・非circleフィールドは素通し)。呼び出し側がentitiesを
+ * 渡さなかった場合は空配列を返す。
+ */
 export interface SolveSuccess {
   ok: true;
   segments: SketchSegment[];
+  entities: SketchEntity[];
 }
 
 /** ソルバの失敗結果。conflicting:trueは「拘束が矛盾(または過拘束)していて許容誤差内に収まらなかった」ことを表す。 */
@@ -56,12 +66,20 @@ interface ResidualEq {
 
 /** セグメントid -> 変数ベースインデックス(x1=base, y1=base+1, x2=base+2, y2=base+3)。 */
 type VarIndexMap = Map<string, number>;
+/** circleエンティティid -> 変数ベースインデックス(cx=base, cy=base+1、Phase 22)。 */
+type EntityVarIndexMap = Map<string, number>;
 
 function pointVarIndex(varIndex: VarIndexMap, ref: PointRef): [number, number] | null {
   const base = varIndex.get(ref.segmentId);
   if (base === undefined) return null;
   const offset = ref.end === "p1" ? 0 : 2;
   return [base + offset, base + offset + 1];
+}
+
+function entityVarIndex(entityVarIdx: EntityVarIndexMap, ref: EntityRef): [number, number] | null {
+  const base = entityVarIdx.get(ref.entityId);
+  if (base === undefined) return null;
+  return [base, base + 1];
 }
 
 function lengthLikeResidual(
@@ -105,12 +123,75 @@ function radiusResidual(x: number[], base: number, value: number, bulge: number)
   return lengthLikeResidual(x, [base, base + 1], [base + 2, base + 3], value, scale);
 }
 
+/**
+ * 可変点(idx)から固定点(fixed、動かない相手。原点など)への距離残差(Phase 22)。
+ * lengthLikeResidual の a を「固定値」に置き換えた版(固定側は変数を持たないので偏微分項も無い)。
+ */
+function pointToFixedDistanceResidual(x: number[], idx: [number, number], fixed: Point2, value: number): ResidualEq {
+  const ax = x[idx[0]];
+  const ay = x[idx[1]];
+  const dx = ax - fixed[0];
+  const dy = ay - fixed[1];
+  const len = Math.hypot(dx, dy);
+  const safeLen = Math.max(len, MIN_SAFE_LENGTH);
+  const k = 1 / safeLen;
+  return {
+    value: len - value,
+    terms: [
+      { index: idx[0], coef: k * dx },
+      { index: idx[1], coef: k * dy },
+    ],
+  };
+}
+
+/**
+ * 可変点(idx)から固定直線(a,bを通る無限直線、動かない)への符号付き垂直距離残差(Phase 22)。
+ * sign は解く前(初期位置)にどちら側にあったかで決め、反復中は固定する(距離0をまたいで
+ * 符号が反転すると微分不連続になり収束が不安定になるため。src/sketch/positionDimensions.tsの
+ * moveCenterToLineDistance()が採用する「現在の側を保つ」考え方と同じ)。
+ */
+function pointToFixedLineResidual(
+  x: number[],
+  idx: [number, number],
+  a: Point2,
+  b: Point2,
+  value: number,
+  sign: number,
+): ResidualEq {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const lineLen = Math.hypot(dx, dy);
+  const safeLen = Math.max(lineLen, MIN_SAFE_LENGTH);
+  const px = x[idx[0]];
+  const py = x[idx[1]];
+  const cross = (px - a[0]) * dy - (py - a[1]) * dx;
+  const k = sign / safeLen;
+  return {
+    value: k * cross - value,
+    terms: [
+      { index: idx[0], coef: k * dy },
+      { index: idx[1], coef: -k * dx },
+    ],
+  };
+}
+
+/** pointToFixedLineResidual()のsignを初期位置(initX)から決める。直線上(距離0近傍)なら+1をデフォルトにする。 */
+function lineSideSign(initX: number[], idx: [number, number], a: Point2, b: Point2): number {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const cross = (initX[idx[0]] - a[0]) * dy - (initX[idx[1]] - a[1]) * dx;
+  return cross < 0 ? -1 : 1;
+}
+
 /** 拘束由来の残差式一覧を作る(正則化は含まない)。参照先セグメントが見つからない拘束は無視する(呼び出し側でバリデーション済みの前提)。 */
 function buildConstraintResiduals(
   constraints: readonly SketchConstraint[],
   segmentsById: Map<string, SketchSegment>,
   varIndex: VarIndexMap,
+  entityVarIdx: EntityVarIndexMap,
+  entities: readonly SketchEntity[],
   x: number[],
+  initX: number[],
 ): ResidualEq[] {
   const eqs: ResidualEq[] = [];
 
@@ -185,8 +266,31 @@ function buildConstraintResiduals(
         eqs.push(radiusResidual(x, base, c.value, segment.bulge));
         break;
       }
-      case "fix": {
-        // fixは値を持たない: solveSketch呼び出し時点の初期座標が目標値になる(呼び出し元でinitXから生成)。
+      case "fix":
+      case "fixEntity": {
+        // 値を持たない: solveSketch呼び出し時点の初期座標が目標値になる(buildFixResidualsが扱う)。
+        break;
+      }
+      case "distanceEntityOrigin": {
+        const idx = entityVarIndex(entityVarIdx, c.entity);
+        if (!idx) break;
+        eqs.push(pointToFixedDistanceResidual(x, idx, [0, 0], c.value));
+        break;
+      }
+      case "distanceEntityEntity": {
+        const a = entityVarIndex(entityVarIdx, c.a);
+        const b = entityVarIndex(entityVarIdx, c.b);
+        if (!a || !b) break;
+        eqs.push(lengthLikeResidual(x, a, b, c.value));
+        break;
+      }
+      case "distanceEntityLine": {
+        const idx = entityVarIndex(entityVarIdx, c.entity);
+        if (!idx) break;
+        const line = resolveLineRefPoints(c.line, entities);
+        if (!line) break;
+        const sign = lineSideSign(initX, idx, line[0], line[1]);
+        eqs.push(pointToFixedLineResidual(x, idx, line[0], line[1], c.value, sign));
         break;
       }
     }
@@ -195,15 +299,27 @@ function buildConstraintResiduals(
   return eqs;
 }
 
-/** fix拘束の残差式(目標値=初期座標)を作る。buildConstraintResidualsとは別関数にして初期値配列を明示的に渡す。 */
-function buildFixResiduals(constraints: readonly SketchConstraint[], varIndex: VarIndexMap, x: number[], initX: number[]): ResidualEq[] {
+/** fix/fixEntity拘束の残差式(目標値=初期座標)を作る。buildConstraintResidualsとは別関数にして初期値配列を明示的に渡す。 */
+function buildFixResiduals(
+  constraints: readonly SketchConstraint[],
+  varIndex: VarIndexMap,
+  entityVarIdx: EntityVarIndexMap,
+  x: number[],
+  initX: number[],
+): ResidualEq[] {
   const eqs: ResidualEq[] = [];
   for (const c of constraints) {
-    if (c.kind !== "fix") continue;
-    const p = pointVarIndex(varIndex, c.point);
-    if (!p) continue;
-    eqs.push({ value: x[p[0]] - initX[p[0]], terms: [{ index: p[0], coef: 1 }] });
-    eqs.push({ value: x[p[1]] - initX[p[1]], terms: [{ index: p[1], coef: 1 }] });
+    if (c.kind === "fix") {
+      const p = pointVarIndex(varIndex, c.point);
+      if (!p) continue;
+      eqs.push({ value: x[p[0]] - initX[p[0]], terms: [{ index: p[0], coef: 1 }] });
+      eqs.push({ value: x[p[1]] - initX[p[1]], terms: [{ index: p[1], coef: 1 }] });
+    } else if (c.kind === "fixEntity") {
+      const idx = entityVarIndex(entityVarIdx, c.entity);
+      if (!idx) continue;
+      eqs.push({ value: x[idx[0]] - initX[idx[0]], terms: [{ index: idx[0], coef: 1 }] });
+      eqs.push({ value: x[idx[1]] - initX[idx[1]], terms: [{ index: idx[1], coef: 1 }] });
+    }
   }
   return eqs;
 }
@@ -299,6 +415,17 @@ function segmentsFromVars(segments: readonly SketchSegment[], x: number[], varIn
   });
 }
 
+/** circleエンティティのcenterを解いた変数値に置き換える(circle以外はそのままコピー、Phase 22)。 */
+function entitiesFromVars(entities: readonly SketchEntity[], x: number[], entityVarIdx: EntityVarIndexMap): SketchEntity[] {
+  return entities.map((entity) => {
+    if (entity.kind !== "circle") return { ...entity };
+    const base = entityVarIdx.get(entity.id);
+    if (base === undefined) return { ...entity };
+    const center: Point2 = [x[base], x[base + 1]];
+    return { ...entity, center };
+  });
+}
+
 /**
  * 与えられた残差ビルダーに対してLevenberg-Marquardt法を実行し、収束(または反復上限)した変数ベクトルを返す。
  * 減衰係数lambdaは各呼び出しでINITIAL_LAMBDAから開始する。
@@ -363,18 +490,28 @@ function runLevenbergMarquardt(buildResiduals: (x: number[]) => ResidualEq[], x0
  * - 収束後、拘束由来の残差(正則化を除く)の絶対値最大がCONFLICT_TOLERANCE(1e-4mm)を超えていれば
  *   矛盾(過拘束)とみなし ok:false, conflicting:true を返す。
  */
-export function solveSketch(segments: readonly SketchSegment[], constraints: readonly SketchConstraint[] = []): SolveResult {
-  if (segments.length === 0) {
-    return { ok: true, segments: [] };
+export function solveSketch(
+  segments: readonly SketchSegment[],
+  constraints: readonly SketchConstraint[] = [],
+  entities: readonly SketchEntity[] = [],
+): SolveResult {
+  const circles: CircleEntity[] = entities.filter((e): e is CircleEntity => e.kind === "circle");
+
+  if (segments.length === 0 && circles.length === 0) {
+    return { ok: true, segments: [], entities: entities.map((e) => ({ ...e })) };
   }
   if (constraints.length === 0) {
-    return { ok: true, segments: segments.map((s) => ({ ...s })) };
+    return { ok: true, segments: segments.map((s) => ({ ...s })), entities: entities.map((e) => ({ ...e })) };
   }
 
   const varIndex: VarIndexMap = new Map();
   segments.forEach((seg, i) => varIndex.set(seg.id, i * 4));
   const segmentsById = new Map(segments.map((s) => [s.id, s]));
-  const m = segments.length * 4;
+  const segVarCount = segments.length * 4;
+
+  const entityVarIdx: EntityVarIndexMap = new Map();
+  circles.forEach((c, i) => entityVarIdx.set(c.id, segVarCount + i * 2));
+  const m = segVarCount + circles.length * 2;
 
   const initX = new Array(m);
   segments.forEach((seg, i) => {
@@ -383,10 +520,15 @@ export function solveSketch(segments: readonly SketchSegment[], constraints: rea
     initX[i * 4 + 2] = seg.p2[0];
     initX[i * 4 + 3] = seg.p2[1];
   });
+  circles.forEach((c, i) => {
+    const base = segVarCount + i * 2;
+    initX[base] = c.center[0];
+    initX[base + 1] = c.center[1];
+  });
 
   const buildHardResiduals = (vars: number[]): ResidualEq[] => [
-    ...buildConstraintResiduals(constraints, segmentsById, varIndex, vars),
-    ...buildFixResiduals(constraints, varIndex, vars, initX),
+    ...buildConstraintResiduals(constraints, segmentsById, varIndex, entityVarIdx, entities, vars, initX),
+    ...buildFixResiduals(constraints, varIndex, entityVarIdx, vars, initX),
   ];
   const buildWarmupResiduals = (vars: number[]): ResidualEq[] => [
     ...buildHardResiduals(vars),
@@ -406,7 +548,11 @@ export function solveSketch(segments: readonly SketchSegment[], constraints: rea
     };
   }
 
-  return { ok: true, segments: segmentsFromVars(segments, x, varIndex) };
+  return {
+    ok: true,
+    segments: segmentsFromVars(segments, x, varIndex),
+    entities: entitiesFromVars(entities, x, entityVarIdx),
+  };
 }
 
 /** solveDocumentSketches()が矛盾を検出したときの詳細。 */
@@ -432,12 +578,12 @@ export function solveDocumentSketches(doc: CadDocument): SolveDocumentResult {
   const features = doc.features.map((feature) => {
     if (conflict) return feature;
     if (feature.type !== "sketch" || !feature.constraints || feature.constraints.length === 0) return feature;
-    const result = solveSketch(feature.segments ?? [], feature.constraints);
+    const result = solveSketch(feature.segments ?? [], feature.constraints, feature.entities);
     if (!result.ok) {
       conflict = { featureId: feature.id, message: "拘束が矛盾しています" };
       return feature;
     }
-    return { ...feature, segments: result.segments };
+    return { ...feature, segments: result.segments, entities: result.entities };
   });
 
   if (conflict) {

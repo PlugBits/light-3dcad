@@ -102,18 +102,18 @@ function evaluateAndRespond(requestId: string, doc: CadDocument, quality: MeshQu
     return;
   }
 
-  const { shape, sketchPlanes } = result;
+  const { shape, sketchPlanes, referenceEdges } = result;
   if (!shape) {
     // ボディなし(Phase 13): 正常ケースとして空メッシュ+空faceInfoを返す。
     // sketchPlanesは解決済みのため、スケッチだけの状態でもスケッチ線表示は継続する。
-    postResponse({ kind: "evaluated", requestId, mesh: emptyMeshData(), faceInfo: [], sketchPlanes });
+    postResponse({ kind: "evaluated", requestId, mesh: emptyMeshData(), faceInfo: [], sketchPlanes, referenceEdges });
     return;
   }
   try {
     const mesh = toMeshData(shape, quality);
     const faceInfo = computeFaceInfo(shape);
     postResponse(
-      { kind: "evaluated", requestId, mesh, faceInfo, sketchPlanes },
+      { kind: "evaluated", requestId, mesh, faceInfo, sketchPlanes, referenceEdges },
       [mesh.positions.buffer, mesh.normals.buffer, mesh.indices.buffer, mesh.edges.buffer],
     );
   } finally {

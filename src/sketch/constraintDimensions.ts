@@ -8,8 +8,9 @@
 //    作るcomputeConstraintDimensions()(src/sketch/dimensions.tsのcomputeSketchDimensions()と対になる、
 //    entities由来ではなくconstraints/segments由来のラベル一覧)。
 import { generateId } from "../model/id";
-import type { PointRef, SketchConstraint, SketchSegment } from "../model/types";
+import type { EntityRef, LineRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
 import { arcGeometryFromBulge } from "./bulge";
+import { resolveLineRefPoints, sameLineRef } from "./entityEdges";
 
 export type Point2 = [number, number];
 
@@ -98,6 +99,86 @@ export function removeConstraint(constraints: readonly SketchConstraint[], const
   return constraints.filter((c) => c.id !== constraintId);
 }
 
+// ---- 円の位置寸法(Phase 22、circleエンティティの中心を対象にした拘束のupsert) ----
+
+/** circleエンティティの中心↔スケッチ原点のdistanceEntityOrigin拘束を追加/更新する。 */
+export function upsertDistanceEntityOriginConstraint(
+  constraints: readonly SketchConstraint[],
+  entityId: string,
+  value: number,
+): SketchConstraint[] {
+  const idx = constraints.findIndex((c) => c.kind === "distanceEntityOrigin" && c.entity.entityId === entityId);
+  if (idx >= 0) {
+    const next = constraints.slice();
+    next[idx] = { ...next[idx], value } as SketchConstraint;
+    return next;
+  }
+  return [...constraints, { id: generateId("constraint"), kind: "distanceEntityOrigin", entity: { entityId }, value }];
+}
+
+function sameEntityPair(constraint: SketchConstraint, a: EntityRef, b: EntityRef): constraint is Extract<SketchConstraint, { kind: "distanceEntityEntity" }> {
+  if (constraint.kind !== "distanceEntityEntity") return false;
+  return (
+    (constraint.a.entityId === a.entityId && constraint.b.entityId === b.entityId) ||
+    (constraint.a.entityId === b.entityId && constraint.b.entityId === a.entityId)
+  );
+}
+
+/** 2つのcircleエンティティの中心間のdistanceEntityEntity拘束を追加/更新する(a/bの順序は問わず一致を判定)。 */
+export function upsertDistanceEntityEntityConstraint(
+  constraints: readonly SketchConstraint[],
+  fromEntityId: string,
+  toEntityId: string,
+  value: number,
+): SketchConstraint[] {
+  const a: EntityRef = { entityId: fromEntityId };
+  const b: EntityRef = { entityId: toEntityId };
+  const idx = constraints.findIndex((c) => sameEntityPair(c, a, b));
+  if (idx >= 0) {
+    const next = constraints.slice();
+    next[idx] = { ...next[idx], value } as SketchConstraint;
+    return next;
+  }
+  return [...constraints, { id: generateId("constraint"), kind: "distanceEntityEntity", a, b, value }];
+}
+
+/** circleエンティティの中心↔辺(LineRef)のdistanceEntityLine拘束を追加/更新する(entityId+同一のlineが既にあれば値だけ差し替え)。 */
+export function upsertDistanceEntityLineConstraint(
+  constraints: readonly SketchConstraint[],
+  entityId: string,
+  line: LineRef,
+  value: number,
+): SketchConstraint[] {
+  const idx = constraints.findIndex(
+    (c) => c.kind === "distanceEntityLine" && c.entity.entityId === entityId && sameLineRef(c.line, line),
+  );
+  if (idx >= 0) {
+    const next = constraints.slice();
+    next[idx] = { ...next[idx], value } as SketchConstraint;
+    return next;
+  }
+  return [...constraints, { id: generateId("constraint"), kind: "distanceEntityLine", entity: { entityId }, line, value }];
+}
+
+/** circleエンティティの中心が固定(fixEntity拘束を持つ)かどうか。 */
+export function isEntityFixed(constraints: readonly SketchConstraint[], entityId: string): boolean {
+  return constraints.some((c) => c.kind === "fixEntity" && c.entity.entityId === entityId);
+}
+
+/**
+ * circleエンティティのfixEntity拘束をon/offする(固定トグル、Phase 22)。fixed:trueで無ければ追加、
+ * fixed:falseで有れば削除する(既に望む状態なら元の配列と等価な新しい配列を返す)。
+ */
+export function setEntityFixed(constraints: readonly SketchConstraint[], entityId: string, fixed: boolean): SketchConstraint[] {
+  const idx = constraints.findIndex((c) => c.kind === "fixEntity" && c.entity.entityId === entityId);
+  if (fixed) {
+    if (idx >= 0) return constraints.slice();
+    return [...constraints, { id: generateId("constraint"), kind: "fixEntity", entity: { entityId } }];
+  }
+  if (idx < 0) return constraints.slice();
+  return constraints.filter((_, i) => i !== idx);
+}
+
 // ---- 常時表示する拘束寸法ラベル(表示用、ReactにもThree.jsにも依存しない) ----
 
 export interface SegLengthDimension {
@@ -122,7 +203,36 @@ export interface SegDistanceDimension {
   value: number;
   anchor: Point2;
 }
-export type ConstraintDimension = SegLengthDimension | SegRadiusDimension | SegDistanceDimension;
+export interface EntityOriginDimension {
+  kind: "entity-distance-origin";
+  constraintId: string;
+  entityId: string;
+  value: number;
+  anchor: Point2;
+}
+export interface EntityEntityDimension {
+  kind: "entity-distance-entity";
+  constraintId: string;
+  aEntityId: string;
+  bEntityId: string;
+  value: number;
+  anchor: Point2;
+}
+export interface EntityLineDimension {
+  kind: "entity-distance-line";
+  constraintId: string;
+  entityId: string;
+  line: LineRef;
+  value: number;
+  anchor: Point2;
+}
+export type ConstraintDimension =
+  | SegLengthDimension
+  | SegRadiusDimension
+  | SegDistanceDimension
+  | EntityOriginDimension
+  | EntityEntityDimension
+  | EntityLineDimension;
 
 /**
  * スケッチのsegments/constraintsから、常時表示すべき拘束寸法(length/distance/radius)の
@@ -134,9 +244,50 @@ export type ConstraintDimension = SegLengthDimension | SegRadiusDimension | SegD
 export function computeConstraintDimensions(
   segments: readonly SketchSegment[],
   constraints: readonly SketchConstraint[],
+  entities: readonly SketchEntity[] = [],
 ): ConstraintDimension[] {
   const dims: ConstraintDimension[] = [];
+  const entityCenter = (entityId: string): Point2 | null => {
+    const e = entities.find((x) => x.id === entityId);
+    return e && e.kind === "circle" ? e.center : null;
+  };
   for (const c of constraints) {
+    if (c.kind === "distanceEntityOrigin") {
+      const center = entityCenter(c.entity.entityId);
+      if (!center) continue;
+      const anchor: Point2 = [center[0] / 2, center[1] / 2];
+      dims.push({ kind: "entity-distance-origin", constraintId: c.id, entityId: c.entity.entityId, value: c.value, anchor });
+      continue;
+    }
+    if (c.kind === "distanceEntityEntity") {
+      const a = entityCenter(c.a.entityId);
+      const b = entityCenter(c.b.entityId);
+      if (!a || !b) continue;
+      const anchor: Point2 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+      dims.push({
+        kind: "entity-distance-entity",
+        constraintId: c.id,
+        aEntityId: c.a.entityId,
+        bEntityId: c.b.entityId,
+        value: c.value,
+        anchor,
+      });
+      continue;
+    }
+    if (c.kind === "distanceEntityLine") {
+      const center = entityCenter(c.entity.entityId);
+      const line = resolveLineRefPoints(c.line, entities);
+      if (!center || !line) continue;
+      const [a, b] = line;
+      const dx = b[0] - a[0];
+      const dy = b[1] - a[1];
+      const lenSq = dx * dx + dy * dy;
+      const foot: Point2 =
+        lenSq < 1e-18 ? a : [a[0] + (((center[0] - a[0]) * dx + (center[1] - a[1]) * dy) / lenSq) * dx, a[1] + (((center[0] - a[0]) * dx + (center[1] - a[1]) * dy) / lenSq) * dy];
+      const anchor: Point2 = [(center[0] + foot[0]) / 2, (center[1] + foot[1]) / 2];
+      dims.push({ kind: "entity-distance-line", constraintId: c.id, entityId: c.entity.entityId, line: c.line, value: c.value, anchor });
+      continue;
+    }
     if (c.kind === "length") {
       const seg = findSegment(segments, c.segmentId);
       if (!seg) continue;

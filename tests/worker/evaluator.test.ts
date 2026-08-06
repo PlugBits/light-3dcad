@@ -863,6 +863,58 @@ describe("evaluateDocument (WASM統合): スケッチ・オン・フェイス", 
     result.shape.delete();
   });
 
+  it("箱の上面へのfaceスケッチのreferenceEdgesに上面の4辺(スケッチローカル座標)が返る(Phase 22)", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const rect = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: doc1, feature: boxSketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+    });
+    const { doc: doc2, feature: boxExtrude } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: boxSketch.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const boxResult = evaluateDocument(doc2);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const top = findTopFace(boxResult.shape);
+    boxResult.shape.delete();
+
+    const circle = createCircleEntity({ radius: 10 });
+    const { doc: doc3, feature: faceSketch } = addSketchFeature(doc2, {
+      name: "FaceSketch1",
+      plane: { kind: "face", featureId: boxExtrude.id, faceId: top.faceId, center: top.center, normal: top.normal },
+      entities: [circle],
+    });
+
+    const result = evaluateDocument(doc3);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    if (result.shape) result.shape.delete();
+
+    const refSet = result.referenceEdges.find((r) => r.sketchId === faceSketch.id);
+    expect(refSet).toBeDefined();
+    expect(refSet?.edges.length).toBe(4);
+
+    // 60x40の矩形(center原点)の上面: スケッチローカル座標での4頂点は(±30, ±20)のいずれかの組み合わせ。
+    // xDir=[1,0,0]/yDir=[0,1,0](法線+Zのフォールバックxdir)と一致する。
+    const corners = new Set<string>();
+    for (const edge of refSet?.edges ?? []) {
+      corners.add(`${edge.p1[0].toFixed(1)},${edge.p1[1].toFixed(1)}`);
+      corners.add(`${edge.p2[0].toFixed(1)},${edge.p2[1].toFixed(1)}`);
+    }
+    expect(corners).toEqual(new Set(["30.0,20.0", "30.0,-20.0", "-30.0,20.0", "-30.0,-20.0"]));
+
+    // sketch1(world XY、押し出し前=bodyがまだ存在しない時点)にはreferenceEdgesのエントリが無い。
+    expect(result.referenceEdges.some((r) => r.sketchId === boxSketch.id)).toBe(false);
+  });
+
   it("箱の上面へのfaceスケッチ+円でAdd(材料追加)するとボスが乗り、バウンディングボックスの高さが増える", (ctx) => {
     ctx.skip(!wasmLoaded, SKIP_NOTE);
     const empty = createEmptyDocument();

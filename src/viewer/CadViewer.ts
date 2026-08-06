@@ -1,8 +1,8 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
-import type { FeatureId, PointRef, SketchEntity, SketchSegment } from "../model/types";
-import type { FaceGroup, FaceInfo, MeshData } from "../protocol/messages";
+import type { FeatureId, LineRef, PointRef, SketchEntity, SketchSegment } from "../model/types";
+import type { FaceGroup, FaceInfo, MeshData, ReferenceEdgeLine } from "../protocol/messages";
 import { bulgeArcPoints, bulgeFromThreePoints, DEFAULT_BULGE_SEGMENTS } from "../sketch/bulge";
 import { findEntityDimensionHit, type EntityDimensionHit } from "../sketch/entityDimensionPick";
 import { polygonOutlinePoints } from "../sketch/polygonOutline";
@@ -48,6 +48,9 @@ const REFERENCE_PLANE_COLORS: Record<"XY" | "XZ" | "YZ", number> = {
   XZ: 0x4caf50,
   YZ: 0xe57373,
 };
+
+/** ボディ端面参照エッジ(Phase 22)の破線オーバーレイ色(控えめなグレー)。 */
+const REFERENCE_EDGE_COLOR = 0x888888;
 
 /** 選択中スケッチの線色(オレンジ)。 */
 const SKETCH_SELECTED_COLOR = 0xff9800;
@@ -261,7 +264,15 @@ export type DimensionToolTarget =
   | { kind: "entity-height"; entityId: string }
   | { kind: "circle-distance-origin"; entityId: string }
   | { kind: "circle-distance-circle"; fromEntityId: string; toEntityId: string }
-  | { kind: "circle-distance-edge"; entityId: string; edgeA: [number, number]; edgeB: [number, number] };
+  /**
+   * 辺(rectangleの辺、または自由な線分セグメント)への距離。edgeA/edgeBはピック時点の実座標
+   * (現在値のプレビュー計算用)。lineは実際に拘束へ保存するLineRef(Phase 22): rectangleの辺なら
+   * "entityEdge"(エンティティが動けば辺も追従)、自由な線分ならそのままの座標を凍結した"refEdge"
+   * (自由なsegmentsはEntityRefで指せないため、v1では辺としては動かない前提の簡易対応)。
+   */
+  | { kind: "circle-distance-edge"; entityId: string; edgeA: [number, number]; edgeB: [number, number]; line: LineRef }
+  /** ボディ端面参照エッジ(Phase 22)への距離。lineは常に"refEdge"(ピック時点のスナップショット)。 */
+  | { kind: "circle-distance-refedge"; entityId: string; edgeA: [number, number]; edgeB: [number, number]; line: LineRef };
 
 /** 寸法ツール(Phase 20b)の開始/終了時に呼ばれるコールバック。 */
 export interface DimensionToolCallbacks {
@@ -326,6 +337,19 @@ function toWorldPoint(entry: SketchOverlayEntry, u: number, v: number): Tuple3 {
     origin[1] + u * xDir[1] + v * yDir[1] + SKETCH_NORMAL_OFFSET * normal[1],
     origin[2] + u * xDir[2] + v * yDir[2] + SKETCH_NORMAL_OFFSET * normal[2],
   ];
+}
+
+/** 点pから線分[a,b]への最短距離(ローカル2D、Phase 22。src/sketch/entityDimensionPick.tsの同名ローカル関数と同じ実装)。 */
+function distPointToRawSegment(p: [number, number], a: [number, number], b: [number, number]): number {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq < 1e-12) return Math.hypot(p[0] - a[0], p[1] - a[1]);
+  let t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  const cx = a[0] + t * dx;
+  const cy = a[1] + t * dy;
+  return Math.hypot(p[0] - cx, p[1] - cy);
 }
 
 /** 中心center・半径radiusの円をsegments分割のポリラインで近似したローカル2D頂点列を返す。 */
@@ -567,6 +591,10 @@ export class CadViewer {
   private sketchOverlayGroup: THREE.Group;
   private sketchOverlayGeometries: THREE.BufferGeometry[] = [];
   private sketchOverlayMaterials: THREE.Material[] = [];
+  /** ボディ端面参照エッジ(Phase 22)の破線オーバーレイを乗せるグループ。setReferenceEdgeOverlay()で再構築する。 */
+  private referenceEdgeGroup: THREE.Group;
+  private referenceEdgeGeometries: THREE.BufferGeometry[] = [];
+  private referenceEdgeMaterials: THREE.Material[] = [];
   /** 直近のsetSketchOverlay()で描画した線(LineLoop)の本数。E2Eデバッグフックが参照する。 */
   private sketchLineCount = 0;
   /** 直近のsetSketchOverlay()でグリッドが描画されたかどうか。E2Eデバッグフックが参照する。 */
@@ -665,6 +693,8 @@ export class CadViewer {
   private dimensionToolSegments: SketchSegment[] = [];
   /** ヒット判定対象のentities(rectangle/circleのみ対象、Phase 21)。 */
   private dimensionToolEntities: SketchEntity[] = [];
+  /** ヒット判定対象のボディ端面参照エッジ(Phase 22、dimensionPendingCircleId保持中のみピック対象)。 */
+  private dimensionToolReferenceEdges: ReferenceEdgeLine[] = [];
   private dimensionToolCallbacks: DimensionToolCallbacks | null = null;
   /** distance拘束の1点目としてクリック済みの端点(未選択はnull)。2点目のクリックでonTargetPickedを呼ぶ。 */
   private dimensionPendingPoint: PointRef | null = null;
@@ -724,6 +754,9 @@ export class CadViewer {
 
     this.sketchOverlayGroup = new THREE.Group();
     this.scene.add(this.sketchOverlayGroup);
+
+    this.referenceEdgeGroup = new THREE.Group();
+    this.scene.add(this.referenceEdgeGroup);
 
     this.drawingGroup = new THREE.Group();
     this.scene.add(this.drawingGroup);
@@ -1827,6 +1860,42 @@ export class CadViewer {
     return this.dimensionToolActive;
   }
 
+  /**
+   * ボディ端面参照エッジ(Phase 22)の破線オーバーレイを再構築し、寸法ツールのピック対象
+   * (dimensionToolReferenceEdges)も同時に更新する。App側は選択中スケッチのreferenceEdgesが
+   * 変わるたび(evaluate応答・選択切り替え)にこれを呼ぶ想定。basisがnull、またはedgesが空なら
+   * 何も描画しない(ピック対象も空になる)。
+   */
+  setReferenceEdges(basis: PlaneBasis | null, edges: ReferenceEdgeLine[]) {
+    this.dimensionToolReferenceEdges = basis ? edges : [];
+    this.referenceEdgeGeometries.forEach((g) => g.dispose());
+    this.referenceEdgeMaterials.forEach((m) => m.dispose());
+    this.referenceEdgeGeometries = [];
+    this.referenceEdgeMaterials = [];
+    this.referenceEdgeGroup.clear();
+    if (!basis) return;
+    for (const edge of edges) {
+      const a = planeLocalToWorld(basis, edge.p1[0], edge.p1[1]);
+      const b = planeLocalToWorld(basis, edge.p2[0], edge.p2[1]);
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute([...a, ...b], 3));
+      const material = new THREE.LineDashedMaterial({
+        color: REFERENCE_EDGE_COLOR,
+        dashSize: 3,
+        gapSize: 2,
+        depthTest: false,
+        transparent: true,
+        opacity: 0.8,
+      });
+      const line = new THREE.Line(geometry, material);
+      line.computeLineDistances();
+      line.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
+      this.referenceEdgeGroup.add(line);
+      this.referenceEdgeGeometries.push(geometry);
+      this.referenceEdgeMaterials.push(material);
+    }
+  }
+
   /** 寸法ツールを終了する(onCancelが呼ばれる)。非アクティブなら何もしない。 */
   cancelDimensionTool() {
     if (!this.dimensionToolActive) return;
@@ -1966,6 +2035,41 @@ export class CadViewer {
       return;
     }
 
+    // 位置寸法(Phase 22): circleクリック済みの状態に限り、ボディ端面参照エッジ(referenceEdges)も
+    // ピック対象に加える(セグメント・entityより優先度は最後だが、より近ければそちらを採用)。
+    let refEdgeHit: { edge: ReferenceEdgeLine; dist: number } | null = null;
+    if (this.dimensionPendingCircleId) {
+      for (const edge of this.dimensionToolReferenceEdges) {
+        const d = distPointToRawSegment(local, edge.p1, edge.p2);
+        if (!refEdgeHit || d < refEdgeHit.dist) refEdgeHit = { edge, dist: d };
+      }
+    }
+
+    // セグメント・entity・参照エッジのうち、許容距離内で最も近いものを優先する。
+    if (
+      refEdgeHit &&
+      refEdgeHit.dist <= toleranceMm &&
+      (nearestId === null || refEdgeHit.dist < nearestDist) &&
+      (!entityHit || refEdgeHit.dist < entityHit.dist)
+    ) {
+      const entityId = this.dimensionPendingCircleId as string;
+      this.dimensionPendingCircleId = null;
+      this.dimensionPendingPoint = null;
+      this.clearDrawingPreview();
+      this.dimensionToolCallbacks?.onTargetPicked(
+        {
+          kind: "circle-distance-refedge",
+          entityId,
+          edgeA: refEdgeHit.edge.p1,
+          edgeB: refEdgeHit.edge.p2,
+          line: { kind: "refEdge", p1: refEdgeHit.edge.p1, p2: refEdgeHit.edge.p2 },
+        },
+        px,
+        py,
+      );
+      return;
+    }
+
     // セグメントとentityの両方が許容距離内にヒットしうる場合は、より近い方を優先する。
     if (entityHit && entityHit.dist <= toleranceMm && (nearestId === null || entityHit.dist < nearestDist)) {
       this.dimensionPendingPoint = null;
@@ -1976,15 +2080,18 @@ export class CadViewer {
         this.dimensionPendingCircleId = entityHit.entityId;
       } else if (this.dimensionPendingCircleId) {
         // circleクリック済みでrectangleの辺をクリック => circle-distance-edge(辺は動かない)。
+        // edgeIndexが取れる(rectangleの辺)場合はentityEdge(エンティティが動けば辺も追従)、
+        // 取れない場合はrefEdge(ピック時点の座標を凍結)にフォールバックする。
         const entityId = this.dimensionPendingCircleId;
         this.dimensionPendingCircleId = null;
+        const edgeA = entityHit.highlightPoints[0];
+        const edgeB = entityHit.highlightPoints[1];
+        const line: LineRef =
+          entityHit.edgeIndex !== undefined
+            ? { kind: "entityEdge", entityId: entityHit.entityId, edgeIndex: entityHit.edgeIndex }
+            : { kind: "refEdge", p1: edgeA, p2: edgeB };
         this.dimensionToolCallbacks?.onTargetPicked(
-          {
-            kind: "circle-distance-edge",
-            entityId,
-            edgeA: entityHit.highlightPoints[0],
-            edgeB: entityHit.highlightPoints[1],
-          },
+          { kind: "circle-distance-edge", entityId, edgeA, edgeB, line },
           px,
           py,
         );
@@ -2004,11 +2111,12 @@ export class CadViewer {
       this.dimensionPendingCircleId = null;
       this.dimensionToolCallbacks?.onTargetPicked({ kind: "radius", segmentId: nearestId }, px, py);
     } else if (this.dimensionPendingCircleId) {
-      // circleクリック済みで自由線分(セグメント本体)をクリック => circle-distance-edge。
+      // circleクリック済みで自由線分(セグメント本体)をクリック => circle-distance-edge
+      // (自由なsegmentsはEntityRefで指せないためrefEdgeとして座標を凍結する、v1の簡易対応)。
       const entityId = this.dimensionPendingCircleId;
       this.dimensionPendingCircleId = null;
       this.dimensionToolCallbacks?.onTargetPicked(
-        { kind: "circle-distance-edge", entityId, edgeA: seg.p1, edgeB: seg.p2 },
+        { kind: "circle-distance-edge", entityId, edgeA: seg.p1, edgeB: seg.p2, line: { kind: "refEdge", p1: seg.p1, p2: seg.p2 } },
         px,
         py,
       );
@@ -2791,6 +2899,8 @@ export class CadViewer {
     }
     this.clearSketchOverlay();
     this.clearDrawingPreview();
+    this.referenceEdgeGeometries.forEach((g) => g.dispose());
+    this.referenceEdgeMaterials.forEach((m) => m.dispose());
     this.referencePlaneEntries.forEach((entry) => {
       entry.mesh.geometry.dispose();
       entry.material.dispose();

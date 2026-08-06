@@ -61,10 +61,36 @@ export interface SketchPlaneInfo {
   normal: [number, number, number];
 }
 
+/**
+ * 1本の直線エッジ(スケッチローカル2D座標、Phase 22)。
+ * スケッチ平面上に載っている(両端点の平面距離<1e-4)直線エッジのみを対象とする(v1、円弧等は非対応)。
+ */
+export interface ReferenceEdgeLine {
+  p1: [number, number];
+  p2: [number, number];
+}
+
+/**
+ * 1スケッチ分のボディ端面参照エッジ集合(Phase 22)。そのスケッチが評価された時点の「現在ボディ」
+ * (そのスケッチより前のフィーチャーで組み立てられたボディのスナップショット)から抽出する
+ * (src/worker/evaluator.ts参照)。ボディが存在しない時点のスケッチは含まれない。
+ */
+export interface ReferenceEdgeSet {
+  sketchId: FeatureId;
+  edges: ReferenceEdgeLine[];
+}
+
 /** Worker -> UI のレスポンス */
 export type WorkerResponse =
   | { kind: "ready"; requestId: string }
-  | { kind: "evaluated"; requestId: string; mesh: MeshData; faceInfo: FaceInfo[]; sketchPlanes: SketchPlaneInfo[] }
+  | {
+      kind: "evaluated";
+      requestId: string;
+      mesh: MeshData;
+      faceInfo: FaceInfo[];
+      sketchPlanes: SketchPlaneInfo[];
+      referenceEdges: ReferenceEdgeSet[];
+    }
   | { kind: "stl"; requestId: string; blob: Blob }
   | { kind: "error"; requestId: string; featureId?: FeatureId; message: string }
   | { kind: "progress"; requestId: string; message: string };
