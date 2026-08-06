@@ -210,6 +210,80 @@ function lineSideSign(initX: number[], idx: [number, number], a: Point2, b: Poin
   return cross < 0 ? -1 : 1;
 }
 
+/**
+ * 中心差の座標そのものを2残差(x,y)として返す(coincidentと同じ形。concentric拘束、Phase 23)。
+ */
+function centerCoincidentResiduals(aIdx: [number, number], bIdx: [number, number], x: number[]): ResidualEq[] {
+  return [
+    {
+      value: x[aIdx[0]] - x[bIdx[0]],
+      terms: [
+        { index: aIdx[0], coef: 1 },
+        { index: bIdx[0], coef: -1 },
+      ],
+    },
+    {
+      value: x[aIdx[1]] - x[bIdx[1]],
+      terms: [
+        { index: aIdx[1], coef: 1 },
+        { index: bIdx[1], coef: -1 },
+      ],
+    },
+  ];
+}
+
+/**
+ * 中心差分方式の垂直微分ステップ(mm)。座標の典型スケール(mm、通常1〜数百)に対して十分小さく、
+ * かつ浮動小数点の丸め誤差に埋もれない大きさ。
+ */
+const NUMERIC_DIFF_H = 1e-6;
+
+/**
+ * 解析的な偏微分の導出が煩雑な残差(perpendicular・tangent[circle-line])向けの、
+ * 中心差分によるヤコビアン近似ヘルパー(仕様上、この2種はソルバのコメントの原則
+ * 「ヤコビアンは解析的に求める」の明示的な例外として数値微分を許可されている。
+ * value自体は厳密値のまま渡すため、LMの収束判定・矛盾判定[CONFLICT_TOLERANCE]には影響しない。
+ * 勾配の近似誤差は探索方向にのみ影響し、実用上の収束性・精度は十分[中心差分はO(h^2)]。
+ */
+function numericResidual(computeValue: (vars: number[]) => number, x: number[], varIndices: number[]): ResidualEq {
+  const value = computeValue(x);
+  const terms: ResidualTerm[] = varIndices.map((idx) => {
+    const plus = x.slice();
+    plus[idx] += NUMERIC_DIFF_H;
+    const minus = x.slice();
+    minus[idx] -= NUMERIC_DIFF_H;
+    const coef = (computeValue(plus) - computeValue(minus)) / (2 * NUMERIC_DIFF_H);
+    return { index: idx, coef };
+  });
+  return { value, terms };
+}
+
+/** 2本の直線の方向ベクトルの正規化内積(perpendicular拘束、Phase 23)。目標値は0(=垂直)。 */
+function perpendicularValue(x: number[], aBase: number, bBase: number): number {
+  const dax = x[aBase + 2] - x[aBase];
+  const day = x[aBase + 3] - x[aBase + 1];
+  const dbx = x[bBase + 2] - x[bBase];
+  const dby = x[bBase + 3] - x[bBase + 1];
+  const la = Math.max(Math.hypot(dax, day), MIN_SAFE_LENGTH);
+  const lb = Math.max(Math.hypot(dbx, dby), MIN_SAFE_LENGTH);
+  return (dax * dbx + day * dby) / (la * lb);
+}
+
+/** circleの中心から直線セグメント(無限直線扱い)への符号付き距離 − 半径(tangent拘束、Phase 23)。 */
+function tangentLineValue(x: number[], centerIdx: [number, number], lineBase: number, radius: number, sign: number): number {
+  const ax = x[lineBase];
+  const ay = x[lineBase + 1];
+  const bx = x[lineBase + 2];
+  const by = x[lineBase + 3];
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len = Math.max(Math.hypot(dx, dy), MIN_SAFE_LENGTH);
+  const px = x[centerIdx[0]];
+  const py = x[centerIdx[1]];
+  const cross = (px - ax) * dy - (py - ay) * dx;
+  return (sign * cross) / len - radius;
+}
+
 /** 拘束由来の残差式一覧を作る(正則化は含まない)。参照先セグメントが見つからない拘束は無視する(呼び出し側でバリデーション済みの前提)。 */
 function buildConstraintResiduals(
   constraints: readonly SketchConstraint[],
@@ -320,6 +394,62 @@ function buildConstraintResiduals(
         if (!line) break;
         const sign = lineSideSign(initX, idx, line[0], line[1]);
         eqs.push(pointToFixedLineResidual(x, idx, line[0], line[1], c.value, sign));
+        break;
+      }
+      case "perpendicular": {
+        const baseA = varIndex.get(c.a);
+        const baseB = varIndex.get(c.b);
+        if (baseA === undefined || baseB === undefined) break;
+        eqs.push(
+          numericResidual((vars) => perpendicularValue(vars, baseA, baseB), x, [
+            baseA,
+            baseA + 1,
+            baseA + 2,
+            baseA + 3,
+            baseB,
+            baseB + 1,
+            baseB + 2,
+            baseB + 3,
+          ]),
+        );
+        break;
+      }
+      case "concentric": {
+        const a = entityVarIndex(entityVarIdx, c.a);
+        const b = entityVarIndex(entityVarIdx, c.b);
+        if (!a || !b) break;
+        eqs.push(...centerCoincidentResiduals(a, b, x));
+        break;
+      }
+      case "tangent": {
+        const idx = entityVarIndex(entityVarIdx, c.entity);
+        if (!idx) break;
+        const circle = entities.find((e): e is CircleEntity => e.kind === "circle" && e.id === c.entity.entityId);
+        if (!circle) break;
+        const target = c.target;
+        if (target.kind === "segment") {
+          const lineBase = varIndex.get(target.segmentId);
+          if (lineBase === undefined) break;
+          const a0: Point2 = [initX[lineBase], initX[lineBase + 1]];
+          const b0: Point2 = [initX[lineBase + 2], initX[lineBase + 3]];
+          const sign = lineSideSign(initX, idx, a0, b0);
+          eqs.push(
+            numericResidual((vars) => tangentLineValue(vars, idx, lineBase, circle.radius, sign), x, [
+              idx[0],
+              idx[1],
+              lineBase,
+              lineBase + 1,
+              lineBase + 2,
+              lineBase + 3,
+            ]),
+          );
+        } else {
+          const other = entities.find((e): e is CircleEntity => e.kind === "circle" && e.id === target.entityId);
+          const bIdx = entityVarIndex(entityVarIdx, { entityId: target.entityId });
+          if (!other || !bIdx) break;
+          const value = target.mode === "internal" ? Math.abs(circle.radius - other.radius) : circle.radius + other.radius;
+          eqs.push(lengthLikeResidual(x, idx, bIdx, value));
+        }
         break;
       }
     }

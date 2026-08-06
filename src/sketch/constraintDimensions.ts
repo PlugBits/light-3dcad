@@ -183,6 +183,102 @@ export function setEntityFixed(constraints: readonly SketchConstraint[], entityI
   return constraints.filter((_, i) => i !== idx);
 }
 
+// ---- 幾何拘束(垂直・同心・接線、Phase 23)の追加ヘルパー ----
+// 値を持たない(常に満たすかどうかだけの)拘束のため、upsertではなく「無ければ追加、既にあれば
+// 何もしない(冪等)」のadd系関数にする(値の差し替えが不要なため、他のupsert*とは呼び分ける)。
+
+function samePerpendicularPair(constraint: SketchConstraint, a: string, b: string): boolean {
+  if (constraint.kind !== "perpendicular") return false;
+  return (constraint.a === a && constraint.b === b) || (constraint.a === b && constraint.b === a);
+}
+
+/** 2直線セグメントのperpendicular拘束を追加する(同じ組み合わせが既にあれば何もしない)。 */
+export function addPerpendicularConstraint(
+  constraints: readonly SketchConstraint[],
+  segmentIdA: string,
+  segmentIdB: string,
+): SketchConstraint[] {
+  if (constraints.some((c) => samePerpendicularPair(c, segmentIdA, segmentIdB))) return constraints.slice();
+  return [...constraints, { id: generateId("constraint"), kind: "perpendicular", a: segmentIdA, b: segmentIdB }];
+}
+
+function sameConcentricPair(constraint: SketchConstraint, a: string, b: string): boolean {
+  if (constraint.kind !== "concentric") return false;
+  return (
+    (constraint.a.entityId === a && constraint.b.entityId === b) ||
+    (constraint.a.entityId === b && constraint.b.entityId === a)
+  );
+}
+
+/** 2つのcircleエンティティのconcentric拘束を追加する(同じ組み合わせが既にあれば何もしない)。 */
+export function addConcentricConstraint(
+  constraints: readonly SketchConstraint[],
+  entityIdA: string,
+  entityIdB: string,
+): SketchConstraint[] {
+  if (constraints.some((c) => sameConcentricPair(c, entityIdA, entityIdB))) return constraints.slice();
+  return [
+    ...constraints,
+    { id: generateId("constraint"), kind: "concentric", a: { entityId: entityIdA }, b: { entityId: entityIdB } },
+  ];
+}
+
+/**
+ * circleエンティティ↔直線セグメントのtangent拘束を追加する(既に同じ組み合わせがあれば何もしない)。
+ */
+export function addTangentSegmentConstraint(
+  constraints: readonly SketchConstraint[],
+  entityId: string,
+  segmentId: string,
+): SketchConstraint[] {
+  const exists = constraints.some(
+    (c) => c.kind === "tangent" && c.entity.entityId === entityId && c.target.kind === "segment" && c.target.segmentId === segmentId,
+  );
+  if (exists) return constraints.slice();
+  return [
+    ...constraints,
+    { id: generateId("constraint"), kind: "tangent", entity: { entityId }, target: { kind: "segment", segmentId } },
+  ];
+}
+
+/**
+ * circleエンティティ↔circleエンティティのtangent拘束を追加する(既に同じ組み合わせがあれば何もしない)。
+ * mode(外接/内接)は現在の中心間距離が外接目標(r1+r2)・内接目標(|r1-r2|)のどちらに近いかで自動選択する
+ * (拘束作成時点の形状から意図を推定する。以後は固定値として保存され、動かない)。
+ */
+export function addTangentEntityConstraint(
+  constraints: readonly SketchConstraint[],
+  entities: readonly SketchEntity[],
+  entityIdA: string,
+  entityIdB: string,
+): SketchConstraint[] {
+  const exists = constraints.some(
+    (c) => c.kind === "tangent" && c.target.kind === "entity" &&
+      ((c.entity.entityId === entityIdA && c.target.entityId === entityIdB) ||
+        (c.entity.entityId === entityIdB && c.target.entityId === entityIdA)),
+  );
+  if (exists) return constraints.slice();
+
+  const a = entities.find((e) => e.id === entityIdA);
+  const b = entities.find((e) => e.id === entityIdB);
+  let mode: "external" | "internal" = "external";
+  if (a?.kind === "circle" && b?.kind === "circle") {
+    const d = Math.hypot(b.center[0] - a.center[0], b.center[1] - a.center[1]);
+    const external = a.radius + b.radius;
+    const internal = Math.abs(a.radius - b.radius);
+    mode = Math.abs(d - internal) < Math.abs(d - external) ? "internal" : "external";
+  }
+  return [
+    ...constraints,
+    {
+      id: generateId("constraint"),
+      kind: "tangent",
+      entity: { entityId: entityIdA },
+      target: { kind: "entity", entityId: entityIdB, mode },
+    },
+  ];
+}
+
 // ---- 常時表示する拘束寸法ラベル(表示用、ReactにもThree.jsにも依存しない) ----
 
 export interface SegLengthDimension {

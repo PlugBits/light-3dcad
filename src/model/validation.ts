@@ -188,10 +188,13 @@ function validatePointRef(
  * - horizontal/vertical/length/radius: segmentIdがsegments内に存在すること
  * - length/distance/radius: valueが正の有限数であること
  * - radius: 参照先セグメントがkind:"arc"であること(lineには指定できない)
+ * - perpendicular: 参照先セグメントが2本ともkind:"line"であること(Phase 23)
+ * - concentric/tangent: 参照先entityがcircleエンティティとして存在すること(Phase 23)
  */
 function validateConstraint(
   constraint: SketchConstraint,
   segments: readonly SketchSegment[],
+  entities: readonly SketchEntity[],
   featureId: FeatureId,
 ): ValidationError[] {
   const errors: ValidationError[] = [];
@@ -250,6 +253,43 @@ function validateConstraint(
       errors.push(...validatePointRef(constraint.point, segments, constraint.id, "point", featureId));
       break;
     }
+    case "perpendicular": {
+      const a = findSegmentById(segments, constraint.a);
+      const b = findSegmentById(segments, constraint.b);
+      if (!a) errors.push({ featureId, message: `拘束(${constraint.id})の参照先セグメント(${constraint.a})が見つかりません` });
+      else if (a.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は直線セグメントにのみ指定できます(${constraint.a})` });
+      if (!b) errors.push({ featureId, message: `拘束(${constraint.id})の参照先セグメント(${constraint.b})が見つかりません` });
+      else if (b.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は直線セグメントにのみ指定できます(${constraint.b})` });
+      break;
+    }
+    case "concentric": {
+      if (!entities.find((e) => e.id === constraint.a.entityId && e.kind === "circle")) {
+        errors.push({ featureId, message: `拘束(${constraint.id})の参照先の円(${constraint.a.entityId})が見つかりません` });
+      }
+      if (!entities.find((e) => e.id === constraint.b.entityId && e.kind === "circle")) {
+        errors.push({ featureId, message: `拘束(${constraint.id})の参照先の円(${constraint.b.entityId})が見つかりません` });
+      }
+      break;
+    }
+    case "tangent": {
+      if (!entities.find((e) => e.id === constraint.entity.entityId && e.kind === "circle")) {
+        errors.push({ featureId, message: `拘束(${constraint.id})の参照先の円(${constraint.entity.entityId})が見つかりません` });
+      }
+      const target = constraint.target;
+      if (target.kind === "segment") {
+        const seg = findSegmentById(segments, target.segmentId);
+        if (!seg) errors.push({ featureId, message: `拘束(${constraint.id})の参照先セグメント(${target.segmentId})が見つかりません` });
+        else if (seg.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は直線セグメントにのみ指定できます(${target.segmentId})` });
+      } else {
+        if (!entities.find((e) => e.id === target.entityId && e.kind === "circle")) {
+          errors.push({ featureId, message: `拘束(${constraint.id})の参照先の円(${target.entityId})が見つかりません` });
+        }
+        if (target.mode !== "external" && target.mode !== "internal") {
+          errors.push({ featureId, message: `拘束(${constraint.id})の接線モードが不正です` });
+        }
+      }
+      break;
+    }
   }
   return errors;
 }
@@ -275,7 +315,7 @@ export function validateFeature(feature: Feature, allFeatures: readonly Feature[
       errors.push(...validateSegment(segment, feature.id));
     });
     feature.constraints?.forEach((constraint) => {
-      errors.push(...validateConstraint(constraint, feature.segments ?? [], feature.id));
+      errors.push(...validateConstraint(constraint, feature.segments ?? [], feature.entities, feature.id));
     });
   } else if (feature.type === "extrude") {
     if (!isPositiveFiniteNumber(feature.distance)) {

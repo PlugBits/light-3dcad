@@ -435,6 +435,134 @@ describe("solveSketch circleエンティティの位置拘束(Phase 22)", () => 
   });
 });
 
+describe("solveSketch 幾何拘束(perpendicular/concentric/tangent、Phase 23)", () => {
+  function circle(id: string, center: [number, number], radius = 5): Extract<SketchEntity, { kind: "circle" }> {
+    return { kind: "circle", id, center, radius };
+  }
+
+  it("① perpendicular: わずかに傾いた2直線が垂直に解ける(内積が0に収束)", () => {
+    const a: SketchSegment = { id: "a", kind: "line", p1: [0, 0], p2: [10, 0.3] };
+    const b: SketchSegment = { id: "b", kind: "line", p1: [5, -5], p2: [5.2, 5] };
+    const constraints: SketchConstraint[] = [{ id: "c1", kind: "perpendicular", a: "a", b: "b" }];
+    const result = solveSketch([a, b], constraints);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const [outA, outB] = result.segments;
+    const dax = outA.p2[0] - outA.p1[0];
+    const day = outA.p2[1] - outA.p1[1];
+    const dbx = outB.p2[0] - outB.p1[0];
+    const dby = outB.p2[1] - outB.p1[1];
+    const dot = dax * dbx + day * dby;
+    expect(dot).toBeCloseTo(0, 3);
+  });
+
+  it("② perpendicular + length: 垂直を維持したまま片方の長さを指定値に解ける", () => {
+    const a: SketchSegment = { id: "a", kind: "line", p1: [0, 0], p2: [10, 0.4] };
+    const b: SketchSegment = { id: "b", kind: "line", p1: [10, 0], p2: [10.3, 8] };
+    const constraints: SketchConstraint[] = [
+      { id: "c1", kind: "perpendicular", a: "a", b: "b" },
+      { id: "c2", kind: "length", segmentId: "b", value: 12 },
+    ];
+    const result = solveSketch([a, b], constraints);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const [outA, outB] = result.segments;
+    const dax = outA.p2[0] - outA.p1[0];
+    const day = outA.p2[1] - outA.p1[1];
+    const dbx = outB.p2[0] - outB.p1[0];
+    const dby = outB.p2[1] - outB.p1[1];
+    expect(dax * dbx + day * dby).toBeCloseTo(0, 3);
+    expect(dist(outB.p1, outB.p2)).toBeCloseTo(12, 3);
+  });
+
+  it("③ concentric: 2円の中心が一致するように解ける", () => {
+    const c1 = circle("c1", [0, 0], 5);
+    const c2 = circle("c2", [8, 3], 2);
+    const constraints: SketchConstraint[] = [
+      { id: "c1", kind: "concentric", a: { entityId: "c1" }, b: { entityId: "c2" } },
+    ];
+    const result = solveSketch([], constraints, [c1, c2]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const [outA, outB] = result.entities;
+    if (outA.kind !== "circle" || outB.kind !== "circle") throw new Error("not circle");
+    expect(dist(outA.center, outB.center)).toBeLessThan(1e-4);
+  });
+
+  it("④ tangent(円↔直線): 中心↔直線の距離が半径に一致するように解ける", () => {
+    const seg: SketchSegment = { id: "s1", kind: "line", p1: [0, 0], p2: [20, 0] };
+    const c = circle("c1", [10, 3], 5);
+    const constraints: SketchConstraint[] = [
+      { id: "t1", kind: "tangent", entity: { entityId: "c1" }, target: { kind: "segment", segmentId: "s1" } },
+    ];
+    const result = solveSketch([seg], constraints, [c]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outSeg = result.segments[0];
+    const outC = result.entities[0];
+    if (outC.kind !== "circle") throw new Error("not circle");
+    const dx = outSeg.p2[0] - outSeg.p1[0];
+    const dy = outSeg.p2[1] - outSeg.p1[1];
+    const len = Math.hypot(dx, dy);
+    const cross = (outC.center[0] - outSeg.p1[0]) * dy - (outC.center[1] - outSeg.p1[1]) * dx;
+    const distToLine = Math.abs(cross) / len;
+    expect(distToLine).toBeCloseTo(5, 3);
+  });
+
+  it("⑤ tangent(円↔円、外接): 中心間距離がr1+r2に解ける", () => {
+    const c1 = circle("c1", [0, 0], 5);
+    const c2 = circle("c2", [8, 0], 3);
+    const constraints: SketchConstraint[] = [
+      {
+        id: "t1",
+        kind: "tangent",
+        entity: { entityId: "c1" },
+        target: { kind: "entity", entityId: "c2", mode: "external" },
+      },
+    ];
+    const result = solveSketch([], constraints, [c1, c2]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const [outA, outB] = result.entities;
+    if (outA.kind !== "circle" || outB.kind !== "circle") throw new Error("not circle");
+    expect(dist(outA.center, outB.center)).toBeCloseTo(8, 3);
+  });
+
+  it("⑥ tangent(円↔円、内接)+矛盾検出: 内接目標(|r1-r2|)に解け、さらに矛盾する外接指定はconflictingになる", () => {
+    const c1 = circle("c1", [0, 0], 5);
+    const c2 = circle("c2", [1.5, 0], 2);
+    const constraints: SketchConstraint[] = [
+      {
+        id: "t1",
+        kind: "tangent",
+        entity: { entityId: "c1" },
+        target: { kind: "entity", entityId: "c2", mode: "internal" },
+      },
+    ];
+    const result = solveSketch([], constraints, [c1, c2]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const [outA, outB] = result.entities;
+    if (outA.kind !== "circle" || outB.kind !== "circle") throw new Error("not circle");
+    expect(dist(outA.center, outB.center)).toBeCloseTo(3, 3); // |5-2|
+
+    // 同じ2円に外接(r1+r2=7)も同時指定すると内接(3)と両立せず矛盾する。
+    const conflicting: SketchConstraint[] = [
+      ...constraints,
+      {
+        id: "t2",
+        kind: "tangent",
+        entity: { entityId: "c1" },
+        target: { kind: "entity", entityId: "c2", mode: "external" },
+      },
+    ];
+    const conflictResult = solveSketch([], conflicting, [c1, c2]);
+    expect(conflictResult.ok).toBe(false);
+    if (conflictResult.ok) return;
+    expect(conflictResult.conflicting).toBe(true);
+  });
+});
+
 describe("solveDocumentSketches", () => {
   function makeDoc(features: SketchFeature[]): CadDocument {
     return { version: 1, features };

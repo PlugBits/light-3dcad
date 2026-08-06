@@ -148,7 +148,25 @@ export type SketchConstraint =
   /** circleエンティティの中心↔辺(直線、動かない)の垂直距離(mm、Phase 22)。 */
   | { id: string; kind: "distanceEntityLine"; entity: EntityRef; line: LineRef; value: number }
   /** circleエンティティの中心を(拘束追加時点の)現在位置に固定する(Phase 22、固定トグル)。 */
-  | { id: string; kind: "fixEntity"; entity: EntityRef };
+  | { id: string; kind: "fixEntity"; entity: EntityRef }
+  /** 2本の直線セグメント(kind:"line"のみ対象)が垂直であること(Phase 23)。 */
+  | { id: string; kind: "perpendicular"; a: string; b: string }
+  /** 2つのcircleエンティティの中心が一致すること(Phase 23)。 */
+  | { id: string; kind: "concentric"; a: EntityRef; b: EntityRef }
+  /**
+   * circleエンティティが直線セグメント、または別のcircleエンティティに接すること(Phase 23)。
+   * target.kind:"segment" は直線セグメント(kind:"line"のみ)への接線(円中心↔直線の距離=半径)。
+   * target.kind:"entity" は円同士の接線で、mode:"external"(外接、中心間距離=r1+r2)/
+   * "internal"(内接、中心間距離=|r1-r2|)のいずれか。modeは拘束作成時点の現在の中心間距離が
+   * external/internalどちらの目標値に近いかで自動選択し、以後は固定値として保存する
+   * (src/sketch/constraintGeom.tsのcreateTangentEntityConstraint参照)。
+   */
+  | {
+      id: string;
+      kind: "tangent";
+      entity: EntityRef;
+      target: { kind: "segment"; segmentId: string } | { kind: "entity"; entityId: string; mode: "external" | "internal" };
+    };
 
 /**
  * 2Dスケッチフィーチャー。
