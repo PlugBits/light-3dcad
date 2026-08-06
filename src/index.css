@@ -17,6 +17,34 @@ button {
   cursor: pointer;
 }
 
+/* ツールバーのグループ化(UI改善): 区切り線+小さなグループラベルで視覚的にまとめる。 */
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border-right: 1px solid rgba(128, 128, 128, 0.35);
+}
+.toolbar-group:last-child {
+  border-right: none;
+}
+.toolbar-group-label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.55;
+  white-space: nowrap;
+  margin-right: 2px;
+}
+
+/* 作図/編集ツールがアクティブ中であることを示す共通の見た目(UI改善)。 */
+.toolbar-btn-active {
+  background: #ff9800 !important;
+  color: #000 !important;
+  border-color: #ff9800 !important;
+  font-weight: bold;
+}
+
 @keyframes cad-spin {
   to {
     transform: rotate(360deg);

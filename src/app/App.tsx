@@ -58,7 +58,11 @@ import type { StandardView } from "../viewer/standardViews";
  */
 type DrawingTool = "rect" | "circle" | "slot" | "regularPolygon" | "segment" | null;
 
-/** ツールバーの標準ビューボタン(正面/背面/左/右/上/下/等角、Phase 16)。 */
+/**
+ * ツールバーの標準ビューボタン(正面/背面/左/右/上/下/等角、Phase 16)。
+ * UI改善(ツールバー整理)で主要3つ(正面/上/等角)だけをボタンで常設し、残り4つ(背面/左/右/下)は
+ * コンパクトなセレクトにまとめる。
+ */
 const STANDARD_VIEW_BUTTONS: { view: StandardView; label: string; title: string }[] = [
   { view: "front", label: "正面", title: "正面(-Y側)から見る" },
   { view: "back", label: "背面", title: "背面(+Y側)から見る" },
@@ -68,6 +72,8 @@ const STANDARD_VIEW_BUTTONS: { view: StandardView; label: string; title: string 
   { view: "bottom", label: "下", title: "下面(-Z側)から見る" },
   { view: "iso", label: "等角", title: "等角(アイソメトリック)ビュー" },
 ];
+const PRIMARY_STANDARD_VIEWS: StandardView[] = ["front", "top", "iso"];
+const MORE_STANDARD_VIEWS = STANDARD_VIEW_BUTTONS.filter((b) => !PRIMARY_STANDARD_VIEWS.includes(b.view));
 
 export default function App() {
   const viewerContainerRef = useRef<HTMLDivElement | null>(null);
@@ -753,286 +759,328 @@ export default function App() {
       <header
         style={{
           display: "flex",
-          alignItems: "center",
-          gap: 12,
-          padding: "8px 16px",
+          flexDirection: "column",
           borderBottom: "1px solid #444",
         }}
       >
-        <h1 style={{ fontSize: 16, margin: 0 }}>light-3dcad — Phase 5</h1>
-        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
-          <select
-            data-testid="new-sketch-plane-select"
-            value={newSketchPlane}
-            onChange={(e) => setNewSketchPlane(e.target.value as "XY" | "XZ" | "YZ")}
-            title="新規スケッチを作成する基準平面(基準平面クリックと同等)"
-          >
-            <option value="XY">XY</option>
-            <option value="XZ">XZ</option>
-            <option value="YZ">YZ</option>
-          </select>
-        </label>
-        <button type="button" data-testid="btn-add-sketch" onClick={() => addSketch(newSketchPlane)}>
-          スケッチ追加
-        </button>
-        <button
-          type="button"
-          data-testid="btn-add-extrude"
-          onClick={handleAddExtrude}
-          disabled={sketches.length === 0}
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            rowGap: 6,
+            padding: "6px 12px",
+          }}
         >
-          押し出し追加
-        </button>
-        <button
-          type="button"
-          data-testid="btn-add-face-sketch"
-          onClick={addFaceSketch}
-          disabled={!selectedFace?.isPlanar}
-        >
-          選択面にスケッチ
-        </button>
-        <button type="button" data-testid="btn-download-stl" onClick={handleDownloadStl} disabled={busy || exporting}>
-          {exporting ? "STL出力中…" : "STLダウンロード"}
-        </button>
-        <button
-          type="button"
-          data-testid="btn-fit-view"
-          onClick={() => viewerRef.current?.fitToView()}
-          title="モデル全体が画面に収まるようにカメラを調整します"
-        >
-          フィット
-        </button>
-        <button
-          type="button"
-          data-testid="btn-align-to-plane"
-          onClick={handleAlignToPlane}
-          disabled={!selectedSketchPlane}
-          title="選択中スケッチの平面に正対する視点へカメラを移動します"
-        >
-          平面に正対
-        </button>
-        <span
-          style={{ display: "flex", gap: 4, alignItems: "center", paddingLeft: 8, borderLeft: "1px solid #444" }}
-          title="標準ビュー(SolidWorks風)へカメラを切り替えます"
-        >
-          {STANDARD_VIEW_BUTTONS.map(({ view, label, title }) => (
-            <button
-              key={view}
-              type="button"
-              data-testid={`btn-view-${view}`}
-              onClick={() => viewerRef.current?.setStandardView(view)}
-              title={title}
-              style={{ fontSize: 11, padding: "2px 6px" }}
+          <h1 style={{ fontSize: 14, margin: "0 12px 0 0" }}>light-3dcad</h1>
+
+          <div className="toolbar-group">
+            <span className="toolbar-group-label">ファイル</span>
+            <select
+              data-testid="new-sketch-plane-select"
+              value={newSketchPlane}
+              onChange={(e) => setNewSketchPlane(e.target.value as "XY" | "XZ" | "YZ")}
+              title="新規スケッチを作成する基準平面(基準平面クリックと同等)"
             >
-              {label}
+              <option value="XY">XY</option>
+              <option value="XZ">XZ</option>
+              <option value="YZ">YZ</option>
+            </select>
+            <button type="button" data-testid="btn-add-sketch" onClick={() => addSketch(newSketchPlane)}>
+              スケッチ
             </button>
-          ))}
-        </span>
-        <button
-          type="button"
-          data-testid="btn-draw-segment"
-          onClick={activeTool === "segment" ? handleCancelDrawing : handleStartSegmentDrawing}
-          disabled={isToolDisabled("segment")}
-          title="クリックで頂点を連結して線分・円弧のチェーンを描きます(閉じる必要はありません。Enter/ダブルクリックで確定、始点付近クリックで閉チェーンとして確定、Escでキャンセル)。トリムツールの対象にできます"
-        >
-          {activeTool === "segment" ? "線分キャンセル(Esc)" : "線分"}
-        </button>
-        {activeTool === "segment" && (
-          <button
-            type="button"
-            data-testid="btn-toggle-arc-mode"
-            onClick={handleToggleArcMode}
-            title="次のセグメントを円弧(3点円弧)にします: クリック1=通過点、クリック2=終点(Aキーでも切替、確定後は直線モードに戻ります)"
-            style={arcModeActive ? { fontWeight: "bold", background: "#ff9800", color: "#000" } : undefined}
-          >
-            {arcModeActive ? "円弧セグメント中(A)" : "円弧(A)"}
-          </button>
-        )}
-        <button
-          type="button"
-          data-testid="btn-draw-rect"
-          onClick={activeTool === "rect" ? handleCancelDrawing : handleStartRectDrawing}
-          disabled={isToolDisabled("rect")}
-          title="2クリックで矩形を描きます(1点目=コーナー、2点目=対角コーナー。Escでキャンセル)"
-        >
-          {activeTool === "rect" ? "矩形キャンセル(Esc)" : "矩形"}
-        </button>
-        <button
-          type="button"
-          data-testid="btn-draw-circle"
-          onClick={activeTool === "circle" ? handleCancelDrawing : handleStartCircleDrawing}
-          disabled={isToolDisabled("circle")}
-          title="2クリックで円を描きます(1点目=中心、2点目=円周上の点。Escでキャンセル)"
-        >
-          {activeTool === "circle" ? "円キャンセル(Esc)" : "円"}
-        </button>
-        <button
-          type="button"
-          data-testid="btn-draw-slot"
-          onClick={activeTool === "slot" ? handleCancelDrawing : handleStartSlotDrawing}
-          disabled={isToolDisabled("slot")}
-          title="3クリックでスロット(長円)を描きます(1点目=中心線の始点、2点目=終点、3点目=幅。Escでキャンセル)"
-        >
-          {activeTool === "slot" ? "スロットキャンセル(Esc)" : "スロット"}
-        </button>
-        <button
-          type="button"
-          data-testid="btn-draw-polygon"
-          onClick={activeTool === "regularPolygon" ? handleCancelDrawing : handleStartRegularPolygonDrawing}
-          disabled={isToolDisabled("regularPolygon")}
-          title="2クリックで正多角形を描きます(1点目=中心、2点目=頂点位置。辺数は右のセレクタ。Escでキャンセル)。作成後は頂点ごとに個別編集・フィレット/面取りができます"
-        >
-          {activeTool === "regularPolygon" ? "多角形キャンセル(Esc)" : "多角形"}
-        </button>
-        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }} title="多角形の辺数">
-          辺数
-          <select
-            data-testid="polygon-sides-select"
-            value={polygonSides}
-            disabled={activeTool === "regularPolygon"}
-            onChange={(e) => setPolygonSides(Number(e.target.value))}
-          >
-            {[3, 4, 5, 6, 8].map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
+            <button
+              type="button"
+              data-testid="btn-add-extrude"
+              onClick={handleAddExtrude}
+              disabled={sketches.length === 0}
+              title="選択中(なければ最後)のスケッチを押し出します"
+            >
+              押し出し
+            </button>
+            <button
+              type="button"
+              data-testid="btn-add-face-sketch"
+              onClick={addFaceSketch}
+              disabled={!selectedFace?.isPlanar}
+              title="選択中の平面上にスケッチを追加します"
+            >
+              面にスケッチ
+            </button>
+            <button
+              type="button"
+              data-testid="btn-download-stl"
+              onClick={handleDownloadStl}
+              disabled={busy || exporting}
+              title="現在のモデルをSTLファイルとしてダウンロードします"
+            >
+              {exporting ? "出力中…" : "STL"}
+            </button>
+          </div>
+
+          <div className="toolbar-group">
+            <span className="toolbar-group-label">ビュー</span>
+            <button
+              type="button"
+              data-testid="btn-fit-view"
+              onClick={() => viewerRef.current?.fitToView()}
+              title="モデル全体が画面に収まるようにカメラを調整します"
+            >
+              フィット
+            </button>
+            <button
+              type="button"
+              data-testid="btn-align-to-plane"
+              onClick={handleAlignToPlane}
+              disabled={!selectedSketchPlane}
+              title="選択中スケッチの平面に正対する視点へカメラを移動します"
+            >
+              正対
+            </button>
+            {STANDARD_VIEW_BUTTONS.filter((b) => PRIMARY_STANDARD_VIEWS.includes(b.view)).map(({ view, label, title }) => (
+              <button
+                key={view}
+                type="button"
+                data-testid={`btn-view-${view}`}
+                onClick={() => viewerRef.current?.setStandardView(view)}
+                title={title}
+                style={{ fontSize: 11, padding: "2px 6px" }}
+              >
+                {label}
+              </button>
             ))}
-          </select>
-        </label>
-        <span
-          style={{ display: "flex", gap: 4, alignItems: "center", paddingLeft: 8, borderLeft: "1px solid #444" }}
-        >
-          <button
-            type="button"
-            data-testid="btn-corner-fillet"
-            onClick={cornerTool === "fillet" ? handleCancelCornerTool : () => handleStartCornerTool("fillet")}
-            disabled={isCornerToolDisabled("fillet")}
-            title="ビューア上でpolygonの頂点付近をクリックしてフィレット(丸め)を適用します(適用済みの頂点をクリックすると解除、Escで終了)"
-          >
-            {cornerTool === "fillet" ? "フィレットキャンセル(Esc)" : "フィレット"}
-          </button>
-          <button
-            type="button"
-            data-testid="btn-corner-chamfer"
-            onClick={cornerTool === "chamfer" ? handleCancelCornerTool : () => handleStartCornerTool("chamfer")}
-            disabled={isCornerToolDisabled("chamfer")}
-            title="ビューア上でpolygonの頂点付近をクリックして面取りを適用します(適用済みの頂点をクリックすると解除、Escで終了)"
-          >
-            {cornerTool === "chamfer" ? "面取りキャンセル(Esc)" : "面取り"}
-          </button>
-          {cornerTool && (
-            <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }} title="頂点クリックで適用するサイズ(mm)">
-              サイズ
+            <select
+              data-testid="view-more-select"
+              value=""
+              onChange={(e) => {
+                if (e.target.value) viewerRef.current?.setStandardView(e.target.value as StandardView);
+                e.target.value = "";
+              }}
+              title="その他の標準ビュー(背面/左/右/下)"
+              style={{ fontSize: 11 }}
+            >
+              <option value="">他のビュー…</option>
+              {MORE_STANDARD_VIEWS.map(({ view, label }) => (
+                <option key={view} value={view}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="toolbar-group">
+            <span className="toolbar-group-label">作図</span>
+            <button
+              type="button"
+              data-testid="btn-draw-segment"
+              className={activeTool === "segment" ? "toolbar-btn-active" : undefined}
+              onClick={activeTool === "segment" ? handleCancelDrawing : handleStartSegmentDrawing}
+              disabled={isToolDisabled("segment")}
+              title="クリックで頂点を連結して線分・円弧のチェーンを描きます(Enter/ダブルクリックで確定、始点付近クリックで閉チェーン、Escでキャンセル)"
+            >
+              {activeTool === "segment" ? "線分キャンセル(Esc)" : "線分"}
+            </button>
+            {activeTool === "segment" && (
+              <button
+                type="button"
+                data-testid="btn-toggle-arc-mode"
+                className={arcModeActive ? "toolbar-btn-active" : undefined}
+                onClick={handleToggleArcMode}
+                title="次のセグメントを円弧(3点円弧)にします(Aキーでも切替)"
+              >
+                {arcModeActive ? "円弧セグメント中(A)" : "円弧(A)"}
+              </button>
+            )}
+            <button
+              type="button"
+              data-testid="btn-draw-rect"
+              className={activeTool === "rect" ? "toolbar-btn-active" : undefined}
+              onClick={activeTool === "rect" ? handleCancelDrawing : handleStartRectDrawing}
+              disabled={isToolDisabled("rect")}
+              title="2クリックで矩形を描きます(1点目=コーナー、2点目=対角コーナー。Escでキャンセル)"
+            >
+              {activeTool === "rect" ? "矩形キャンセル(Esc)" : "矩形"}
+            </button>
+            <button
+              type="button"
+              data-testid="btn-draw-circle"
+              className={activeTool === "circle" ? "toolbar-btn-active" : undefined}
+              onClick={activeTool === "circle" ? handleCancelDrawing : handleStartCircleDrawing}
+              disabled={isToolDisabled("circle")}
+              title="2クリックで円を描きます(1点目=中心、2点目=円周上の点。Escでキャンセル)"
+            >
+              {activeTool === "circle" ? "円キャンセル(Esc)" : "円"}
+            </button>
+            <button
+              type="button"
+              data-testid="btn-draw-slot"
+              className={activeTool === "slot" ? "toolbar-btn-active" : undefined}
+              onClick={activeTool === "slot" ? handleCancelDrawing : handleStartSlotDrawing}
+              disabled={isToolDisabled("slot")}
+              title="3クリックでスロット(長円)を描きます(始点→終点→幅。Escでキャンセル)"
+            >
+              {activeTool === "slot" ? "スロットキャンセル(Esc)" : "スロット"}
+            </button>
+            <button
+              type="button"
+              data-testid="btn-draw-polygon"
+              className={activeTool === "regularPolygon" ? "toolbar-btn-active" : undefined}
+              onClick={activeTool === "regularPolygon" ? handleCancelDrawing : handleStartRegularPolygonDrawing}
+              disabled={isToolDisabled("regularPolygon")}
+              title="2クリックで正多角形を描きます(中心→頂点。辺数は右のセレクタ。Escでキャンセル)"
+            >
+              {activeTool === "regularPolygon" ? "多角形キャンセル(Esc)" : "多角形"}
+            </button>
+            <select
+              data-testid="polygon-sides-select"
+              value={polygonSides}
+              disabled={activeTool === "regularPolygon"}
+              onChange={(e) => setPolygonSides(Number(e.target.value))}
+              title="多角形の辺数"
+            >
+              {[3, 4, 5, 6, 8].map((n) => (
+                <option key={n} value={n}>
+                  {n}辺
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="toolbar-group">
+            <span className="toolbar-group-label">編集</span>
+            <button
+              type="button"
+              data-testid="btn-corner-fillet"
+              className={cornerTool === "fillet" ? "toolbar-btn-active" : undefined}
+              onClick={cornerTool === "fillet" ? handleCancelCornerTool : () => handleStartCornerTool("fillet")}
+              disabled={isCornerToolDisabled("fillet")}
+              title="頂点付近をクリックしてフィレット(丸め)を適用します(適用済みをクリックで解除、Escで終了)"
+            >
+              {cornerTool === "fillet" ? "フィレットキャンセル(Esc)" : "フィレット"}
+            </button>
+            <button
+              type="button"
+              data-testid="btn-corner-chamfer"
+              className={cornerTool === "chamfer" ? "toolbar-btn-active" : undefined}
+              onClick={cornerTool === "chamfer" ? handleCancelCornerTool : () => handleStartCornerTool("chamfer")}
+              disabled={isCornerToolDisabled("chamfer")}
+              title="頂点付近をクリックして面取りを適用します(適用済みをクリックで解除、Escで終了)"
+            >
+              {cornerTool === "chamfer" ? "面取りキャンセル(Esc)" : "面取り"}
+            </button>
+            {cornerTool && (
+              <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }} title="頂点クリックで適用するサイズ(mm)">
+                <input
+                  type="number"
+                  data-testid="corner-tool-size"
+                  value={cornerSize}
+                  min={0.1}
+                  step="any"
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    if (Number.isFinite(v) && v > 0) setCornerSize(v);
+                  }}
+                  style={{ width: 50 }}
+                />
+                mm
+              </label>
+            )}
+            <button
+              type="button"
+              data-testid="btn-trim"
+              className={trimTool ? "toolbar-btn-active" : undefined}
+              onClick={trimTool ? handleCancelTrimTool : handleStartTrimTool}
+              disabled={isTrimToolDisabled()}
+              title="セグメントの区間をクリックして削除します(赤色プレビューが削除対象、Escで終了)"
+            >
+              {trimTool ? "トリムキャンセル(Esc)" : "トリム"}
+            </button>
+            <button
+              type="button"
+              data-testid="btn-dimension"
+              className={dimensionTool ? "toolbar-btn-active" : undefined}
+              onClick={dimensionTool ? handleCancelDimensionTool : handleStartDimensionTool}
+              disabled={isDimensionToolDisabled()}
+              title="クリックで長さ/半径/距離の拘束を作成・編集します(Escで終了)"
+            >
+              {dimensionTool ? "寸法キャンセル(Esc)" : "寸法"}
+            </button>
+          </div>
+
+          <div className="toolbar-group" style={{ marginLeft: "auto" }}>
+            <button type="button" data-testid="btn-undo" onClick={undo} disabled={!canUndo} title="元に戻す (Ctrl+Z)">
+              ↶
+            </button>
+            <button type="button" data-testid="btn-redo" onClick={redo} disabled={!canRedo} title="やり直す (Ctrl+Shift+Z)">
+              ↷
+            </button>
+            <label
+              style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}
+              title="頂点・中心・中点・原点・グリッドへのスナップ、水平/垂直の軸ロックをまとめてON/OFFします(1mmグリッド)"
+            >
               <input
-                type="number"
-                data-testid="corner-tool-size"
-                value={cornerSize}
-                min={0.1}
-                step="any"
-                onChange={(e) => {
-                  const v = Number(e.target.value);
-                  if (Number.isFinite(v) && v > 0) setCornerSize(v);
-                }}
-                style={{ width: 50 }}
+                type="checkbox"
+                data-testid="toggle-snap"
+                checked={gridSnap}
+                onChange={(e) => handleGridSnapChange(e.target.checked)}
               />
-              mm
+              スナップ
             </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+              <input
+                type="checkbox"
+                data-testid="toggle-sketch-visibility"
+                checked={showSketches}
+                onChange={(e) => setShowSketches(e.target.checked)}
+              />
+              スケッチ表示
+            </label>
+          </div>
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: "2px 12px 6px",
+            minHeight: 16,
+          }}
+        >
+          {activeTool && (
+            <span data-testid="drawing-shift-hint" style={{ fontSize: 11, opacity: 0.7 }}>
+              Shift押下中はスナップ・軸ロックを一時無効化
+            </span>
           )}
-        </span>
-        <span
-          style={{ display: "flex", gap: 4, alignItems: "center", paddingLeft: 8, borderLeft: "1px solid #444" }}
-        >
-          <button
-            type="button"
-            data-testid="btn-trim"
-            onClick={trimTool ? handleCancelTrimTool : handleStartTrimTool}
-            disabled={isTrimToolDisabled()}
-            title="ビューア上でセグメント(線分ツールで描いた線分・円弧、または「分解」したエンティティ)の区間をクリックして削除します(赤色プレビューが削除対象、Escで終了)"
-          >
-            {trimTool ? "トリムキャンセル(Esc)" : "トリム"}
-          </button>
-          <button
-            type="button"
-            data-testid="btn-dimension"
-            onClick={dimensionTool ? handleCancelDimensionTool : handleStartDimensionTool}
-            disabled={isDimensionToolDisabled()}
-            title="ビューア上でセグメントをクリックしてlength/radius拘束を、端点を2つ順にクリックしてdistance拘束を作成・編集します(端点は10px以内を優先ヒット、Escで終了)"
-          >
-            {dimensionTool ? "寸法キャンセル(Esc)" : "寸法"}
-          </button>
-        </span>
-        <button
-          type="button"
-          data-testid="btn-undo"
-          onClick={undo}
-          disabled={!canUndo}
-          title="元に戻す (Ctrl+Z)"
-        >
-          ↶ 元に戻す
-        </button>
-        <button
-          type="button"
-          data-testid="btn-redo"
-          onClick={redo}
-          disabled={!canRedo}
-          title="やり直す (Ctrl+Shift+Z)"
-        >
-          ↷ やり直す
-        </button>
-        <label
-          style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}
-          title="頂点・中心・中点・原点・グリッドへのスナップ、水平/垂直の軸ロックをまとめてON/OFFします(1mmグリッド)"
-        >
-          <input
-            type="checkbox"
-            data-testid="toggle-snap"
-            checked={gridSnap}
-            onChange={(e) => handleGridSnapChange(e.target.checked)}
-          />
-          スナップ
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
-          <input
-            type="checkbox"
-            data-testid="toggle-sketch-visibility"
-            checked={showSketches}
-            onChange={(e) => setShowSketches(e.target.checked)}
-          />
-          スケッチ表示
-        </label>
-        {activeTool && (
-          <span data-testid="drawing-shift-hint" style={{ fontSize: 11, opacity: 0.7 }}>
-            Shift押下中はスナップ・軸ロックを一時無効化(フリー入力)
+          {cornerTool && (
+            <span data-testid="corner-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
+              頂点付近をクリックして適用/解除
+            </span>
+          )}
+          {trimTool && (
+            <span data-testid="trim-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
+              削除したい区間をクリック
+            </span>
+          )}
+          {dimensionTool && (
+            <span data-testid="dimension-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
+              クリックで長さ/半径/距離を指定
+            </span>
+          )}
+          {dimensionTool && dimensionPendingLabel && (
+            <span
+              data-testid="dimension-pending-status"
+              style={{ fontSize: 11, fontWeight: "bold", color: "#ffb74d" }}
+            >
+              {dimensionPendingLabel}
+            </span>
+          )}
+          <span data-testid="status-text" style={{ fontSize: 12, opacity: 0.8, marginLeft: "auto" }}>
+            状態: {status}
+            {status === "initializing" && " (WASM初期化中…)"}
+            {status === "evaluating" && " (形状計算中…)"}
           </span>
-        )}
-        {cornerTool && (
-          <span data-testid="corner-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
-            頂点付近をクリックして適用/解除(連続クリック可、Escで終了)
-          </span>
-        )}
-        {trimTool && (
-          <span data-testid="trim-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
-            赤色プレビューの区間をクリックして削除(連続クリック可、Escで終了)
-          </span>
-        )}
-        {dimensionTool && (
-          <span data-testid="dimension-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
-            クリックで長さ/半径/距離を指定(Escで終了)
-          </span>
-        )}
-        {dimensionTool && dimensionPendingLabel && (
-          <span
-            data-testid="dimension-pending-status"
-            style={{ fontSize: 11, fontWeight: "bold", color: "#ffb74d" }}
-          >
-            {dimensionPendingLabel}
-          </span>
-        )}
-        <span data-testid="status-text" style={{ fontSize: 12, opacity: 0.8, marginLeft: "auto" }}>
-          状態: {status}
-          {status === "initializing" && " (WASM初期化中…)"}
-          {status === "evaluating" && " (形状計算中…)"}
-        </span>
+        </div>
       </header>
 
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>

@@ -139,11 +139,7 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
               .join(", ")})`}
       </p>
 
-      <p style={{ fontSize: 11, opacity: 0.7, margin: 0 }}>
-        ビューア上部のツールバーの「矩形」「円」ボタンでクリック作図するのがおすすめです。
-        下のボタンは既定サイズの図形を数値で追加します(後から数値編集できます)。
-      </p>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }} title="既定サイズの図形を数値で追加します(後から数値編集できます)">
         <button type="button" data-testid="btn-add-rectangle" onClick={handleAddRectangle} title="20x20mmの矩形を原点に追加します">
           矩形を数値で追加
         </button>
@@ -355,11 +351,9 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
           gap: 6,
         }}
       >
-        <h3 style={{ margin: 0, fontSize: 13 }}>セグメント(線分・円弧)</h3>
-        <p style={{ fontSize: 11, opacity: 0.7, margin: 0 }}>
-          ツールバーの「線分」で直接作図するか、上のエンティティを「分解」して作ります。個別の座標編集はまだ
-          対応していません(トリムツールで区間ごと削除できます)。
-        </p>
+        <h3 style={{ margin: 0, fontSize: 13 }} title="座標編集は未対応(トリムツールで区間ごと削除できます)">
+          セグメント(線分・円弧)
+        </h3>
         <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12 }}>
           <span data-testid="segment-count">セグメント数: {sketch.segments?.length ?? 0}</span>
           <button
