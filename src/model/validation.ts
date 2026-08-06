@@ -286,6 +286,24 @@ function validateConstraint(
       }
       break;
     }
+    case "distanceLineRefEdge": {
+      const seg = findSegmentById(segments, constraint.segmentId);
+      if (!seg) errors.push({ featureId, message: `拘束(${constraint.id})の参照先セグメント(${constraint.segmentId})が見つかりません` });
+      else if (seg.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は直線セグメントにのみ指定できます(${constraint.segmentId})` });
+      if (!isPositiveFiniteNumber(constraint.value)) {
+        errors.push({ featureId, message: `拘束(${constraint.id})の距離は正の数である必要があります` });
+      }
+      break;
+    }
+    case "angleLineRefEdge": {
+      const seg = findSegmentById(segments, constraint.segmentId);
+      if (!seg) errors.push({ featureId, message: `拘束(${constraint.id})の参照先セグメント(${constraint.segmentId})が見つかりません` });
+      else if (seg.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は直線セグメントにのみ指定できます(${constraint.segmentId})` });
+      if (!isPositiveFiniteNumber(constraint.value)) {
+        errors.push({ featureId, message: `拘束(${constraint.id})の角度は正の数である必要があります` });
+      }
+      break;
+    }
     case "concentric": {
       if (!entities.find((e) => e.id === constraint.a.entityId && e.kind === "circle")) {
         errors.push({ featureId, message: `拘束(${constraint.id})の参照先の円(${constraint.a.entityId})が見つかりません` });

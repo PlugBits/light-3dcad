@@ -10,10 +10,11 @@ export function DimensionToolPopup({
   hintLabel,
   axisOptions,
   initialAxis,
+  quantityOptions,
   onApply,
   onCancel,
 }: {
-  /** フィールドのラベル(例: "長さ (mm)" / "半径 (mm)" / "距離 (mm)")。 */
+  /** フィールドのラベル(例: "長さ (mm)" / "半径 (mm)" / "距離 (mm)")。quantityOptions指定時は選択中の量に応じて上書きする。 */
   titleLabel: string;
   initialValue: number;
   screen: { x: number; y: number };
@@ -27,9 +28,15 @@ export function DimensionToolPopup({
   axisOptions?: boolean;
   /** axisOptions表示時の初期選択(既存拘束の編集時、未指定は"direct")。 */
   initialAxis?: "direct" | "x" | "y";
-  onApply: (value: number, axis?: "direct" | "x" | "y") => void;
+  /**
+   * 線分↔線分・線分↔参照エッジの寸法のときだけ設定: 「距離/角度」の2択(ラジオ)を表示する
+   * (Phase 24項目3、UI改善)。切り替えるとtitleLabel/入力値がdistanceValue/angleValueに差し替わる。
+   */
+  quantityOptions?: { distanceValue: number; angleValue: number; initial: "distance" | "angle" };
+  onApply: (value: number, axis?: "direct" | "x" | "y", quantity?: "distance" | "angle") => void;
   onCancel: () => void;
 }) {
+  const [quantity, setQuantity] = useState<"distance" | "angle">(quantityOptions?.initial ?? "distance");
   const [value, setValue] = useState(initialValue.toFixed(2));
   const [axis, setAxis] = useState<"direct" | "x" | "y">(initialAxis ?? "direct");
   const [error, setError] = useState<string | null>(null);
@@ -40,6 +47,15 @@ export function DimensionToolPopup({
     inputRef.current?.select();
   }, []);
 
+  function handleQuantityChange(next: "distance" | "angle") {
+    setQuantity(next);
+    if (quantityOptions) {
+      setValue((next === "distance" ? quantityOptions.distanceValue : quantityOptions.angleValue).toFixed(2));
+    }
+  }
+
+  const effectiveTitleLabel = quantityOptions ? (quantity === "distance" ? "距離 (mm)" : "角度 (°)") : titleLabel;
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const num = Number(value);
@@ -47,7 +63,7 @@ export function DimensionToolPopup({
       setError("正の数を入力してください");
       return;
     }
-    onApply(num, axisOptions ? axis : undefined);
+    onApply(num, axisOptions ? axis : undefined, quantityOptions ? quantity : undefined);
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
@@ -103,8 +119,24 @@ export function DimensionToolPopup({
           ))}
         </div>
       )}
+      {quantityOptions && (
+        <div data-testid="dimension-tool-popup-quantity" style={{ display: "flex", gap: 8, fontSize: 11 }}>
+          {(["distance", "angle"] as const).map((q) => (
+            <label key={q} style={{ display: "flex", alignItems: "center", gap: 2 }}>
+              <input
+                type="radio"
+                name="dimension-tool-quantity"
+                data-testid={`dimension-tool-popup-quantity-${q}`}
+                checked={quantity === q}
+                onChange={() => handleQuantityChange(q)}
+              />
+              {q === "distance" ? "距離" : "角度"}
+            </label>
+          ))}
+        </div>
+      )}
       <label style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-        {titleLabel}
+        {effectiveTitleLabel}
         <input
           ref={inputRef}
           data-testid="dimension-tool-popup-value"

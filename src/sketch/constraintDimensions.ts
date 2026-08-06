@@ -321,6 +321,51 @@ export function upsertAngleLineLineConstraint(
   return [...constraints, { id: generateId("constraint"), kind: "angleLineLine", a: segmentIdA, b: segmentIdB, value }];
 }
 
+// ---- 線分↔参照エッジの寸法(Phase 24項目2: 寸法ツールの2点目として参照エッジも選べるように) ----
+// distanceLineLine/angleLineLineと同じ役割だが、b側がsegmentIdではなくLineRef(固定線)。
+
+function sameSegmentLinePair(
+  constraint: SketchConstraint,
+  kind: "distanceLineRefEdge" | "angleLineRefEdge",
+  segmentId: string,
+  line: LineRef,
+): boolean {
+  if (constraint.kind !== kind) return false;
+  return constraint.segmentId === segmentId && sameLineRef(constraint.line, line);
+}
+
+/** 直線セグメント↔参照エッジのdistanceLineRefEdge拘束(平行距離)を追加/更新する。 */
+export function upsertDistanceLineRefEdgeConstraint(
+  constraints: readonly SketchConstraint[],
+  segmentId: string,
+  line: LineRef,
+  value: number,
+): SketchConstraint[] {
+  const idx = constraints.findIndex((c) => sameSegmentLinePair(c, "distanceLineRefEdge", segmentId, line));
+  if (idx >= 0) {
+    const next = constraints.slice();
+    next[idx] = { ...next[idx], value } as SketchConstraint;
+    return next;
+  }
+  return [...constraints, { id: generateId("constraint"), kind: "distanceLineRefEdge", segmentId, line, value }];
+}
+
+/** 直線セグメント↔参照エッジのangleLineRefEdge拘束(方向のなす角、度)を追加/更新する。 */
+export function upsertAngleLineRefEdgeConstraint(
+  constraints: readonly SketchConstraint[],
+  segmentId: string,
+  line: LineRef,
+  value: number,
+): SketchConstraint[] {
+  const idx = constraints.findIndex((c) => sameSegmentLinePair(c, "angleLineRefEdge", segmentId, line));
+  if (idx >= 0) {
+    const next = constraints.slice();
+    next[idx] = { ...next[idx], value } as SketchConstraint;
+    return next;
+  }
+  return [...constraints, { id: generateId("constraint"), kind: "angleLineRefEdge", segmentId, line, value }];
+}
+
 /**
  * 2本の直線セグメントの方向ベクトルのなす角(度、0〜180)を返す。平行判定
  * (<5度)・angleLineLine拘束の初期値計算の両方に使う。どちらかが退化(長さ0近傍)の場合はnull。
@@ -336,6 +381,42 @@ export function angleBetweenSegments(a: SketchSegment, b: SketchSegment): number
   const cross = dax * dby - day * dbx;
   const dot = dax * dbx + day * dby;
   return (Math.atan2(Math.abs(cross), dot) * 180) / Math.PI;
+}
+
+/**
+ * 直線セグメントの方向ベクトルと、固定線(lineP1→lineP2)の方向ベクトルのなす角(度、0〜180)。
+ * angleBetweenSegmentsと同形だが、b側がセグメントでなく固定の2点である点のみが異なる
+ * (line-refedgeターゲットの初期値計算、Phase 24)。
+ */
+export function angleBetweenSegmentAndLine(seg: SketchSegment, lineP1: Point2, lineP2: Point2): number | null {
+  const dax = seg.p2[0] - seg.p1[0];
+  const day = seg.p2[1] - seg.p1[1];
+  const dbx = lineP2[0] - lineP1[0];
+  const dby = lineP2[1] - lineP1[1];
+  const la = Math.hypot(dax, day);
+  const lb = Math.hypot(dbx, dby);
+  if (la < 1e-9 || lb < 1e-9) return null;
+  const cross = dax * dby - day * dbx;
+  const dot = dax * dbx + day * dby;
+  return (Math.atan2(Math.abs(cross), dot) * 180) / Math.PI;
+}
+
+/**
+ * angleBetweenSegments/angleBetweenSegmentAndLineが返す0〜180度の「なす角」を、直線には
+ * 向きの区別が無いことを踏まえて0〜90度に折り畳む(逆向きに描いた平行線はなす角≈180度になり、
+ * そのままでは「ほぼ平行」の判定[<5度]を素通りしてしまうバグの修正、Phase 24)。
+ * 距離/角度どちらの拘束にすべきかの判定・角度の表示値(170度ではなく10度)の両方に使う。
+ */
+export function foldToAcuteAngle(angleDeg: number): number {
+  return angleDeg > 90 ? 180 - angleDeg : angleDeg;
+}
+
+/** 折り畳み角(foldToAcuteAngle)が5度未満なら「ほぼ平行」とみなす(距離/角度どちらをデフォルト選択するかの閾値)。 */
+export const LINE_LINE_PARALLEL_ANGLE_DEG = 5;
+
+/** 2本の直線セグメント(または線↔参照エッジ)の折り畳み角(0〜90度)から、ほぼ平行かどうかを返す。 */
+export function isNearlyParallelAngle(angleDeg: number | null): boolean {
+  return angleDeg !== null && foldToAcuteAngle(angleDeg) < LINE_LINE_PARALLEL_ANGLE_DEG;
 }
 
 // ---- 常時表示する拘束寸法ラベル(表示用、ReactにもThree.jsにも依存しない) ----

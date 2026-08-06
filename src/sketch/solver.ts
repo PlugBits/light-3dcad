@@ -316,6 +316,19 @@ function angleLineLineValueDeg(x: number[], aBase: number, bBase: number): numbe
   return (Math.atan2(Math.abs(cross), dot) * 180) / Math.PI;
 }
 
+/**
+ * 直線セグメント(aBase、変数)↔固定線(bDx/bDy、方向ベクトル定数)のなす角(度、0〜180)。
+ * angleLineLineValueDegと同形だが、b側が変数でなく固定の方向ベクトルである点のみが異なる
+ * (angleLineRefEdge拘束、Phase 24)。
+ */
+function angleLineFixedValueDeg(x: number[], aBase: number, bDx: number, bDy: number): number {
+  const dax = x[aBase + 2] - x[aBase];
+  const day = x[aBase + 3] - x[aBase + 1];
+  const cross = dax * bDy - day * bDx;
+  const dot = dax * bDx + day * bDy;
+  return (Math.atan2(Math.abs(cross), dot) * 180) / Math.PI;
+}
+
 /** 拘束由来の残差式一覧を作る(正則化は含まない)。参照先セグメントが見つからない拘束は無視する(呼び出し側でバリデーション済みの前提)。 */
 function buildConstraintResiduals(
   constraints: readonly SketchConstraint[],
@@ -522,6 +535,34 @@ function buildConstraintResiduals(
             baseB + 1,
             baseB + 2,
             baseB + 3,
+          ]),
+        );
+        break;
+      }
+      case "distanceLineRefEdge": {
+        const base = varIndex.get(c.segmentId);
+        if (base === undefined) break;
+        const line = resolveLineRefPoints(c.line, entities);
+        if (!line) break;
+        const signP1 = lineSideSign(initX, [base, base + 1], line[0], line[1]);
+        const signP2 = lineSideSign(initX, [base + 2, base + 3], line[0], line[1]);
+        eqs.push(pointToFixedLineResidual(x, [base, base + 1], line[0], line[1], c.value, signP1));
+        eqs.push(pointToFixedLineResidual(x, [base + 2, base + 3], line[0], line[1], c.value, signP2));
+        break;
+      }
+      case "angleLineRefEdge": {
+        const base = varIndex.get(c.segmentId);
+        if (base === undefined) break;
+        const line = resolveLineRefPoints(c.line, entities);
+        if (!line) break;
+        const bDx = line[1][0] - line[0][0];
+        const bDy = line[1][1] - line[0][1];
+        eqs.push(
+          numericResidual((vars) => angleLineFixedValueDeg(vars, base, bDx, bDy) - c.value, x, [
+            base,
+            base + 1,
+            base + 2,
+            base + 3,
           ]),
         );
         break;

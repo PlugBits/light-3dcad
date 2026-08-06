@@ -311,7 +311,14 @@ export type DimensionToolTarget =
    * distanceLineLine/angleLineLineのどちらの拘束にするかの判定はApp側の責務とする
    * (src/sketch/constraintDimensions.tsのangleBetweenSegments参照)。
    */
-  | { kind: "line-line"; a: string; b: string };
+  | { kind: "line-line"; a: string; b: string }
+  /**
+   * 線分↔参照エッジ(既存ボディの辺)の寸法(Phase 24項目2)。aが1点目(直線セグメント)、
+   * edgeA/edgeBはピック時点の参照エッジ実座標(現在値のプレビュー計算用)、lineは拘束へ保存する
+   * LineRef(常に"refEdge"、ピック時点のスナップショット)。line-lineと同じく平行判定・
+   * distanceLineRefEdge/angleLineRefEdgeどちらの拘束にするかはApp側の責務とする。
+   */
+  | { kind: "line-refedge"; a: string; edgeA: [number, number]; edgeB: [number, number]; line: LineRef };
 
 /**
  * 位置寸法(circle-distance-*)の1点目待ち状態(UI改善: ユーザー実機フィードバック対応)。
@@ -2304,10 +2311,12 @@ export class CadViewer {
       return;
     }
 
-    // 位置寸法(Phase 22): circleクリック済みの状態に限り、ボディ端面参照エッジ(referenceEdges)も
-    // ピック対象に加える(セグメント・entityより優先度は最後だが、より近ければそちらを採用)。
+    // 位置寸法(Phase 22): circleクリック済みの状態、または線分↔参照エッジの寸法(Phase 24項目2):
+    // 直線セグメントクリック済み(dimensionPendingLineId)の状態でも、ボディ端面参照エッジ
+    // (referenceEdges)をピック対象に加える(セグメント・entityより優先度は最後だが、より近ければ
+    // そちらを採用)。
     let refEdgeHit: { edge: ReferenceEdgeLine; dist: number } | null = null;
-    if (this.dimensionPendingCircleId) {
+    if (this.dimensionPendingCircleId || this.dimensionPendingLineId) {
       for (const edge of this.dimensionToolReferenceEdges) {
         const d = distPointToRawSegment(local, edge.p1, edge.p2);
         if (!refEdgeHit || d < refEdgeHit.dist) refEdgeHit = { edge, dist: d };
@@ -2321,6 +2330,24 @@ export class CadViewer {
       (nearestId === null || refEdgeHit.dist < nearestDist) &&
       (!entityHit || refEdgeHit.dist < entityHit.dist)
     ) {
+      if (this.dimensionPendingLineId) {
+        const a = this.dimensionPendingLineId;
+        this.setDimensionPendingLine(null);
+        this.setDimensionPendingPoint(null);
+        this.clearDrawingPreview();
+        this.dimensionToolCallbacks?.onTargetPicked(
+          {
+            kind: "line-refedge",
+            a,
+            edgeA: refEdgeHit.edge.p1,
+            edgeB: refEdgeHit.edge.p2,
+            line: { kind: "refEdge", p1: refEdgeHit.edge.p1, p2: refEdgeHit.edge.p2 },
+          },
+          px,
+          py,
+        );
+        return;
+      }
       const entityId = this.dimensionPendingCircleId as string;
       this.setDimensionPendingCircle(null);
       this.setDimensionPendingPoint(null);
@@ -2482,9 +2509,10 @@ export class CadViewer {
     }
     const entityHit = findEntityDimensionHit(local, this.dimensionToolEntities, !!this.dimensionPendingCircleId);
 
-    // circle選択済みの間はボディ端面参照エッジもホバー候補にする(handleDimensionToolClickと同じ)。
+    // circle選択済み、または直線セグメント選択済みの間はボディ端面参照エッジもホバー候補にする
+    // (handleDimensionToolClickと同じ)。
     let refEdgeHit: { edge: ReferenceEdgeLine; dist: number } | null = null;
-    if (this.dimensionPendingCircleId) {
+    if (this.dimensionPendingCircleId || this.dimensionPendingLineId) {
       for (const edge of this.dimensionToolReferenceEdges) {
         const d = distPointToRawSegment(local, edge.p1, edge.p2);
         if (!refEdgeHit || d < refEdgeHit.dist) refEdgeHit = { edge, dist: d };

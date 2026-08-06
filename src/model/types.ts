@@ -177,7 +177,20 @@ export type SketchConstraint =
    * 2本の直線セグメント(kind:"line"のみ対象)が非平行なときの、方向のなす角拘束(度、Phase 24)。
    * 残差は方向ベクトルのなす角(atan2ベース、0〜180度)−value。
    */
-  | { id: string; kind: "angleLineLine"; a: string; b: string; value: number };
+  | { id: string; kind: "angleLineLine"; a: string; b: string; value: number }
+  /**
+   * 直線セグメント(kind:"line")↔参照エッジ(既存ボディの辺、動かない)の平行距離拘束(Phase 24)。
+   * distanceLineLineと同形だが、b側がsegmentIdではなくLineRef(常に"refEdge"、ピック時点の
+   * スナップショット)である点のみが異なる。残差はsegmentの両端点それぞれからlineへの
+   * 符号付き垂直距離−value(2残差、平行化と距離を同時に拘束する)。
+   */
+  | { id: string; kind: "distanceLineRefEdge"; segmentId: string; line: LineRef; value: number }
+  /**
+   * 直線セグメント(kind:"line")↔参照エッジの、方向のなす角拘束(度、Phase 24)。angleLineLineと
+   * 同形だが、b側がLineRef(固定)である点のみが異なる。残差はsegmentの方向ベクトルとlineの
+   * 方向ベクトルのなす角(0〜180度)−value。
+   */
+  | { id: string; kind: "angleLineRefEdge"; segmentId: string; line: LineRef; value: number };
 
 /**
  * 2Dスケッチフィーチャー。

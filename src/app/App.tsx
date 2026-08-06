@@ -34,16 +34,21 @@ import {
   addPerpendicularConstraint,
   addTangentEntityConstraint,
   addTangentSegmentConstraint,
+  angleBetweenSegmentAndLine,
   angleBetweenSegments,
   distanceBetweenRefs,
+  foldToAcuteAngle,
+  isNearlyParallelAngle,
   segmentLength,
   segmentRadius,
   upsertAngleLineLineConstraint,
+  upsertAngleLineRefEdgeConstraint,
   upsertDistanceConstraint,
   upsertDistanceEntityEntityConstraint,
   upsertDistanceEntityLineConstraint,
   upsertDistanceEntityOriginConstraint,
   upsertDistanceLineLineConstraint,
+  upsertDistanceLineRefEdgeConstraint,
   upsertLengthConstraint,
   upsertRadiusConstraint,
 } from "../sketch/constraintDimensions";
@@ -73,9 +78,6 @@ type DrawingTool = "rect" | "circle" | "slot" | "regularPolygon" | "segment" | n
  * UI改善(ツールバー整理)で主要3つ(正面/上/等角)だけをボタンで常設し、残り4つ(背面/左/右/下)は
  * コンパクトなセレクトにまとめる。
  */
-/** 線分↔線分の寸法(Phase 24)で「ほぼ平行」とみなす角度のしきい値(度)。これ未満は平行距離、以上は角度拘束にする。 */
-const LINE_LINE_PARALLEL_ANGLE_DEG = 5;
-
 const STANDARD_VIEW_BUTTONS: { view: StandardView; label: string; title: string }[] = [
   { view: "front", label: "正面", title: "正面(-Y側)から見る" },
   { view: "back", label: "背面", title: "背面(+Y側)から見る" },
@@ -145,6 +147,12 @@ export default function App() {
     hintLabel?: string;
     /** 円↔円の距離のときだけtrue: 距離/X距離/Y距離の3択を表示する(UI改善対応)。 */
     axisOptions?: boolean;
+    /**
+     * 線分↔線分・線分↔参照エッジの寸法(Phase 24)のときだけ設定: 「距離/角度」の選択(ラジオ)を
+     * 表示する。distanceValue/angleValueはそれぞれの入力欄の初期値、initialは既定の選択
+     * (折り畳み角<5度なら"distance"、それ以外は"angle")。
+     */
+    quantityOptions?: { distanceValue: number; angleValue: number; initial: "distance" | "angle" };
   } | null>(null);
   // 寸法ツールの1点目待ち状態のステータス表示(ツールバー付近に1行、UI改善対応)。未保留はnull。
   const [dimensionPendingLabel, setDimensionPendingLabel] = useState<string | null>(null);
@@ -726,21 +734,43 @@ export default function App() {
           const entity = entities.find((e) => e.id === target.entityId);
           initialValue = entity?.kind === "circle" ? distancePointToLine(entity.center, target.edgeA, target.edgeB) : 0;
           hintLabel = "辺は動かず、円の中心だけが移動します";
-        } else if (target.kind === "line-line") {
-          // 線分↔線分の寸法(Phase 24): ほぼ平行(方向のなす角<5度)なら平行距離、それ以外は角度を入力させる。
+        }
+        let quantityOptions: { distanceValue: number; angleValue: number; initial: "distance" | "angle" } | undefined;
+        if (target.kind === "line-line") {
+          // 線分↔線分の寸法(Phase 24): ほぼ平行(折り畳み角<5度)なら平行距離、それ以外は角度を
+          // デフォルト選択する。逆向きに描いた平行線(なす角≈180度)も折り畳んで平行判定するため、
+          // foldToAcuteAngle/isNearlyParallelAngleを介す(素の角度<5度だけを見ていた旧実装のバグ修正)。
           const segA = segments.find((s) => s.id === target.a);
           const segB = segments.find((s) => s.id === target.b);
           const angle = segA && segB ? angleBetweenSegments(segA, segB) : null;
-          const isParallel = angle !== null && angle < LINE_LINE_PARALLEL_ANGLE_DEG;
-          if (isParallel) {
-            titleLabel = "距離 (mm)";
-            initialValue = segA && segB ? distancePointToLine(segA.p1, segB.p1, segB.p2) : 0;
-          } else {
-            titleLabel = "角度 (°)";
-            initialValue = angle ?? 0;
-          }
+          const foldedAngle = angle !== null ? foldToAcuteAngle(angle) : 0;
+          const distanceValue = segA && segB ? distancePointToLine(segA.p1, segB.p1, segB.p2) : 0;
+          const initial: "distance" | "angle" = isNearlyParallelAngle(angle) ? "distance" : "angle";
+          quantityOptions = { distanceValue, angleValue: foldedAngle, initial };
+          titleLabel = initial === "distance" ? "距離 (mm)" : "角度 (°)";
+          initialValue = initial === "distance" ? distanceValue : foldedAngle;
+        } else if (target.kind === "line-refedge") {
+          // 線分↔参照エッジの寸法(Phase 24項目2): line-lineと同じく距離/角度を選べる。参照エッジは
+          // 固定線として扱うため、残差は線分側の端点から参照エッジ直線への距離・角度。
+          const segA = segments.find((s) => s.id === target.a);
+          const angle = segA ? angleBetweenSegmentAndLine(segA, target.edgeA, target.edgeB) : null;
+          const foldedAngle = angle !== null ? foldToAcuteAngle(angle) : 0;
+          const distanceValue = segA ? distancePointToLine(segA.p1, target.edgeA, target.edgeB) : 0;
+          const initial: "distance" | "angle" = isNearlyParallelAngle(angle) ? "distance" : "angle";
+          quantityOptions = { distanceValue, angleValue: foldedAngle, initial };
+          titleLabel = initial === "distance" ? "距離 (mm)" : "角度 (°)";
+          initialValue = initial === "distance" ? distanceValue : foldedAngle;
+          hintLabel = "参照エッジは動きません";
         }
-        setDimensionPopup({ target, titleLabel, initialValue, screen: { x: screenX, y: screenY }, hintLabel, axisOptions });
+        setDimensionPopup({
+          target,
+          titleLabel,
+          initialValue,
+          screen: { x: screenX, y: screenY },
+          hintLabel,
+          axisOptions,
+          quantityOptions,
+        });
       },
       onCancel: () => {
         setDimensionTool(false);
@@ -755,7 +785,7 @@ export default function App() {
         } else if (state.kind === "circle") {
           setDimensionPendingLabel("1つ目: 円 → 2つ目を選択(原点/円/辺/端面)");
         } else if (state.kind === "line") {
-          setDimensionPendingLabel("1つ目: 線分 → 2つ目の線分を選択(平行なら距離/それ以外は角度)");
+          setDimensionPendingLabel("1つ目: 線分 → 2つ目の線分/参照エッジを選択(距離/角度)");
         } else {
           setDimensionPendingLabel("1つ目: 端点 → 2つ目の端点を選択(距離)");
         }
@@ -787,10 +817,13 @@ export default function App() {
    * 他の拘束[矩形のサイズ変更等]と共存できるようにするため)。他のsegments系と同じく
    * updateDocumentWithConflictRollbackを通すため、矛盾すれば自動的に取り消される。
    */
-  function handleApplyDimensionTarget(value: number, axis?: "direct" | "x" | "y") {
+  function handleApplyDimensionTarget(value: number, axis?: "direct" | "x" | "y", quantity?: "distance" | "angle") {
     if (!dimensionPopup || !selectedFeature || selectedFeature.type !== "sketch") return;
     const sketchId = selectedFeature.id;
     const target = dimensionPopup.target;
+    // 距離/角度の選択(Phase 24項目3、UI改善): ポップアップのラジオで明示的に選ばれた方を使う
+    // (未指定ならポップアップ表示時に決めた既定[折り畳み角<5度なら距離]にフォールバック)。
+    const wantsDistance = (quantity ?? dimensionPopup.quantityOptions?.initial) !== "angle";
 
     if (target.kind === "entity-radius") {
       updateDocument((doc) => updateSketchEntity(doc, sketchId, target.entityId, { radius: value }));
@@ -805,22 +838,35 @@ export default function App() {
     }
 
     if (target.kind === "line-line") {
-      // 線分↔線分の寸法(Phase 24): 適用時点の最新segmentsから改めて平行判定する
-      // (ポップアップ表示中に他の編集で角度が変わる可能性はほぼ無いが、常に最新値で判定する)。
+      // 線分↔線分の寸法(Phase 24): ユーザーが選んだ距離/角度(ラジオ)に応じてどちらの拘束にするかを決める。
       updateDocumentWithConflictRollback(
         sketchId,
         (doc) => {
           const feature = doc.features.find((f) => f.id === sketchId);
           if (feature?.type !== "sketch") return doc;
           const constraints = feature.constraints ?? [];
-          const segments = feature.segments ?? [];
-          const segA = segments.find((s) => s.id === target.a);
-          const segB = segments.find((s) => s.id === target.b);
-          const angle = segA && segB ? angleBetweenSegments(segA, segB) : null;
-          const isParallel = angle !== null && angle < LINE_LINE_PARALLEL_ANGLE_DEG;
-          const next = isParallel
+          const next = wantsDistance
             ? upsertDistanceLineLineConstraint(constraints, target.a, target.b, value)
             : upsertAngleLineLineConstraint(constraints, target.a, target.b, value);
+          return setSketchConstraints(doc, sketchId, next);
+        },
+        showTransientMessage,
+      );
+      setDimensionPopup(null);
+      return;
+    }
+
+    if (target.kind === "line-refedge") {
+      // 線分↔参照エッジの寸法(Phase 24項目2): line-lineと同じく距離/角度の選択に応じて切り替える。
+      updateDocumentWithConflictRollback(
+        sketchId,
+        (doc) => {
+          const feature = doc.features.find((f) => f.id === sketchId);
+          if (feature?.type !== "sketch") return doc;
+          const constraints = feature.constraints ?? [];
+          const next = wantsDistance
+            ? upsertDistanceLineRefEdgeConstraint(constraints, target.a, target.line, value)
+            : upsertAngleLineRefEdgeConstraint(constraints, target.a, target.line, value);
           return setSketchConstraints(doc, sketchId, next);
         },
         showTransientMessage,
@@ -1400,6 +1446,7 @@ export default function App() {
               screen={dimensionPopup.screen}
               hintLabel={dimensionPopup.hintLabel}
               axisOptions={dimensionPopup.axisOptions}
+              quantityOptions={dimensionPopup.quantityOptions}
               onCancel={() => setDimensionPopup(null)}
               onApply={handleApplyDimensionTarget}
             />

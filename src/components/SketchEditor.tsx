@@ -401,6 +401,8 @@ const CONSTRAINT_KIND_LABELS: Record<SketchConstraint["kind"], string> = {
   tangent: "接線",
   distanceLineLine: "平行距離",
   angleLineLine: "角度",
+  distanceLineRefEdge: "平行距離(参照エッジ)",
+  angleLineRefEdge: "角度(参照エッジ)",
 };
 
 /** entityIdから「円1」のような表示用の短いラベルを作る(順序はentities配列準拠)。 */
@@ -445,6 +447,10 @@ function describeConstraint(
       return `${segmentLabel(segments, constraint.a)} // ${segmentLabel(segments, constraint.b)} = ${constraint.value.toFixed(2)}mm`;
     case "angleLineLine":
       return `${segmentLabel(segments, constraint.a)} ∠ ${segmentLabel(segments, constraint.b)} = ${constraint.value.toFixed(2)}°`;
+    case "distanceLineRefEdge":
+      return `${segmentLabel(segments, constraint.segmentId)} // 参照エッジ = ${constraint.value.toFixed(2)}mm`;
+    case "angleLineRefEdge":
+      return `${segmentLabel(segments, constraint.segmentId)} ∠ 参照エッジ = ${constraint.value.toFixed(2)}°`;
     case "concentric":
       return `${entityLabel(entities, constraint.a.entityId)} = ${entityLabel(entities, constraint.b.entityId)}`;
     case "tangent": {
