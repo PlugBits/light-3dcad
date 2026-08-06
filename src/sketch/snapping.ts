@@ -2,7 +2,8 @@
 // ReactにもThree.jsにも依存しない純粋関数のみで構成する(テスト容易性最優先)。
 // 呼び出し側(CadViewer)はスクリーンpx単位の許容距離をスケッチのローカルmm単位に換算してから
 // tolerance として渡すこと(このモジュール自体はmm単位の値しか扱わない)。
-import type { SketchEntity } from "../model/types";
+import type { SketchEntity, SketchSegment } from "../model/types";
+import { bulgeArcPoints } from "./bulge";
 import { regularPolygonVertices } from "./shapeFromPoints";
 
 /** スナップ候補の種別。優先順位は SNAP_PRIORITY の定義順(数値が小さいほど優先)。 */
@@ -230,6 +231,26 @@ export function collectSketchSnapCandidates(entities: SketchEntity[]): SnapCandi
       for (let i = 0; i < points.length; i += 1) {
         candidates.push({ point: midpoint(points[i], points[(i + 1) % points.length]), kind: "midpoint" });
       }
+    }
+  }
+  return candidates;
+}
+
+/**
+ * スケッチの自由な線分・円弧セグメント(Phase 19a)からスナップ候補点リストを収集する(Phase 19b)。
+ * 各セグメントの両端点(vertex)+中点(midpoint、円弧は弦の中点でなくbulgeArcPointsで求めた弧上の
+ * 中点)を候補にする。線分作図ツール・トリムツールの対象スケッチの既存segmentsを渡す想定。
+ */
+export function collectSegmentSnapCandidates(segments: SketchSegment[]): SnapCandidate[] {
+  const candidates: SnapCandidate[] = [];
+  for (const segment of segments) {
+    candidates.push({ point: segment.p1, kind: "vertex" });
+    candidates.push({ point: segment.p2, kind: "vertex" });
+    if (segment.kind === "arc" && segment.bulge) {
+      const pts = bulgeArcPoints(segment.p1, segment.p2, segment.bulge, 16);
+      candidates.push({ point: pts[Math.floor(pts.length / 2)], kind: "midpoint" });
+    } else {
+      candidates.push({ point: midpoint(segment.p1, segment.p2), kind: "midpoint" });
     }
   }
   return candidates;

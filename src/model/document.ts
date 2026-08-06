@@ -167,6 +167,31 @@ export function removeSketchEntity(doc: CadDocument, sketchId: FeatureId, entity
   }));
 }
 
+/** sketch の自由な線分・円弧セグメント(Phase 19a)配列を丸ごと置き換える(Phase 19b)。 */
+export function setSketchSegments(doc: CadDocument, sketchId: FeatureId, segments: SketchSegment[]): CadDocument {
+  return updateFeature<SketchFeature>(doc, sketchId, (sketch) => ({ ...sketch, segments }));
+}
+
+/** sketch にセグメント(Phase 19a)を追加する(線分作図ツール・分解の確定時に使う、Phase 19b)。 */
+export function addSketchSegments(doc: CadDocument, sketchId: FeatureId, segments: SketchSegment[]): CadDocument {
+  return updateFeature<SketchFeature>(doc, sketchId, (sketch) => ({
+    ...sketch,
+    segments: [...(sketch.segments ?? []), ...segments],
+  }));
+}
+
+/**
+ * sketch のentityを削除し、代わりに等価なsegments(src/sketch/explode.ts の explodeEntity())を
+ * 既存segmentsへ追記する(「分解」ボタン、Phase 19b)。分解後はトリムツールの対象になる。
+ */
+export function explodeSketchEntity(doc: CadDocument, sketchId: FeatureId, entityId: string, segments: SketchSegment[]): CadDocument {
+  return updateFeature<SketchFeature>(doc, sketchId, (sketch) => ({
+    ...sketch,
+    entities: sketch.entities.filter((entity) => entity.id !== entityId),
+    segments: [...(sketch.segments ?? []), ...segments],
+  }));
+}
+
 /** 指定IDのフィーチャーを削除する(依存フィーチャーはそのまま残る=参照切れの可能性あり)。 */
 export function removeFeature(doc: CadDocument, featureId: FeatureId): CadDocument {
   const features = doc.features.filter((f) => f.id !== featureId);
