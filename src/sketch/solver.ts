@@ -25,6 +25,23 @@ const CONVERGE_NORM = 1e-8;
 const MAX_ITERATIONS = 50;
 /** 収束後、拘束由来の残差(正則化を除く)の絶対値最大がこれを超えていれば「矛盾(過拘束)」とみなす(mm)。 */
 const CONFLICT_TOLERANCE = 1e-4;
+/**
+ * 早期リターン判定の許容値(mm、累積ドリフト対策)。solveSketch()の入口で拘束残差の絶対値最大が
+ * これを下回っていれば、ウォームアップ+LM反復を一切行わず入力segments/entitiesをそのまま返す。
+ * 「拘束は既に満たされているのに、正則化ウォームアップの数値誤差でわずかに動いてしまい、
+ * ドキュメント更新のたびに座標が少しずつずれていく」問題(円中心 -10 が編集の度に -9.99999999888
+ * のようにドリフトする)への対策。CONVERGE_NORM(LMの収束先の残差スケール、~1e-8)より一桁大きく、
+ * かつ後述のROUND_GRIDでの丸め誤差(最大でも各成分5e-7mm程度)を安定して吸収できる値として1e-7を選ぶ。
+ */
+const EARLY_RETURN_TOLERANCE = 1e-7;
+/**
+ * 解いた座標を丸めるグリッド幅(mm)。浮動小数点演算の丸め誤差でLMの解が「きれいな値」から
+ * ごくわずかにずれるのを吸収し、次回solveSketch()呼び出し時にEARLY_RETURN_TOLERANCE判定が
+ * 安定して成立するようにする(=同じドキュメントを再solveしても座標が完全に不変になる)。
+ * 1e-6mmはCAD用途の実務精度(表示は小数3桁=1e-3mm)に対して十分小さく、丸めによる残差の増加も
+ * 高々グリッド幅程度(数百分の1のCONFLICT_TOLERANCE)に収まるため、矛盾判定を悪化させない。
+ */
+const ROUND_GRID = 1e-6;
 /** 正則化(初期位置からの移動量)の重み。小さいほど拘束を優先し、大きいほど元形状を保つ。 */
 const REGULARIZATION_WEIGHT = 1e-3;
 /** 長さ・半径残差の分母に使う距離が退化(0近傍)するのを防ぐ下限(mm)。 */
@@ -610,6 +627,11 @@ function buildRegularizationResiduals(x: number[], initX: number[], weight: numb
   return eqs;
 }
 
+/** 値をROUND_GRID(mm)グリッドに丸める(累積ドリフト対策、solveSketch()の出力座標に適用)。 */
+function roundToGrid(v: number): number {
+  return Math.round(v / ROUND_GRID) * ROUND_GRID;
+}
+
 function residualNorm(eqs: ResidualEq[]): number {
   let sum = 0;
   for (const eq of eqs) sum += eq.value * eq.value;
@@ -804,13 +826,31 @@ export function solveSketch(
     ...buildConstraintResiduals(constraints, segmentsById, varIndex, entityVarIdx, entities, vars, initX),
     ...buildFixResiduals(constraints, varIndex, entityVarIdx, vars, initX),
   ];
+
+  // 累積ドリフト対策その1: 拘束が既に(許容誤差内で)満たされているなら、ウォームアップ+LM反復を
+  // 一切行わず入力をそのまま返す。数値解法を経由すると収束先が理論値からごくわずかにずれることが
+  // あり、それがドキュメント更新のたびに繰り返し適用されると座標が少しずつ動いてしまうため
+  // (例: 円中心-10が編集の度に-9.99999999888のようにドリフトする)、「動かす必要が無いなら
+  // 何も動かさない」を最優先する。
+  const initResidualMaxAbs = buildHardResiduals(initX).reduce((acc, eq) => Math.max(acc, Math.abs(eq.value)), 0);
+  if (initResidualMaxAbs < EARLY_RETURN_TOLERANCE) {
+    return { ok: true, segments: segments.map((s) => ({ ...s })), entities: entities.map((e) => ({ ...e })) };
+  }
+
   const buildWarmupResiduals = (vars: number[]): ResidualEq[] => [
     ...buildHardResiduals(vars),
     ...buildRegularizationResiduals(vars, initX, REGULARIZATION_WEIGHT),
   ];
 
   const warm = runLevenbergMarquardt(buildWarmupResiduals, initX, m, MAX_ITERATIONS);
-  const x = runLevenbergMarquardt(buildHardResiduals, warm, m, MAX_ITERATIONS);
+  const solved = runLevenbergMarquardt(buildHardResiduals, warm, m, MAX_ITERATIONS);
+
+  // 累積ドリフト対策その2: 出力座標をROUND_GRIDに丸める。次回solveSketch()が同じ形状で呼ばれたとき
+  // (=何も編集していないのに再solveされたとき)、丸められた「きりのいい」座標が
+  // EARLY_RETURN_TOLERANCE判定を安定して通過するようにする(=座標が完全に不変になる)。
+  // 丸め幅(1e-6mm)はCONFLICT_TOLERANCE(1e-4mm)より2桁小さいため、丸めによって矛盾判定が
+  // 悪化することはない。
+  const x = solved.map(roundToGrid);
 
   const maxAbs = buildHardResiduals(x).reduce((acc, eq) => Math.max(acc, Math.abs(eq.value)), 0);
 

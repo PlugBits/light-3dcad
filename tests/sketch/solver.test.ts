@@ -691,3 +691,76 @@ describe("solveDocumentSketches", () => {
     expect(result.doc).toBe(doc); // ドキュメントは変更せずそのまま返す。
   });
 });
+
+describe("solveSketch 累積ドリフト対策(ユーザー報告修正)", () => {
+  function circle(id: string, center: [number, number], radius = 5): Extract<SketchEntity, { kind: "circle" }> {
+    return { kind: "circle", id, center, radius };
+  }
+
+  it("① 既に拘束を満たしている円(中心-10,0)を再solveしても座標が完全に不変(ドリフトしない)", () => {
+    const c = circle("c1", [-10, 0]);
+    const constraints: SketchConstraint[] = [
+      { id: "d1", kind: "distanceEntityOrigin", entity: { entityId: "c1" }, value: 10 },
+    ];
+    const result = solveSketch([], constraints, [c]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.entities[0];
+    if (out.kind !== "circle") throw new Error("not circle");
+    // 数値解法を経由しても入力座標そのままであること(近似値ではなく厳密一致)。
+    expect(out.center[0]).toBe(-10);
+    expect(out.center[1]).toBe(0);
+  });
+
+  it("② 満たされた状態のまま100回連続solveしても座標が完全に不変", () => {
+    let segs: SketchSegment[] = [{ id: "a", kind: "line", p1: [0, 0], p2: [10, 0] }];
+    let entities: SketchEntity[] = [circle("c1", [-10, 0])];
+    const constraints: SketchConstraint[] = [
+      { id: "c1", kind: "horizontal", segmentId: "a" },
+      { id: "c2", kind: "length", segmentId: "a", value: 10 },
+      { id: "d1", kind: "distanceEntityOrigin", entity: { entityId: "c1" }, value: 10 },
+    ];
+
+    // 1回目でウォームアップ+LMを通して「きれいな値」に丸められた状態にする。
+    const first = solveSketch(segs, constraints, entities);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    segs = first.segments;
+    entities = first.entities;
+
+    for (let i = 0; i < 100; i += 1) {
+      const result = solveSketch(segs, constraints, entities);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      // 前回の出力とビット単位で完全一致すること(=これ以上ドリフトしない)。
+      expect(result.segments[0].p1).toEqual(segs[0].p1);
+      expect(result.segments[0].p2).toEqual(segs[0].p2);
+      const outCircle = result.entities[0];
+      const prevCircle = entities[0];
+      if (outCircle.kind !== "circle" || prevCircle.kind !== "circle") throw new Error("not circle");
+      expect(outCircle.center).toEqual(prevCircle.center);
+      segs = result.segments;
+      entities = result.entities;
+    }
+    // 最終的に座標が理論値(-10,0)からずれていないこと。
+    const finalCircle = entities[0];
+    if (finalCircle.kind !== "circle") throw new Error("not circle");
+    expect(finalCircle.center[0]).toBeCloseTo(-10, 6);
+    expect(finalCircle.center[1]).toBeCloseTo(0, 6);
+  });
+
+  it("③ 拘束違反時(中心が目標値からずれている)は従来どおり解いて目標値に収束する", () => {
+    const c = circle("c1", [-9, 0.3]); // わずかにdistanceEntityOrigin=10からずれている
+    const constraints: SketchConstraint[] = [
+      { id: "d1", kind: "distanceEntityOrigin", entity: { entityId: "c1" }, value: 10 },
+    ];
+    const result = solveSketch([], constraints, [c]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.entities[0];
+    if (out.kind !== "circle") throw new Error("not circle");
+    expect(dist(out.center, [0, 0])).toBeCloseTo(10, 4);
+    // 早期リターンではなく実際に解いた結果なので、入力座標そのままではない。
+    expect(out.center).not.toEqual(c.center);
+  });
+});
