@@ -55,6 +55,11 @@ const REFERENCE_EDGE_COLOR = 0x888888;
 
 /** 選択中スケッチの線色(オレンジ)。 */
 const SKETCH_SELECTED_COLOR = 0xff9800;
+/**
+ * 寸法ツールで1点目(circle)を選択済みの間の強調色(UI改善対応)。選択中スケッチの線は既に
+ * SKETCH_SELECTED_COLOR(オレンジ)で描かれているため、それと見分けが付くマゼンタ系にする。
+ */
+const DIMENSION_PENDING_COLOR = 0xff3dae;
 /** 非選択スケッチの線色(控えめなグレー、半透明)。 */
 const SKETCH_DEFAULT_COLOR = 0xaaaaaa;
 /** Z-fighting防止のため、スケッチ線を面法線方向へオフセットする距離(mm)。 */
@@ -3036,7 +3041,7 @@ export class CadViewer {
     worldPts.forEach((p, i) => positions.set(p, i * 3));
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-    const material = new THREE.LineBasicMaterial({ color: SKETCH_SELECTED_COLOR, linewidth: 3, depthTest: false });
+    const material = new THREE.LineBasicMaterial({ color: DIMENSION_PENDING_COLOR, linewidth: 3, depthTest: false });
     const line = new THREE.Line(geometry, material);
     line.renderOrder = DRAWING_FEEDBACK_RENDER_ORDER + 3;
     this.dimensionSelectGroup.add(line);
