@@ -490,3 +490,26 @@ circleの円周・rectangleの4辺(上下=幅、左右=高さ)への最短距離
 一致)が開き値変更で実際にradiusが更新されること、矩形の辺のホバー/クリックでも同様に幅/高さが
 更新されることを確認した。既存のsegment系(length/radius/distance)ヒット判定は無修正のロジックの
 まま(entityとの距離比較を追加しただけ)で、既存動作に変化がないことも確認した。
+
+項目3(スロットツールの操作順)を実装。従来は幅を事前入力→2クリック(始点・終点)だったが、
+SolidWorks式の「クリック1=始点→クリック2=終点(長さ・向き確定)→マウス移動で幅がカーソル距離に
+追従(輪郭プレビュー)→クリック3=幅確定」に変更した。新設`slotWidthFromCursor()`
+(src/sketch/shapeFromPoints.ts、純TS、Vitest5件)が中心線からカーソルまでの垂直距離×2を返す。
+CadViewerに専用の`handleSlotClick()`(3クリックの状態遷移)を追加し、`SlotDrawingCallbacks.onComplete`
+にwidthを追加(事前の幅入力欄・`startSlotDrawing()`のwidth引数は削除)。ブラウザ確認: 1クリック目で
+中心線プレビュー(まだ幅なし)→2クリック目で輪郭がカーソル追従(「L30.0×W12.0mm」のライブ表示)→
+3クリック目で確定、を画面キャプチャで確認した。
+
+項目4(多角形ツールの一本化)を実装。旧「多角形」ボタン(自由な頂点列チェーン描画、`polygon`
+エンティティ)を削除し(自由描画は既存の「線分」ツールが担う)、「正多角形」ボタンを「多角形」に
+改名した。作図操作(2クリック: 中心→頂点、辺数はツール開始時に固定)自体は変更していないが、
+確定時に作るエンティティを`regularPolygon`から、`regularPolygonVertices()`で頂点を計算した
+`polygon`エンティティに変更した(既存の辺長寸法ラベル・頂点ごとのフィレット/面取り・頂点数値編集が
+そのまま使える)。辺数入力は3/4/5/6/8のセレクタ(既定6)にした。`regularPolygon`型自体・evaluatorの
+対応・SketchEditorの「正多角形を数値で追加」ボタン(既存の別経路)は後方互換のため変更していない。
+既存E2E(polygon-drawing.spec.ts・dimension-editing.spec.ts・sketch-snapping.spec.ts)が旧・自由描画
+「多角形」ツールに依存していたため、多角形ツールでの正六角形/正方形作図・線分ツールでのスナップ/
+軸ロック検証に書き換えた。segmentsは頂点座標の編集UIを持たないため、新設した開発ビルド限定の
+`window.__cadViewerDebug.drawingPointsSnapshot()`(描画モード中の確定済み頂点列を返す)で検証する
+ようにした。Vitest267件(shapeFromPoints.tsのslotWidthFromCursor5件が新規)。E2E15件全通過
+(既存12件+nested-hole.spec.ts 1件、うち3件を本フェーズで書き換え)。

@@ -1,11 +1,15 @@
 // Phase 9: スナップ・軸ロックのE2E。新規スケッチ(Sketch2、初期ボディのExtrude1には手を加えない)
-// 上で線描画モードを使い、window.__cadViewerDebug.projectPoint()でワールド座標→スクリーン座標に
-// 変換してクリック/カーソル移動を行う。頂点編集パネルの数値でスナップ・軸ロックの結果を検証する。
+// 上で線分ツール(Phase 19b、Phase 21で旧「多角形」自由描画ツールの後継として自由描画を担う)を使い、
+// window.__cadViewerDebug.projectPoint()でワールド座標→スクリーン座標に変換してクリック/カーソル
+// 移動を行う。線分ツールはsegmentsを作るためポリゴンのような頂点編集パネルを持たない
+// (SketchEditorの表示: 「個別の座標編集はまだ対応していません」)。そのため確定前の頂点列を
+// window.__cadViewerDebug.drawingPointsSnapshot()(Phase 21で追加)で読み、スナップ・軸ロックの
+// 結果を検証する(確定・押し出しまでは行わない。Escでキャンセルして後始末する)。
 import { expect, test } from "@playwright/test";
 
 import { collectPageErrors, screenPointForWorld, waitForReady } from "./helpers";
 
-test("線描画モードで原点付近をクリックすると原点(0,0)にスナップする", async ({ page }) => {
+test("線分ツールで原点付近をクリックすると原点(0,0)にスナップする", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
 
   await page.goto("/");
@@ -17,31 +21,27 @@ test("線描画モードで原点付近をクリックすると原点(0,0)にス
   await waitForReady(page);
 
   await page.getByTestId("btn-align-to-plane").click();
-  await page.getByTestId("btn-draw-polygon").click();
-  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形キャンセル(Esc)");
+  await page.getByTestId("btn-draw-segment").click();
+  await expect(page.getByTestId("btn-draw-segment")).toHaveText("線分キャンセル(Esc)");
 
   // 原点(0,0)から0.4mm程度ずれた位置をクリックする(点スナップ許容距離内)。
   // 1頂点目は原点スナップ(origin候補)で(0,0)になるはず。
   const nearOrigin = await screenPointForWorld(page, [0.4, -0.3, 0]);
   await page.mouse.click(nearOrigin.x, nearOrigin.y);
 
-  // 続けて一辺20mmの矩形を描いて閉じる(3点以上必要なため)。
-  const corners: [number, number, number][] = [
-    [20, 0, 0],
-    [20, 20, 0],
-    [0, 20, 0],
-  ];
-  for (const corner of corners) {
-    const pt = await screenPointForWorld(page, corner);
-    await page.mouse.click(pt.x, pt.y);
-  }
-  const start = await screenPointForWorld(page, [0, 0, 0]);
-  await page.mouse.click(start.x + 2, start.y + 2);
-  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形");
+  // 2頂点目(スナップ・軸ロックとは無関係な適当な位置)を追加してから確定前の状態を読む。
+  const p1 = await screenPointForWorld(page, [20, 0, 0]);
+  await page.mouse.click(p1.x, p1.y);
 
+  const points = await page.evaluate(() => window.__cadViewerDebug?.drawingPointsSnapshot() ?? []);
+  expect(points).toHaveLength(2);
   // 1頂点目が原点スナップにより厳密に(0,0)になっていることを確認する。
-  await expect(page.getByTestId("entity-polygon-0-vertex-0-x")).toHaveValue("0");
-  await expect(page.getByTestId("entity-polygon-0-vertex-0-y")).toHaveValue("0");
+  expect(points[0][0]).toBe(0);
+  expect(points[0][1]).toBe(0);
+
+  // 後始末: Escでキャンセルし、entityを確定しない。
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("btn-draw-segment")).toHaveText("線分");
 
   expect(pageErrors).toEqual([]);
 });
@@ -57,8 +57,8 @@ test("水平から3度ずれたクリックは軸ロックにより正確に水�
   await waitForReady(page);
 
   await page.getByTestId("btn-align-to-plane").click();
-  await page.getByTestId("btn-draw-polygon").click();
-  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形キャンセル(Esc)");
+  await page.getByTestId("btn-draw-segment").click();
+  await expect(page.getByTestId("btn-draw-segment")).toHaveText("線分キャンセル(Esc)");
 
   // 1頂点目: クリックすると1mmグリッドスナップにより(-10,-10)に丸められる。
   const v0 = { x: -10.3, y: -9.7 };
@@ -75,19 +75,14 @@ test("水平から3度ずれたクリックは軸ロックにより正確に水�
   await page.mouse.move(p1.x, p1.y);
   await page.mouse.click(p1.x, p1.y);
 
-  // 3頂点目: 軸ロックが働かない適当な位置(3点以上必要なため)。
-  const p2 = await screenPointForWorld(page, [v0.x, v0.y + 20, 0]);
-  await page.mouse.click(p2.x, p2.y);
-
-  // 始点(v0)付近をクリックして閉じる。
-  const start = await screenPointForWorld(page, [v0.x, v0.y, 0]);
-  await page.mouse.click(start.x + 2, start.y + 2);
-  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形");
-
-  const y0 = await page.getByTestId("entity-polygon-0-vertex-0-y").inputValue();
-  const y1 = await page.getByTestId("entity-polygon-0-vertex-1-y").inputValue();
+  const points = await page.evaluate(() => window.__cadViewerDebug?.drawingPointsSnapshot() ?? []);
+  expect(points).toHaveLength(2);
   // 軸ロックにより、2頂点目のyは1頂点目のyと厳密に一致する(=辺が正確に水平)。
-  expect(y1).toBe(y0);
+  expect(points[1][1]).toBe(points[0][1]);
+
+  // 後始末: Escでキャンセルし、entityを確定しない。
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("btn-draw-segment")).toHaveText("線分");
 
   expect(pageErrors).toEqual([]);
 });

@@ -23,7 +23,6 @@ import {
   createLineSegment,
   createPolygonEntity,
   createRectangleEntity,
-  createRegularPolygonEntity,
   createSlotEntity,
 } from "../model/entity";
 import type { PolygonCorner } from "../model/types";
@@ -35,7 +34,7 @@ import {
   upsertLengthConstraint,
   upsertRadiusConstraint,
 } from "../sketch/constraintDimensions";
-import { rectangleFromCorners } from "../sketch/shapeFromPoints";
+import { rectangleFromCorners, regularPolygonVertices } from "../sketch/shapeFromPoints";
 import { trimSegmentAtPoint } from "../sketch/trim";
 import { updateDocumentWithConflictRollback } from "../state/constraintUpdate";
 import { useCadStore } from "../state/store";
@@ -43,11 +42,17 @@ import { CadViewer, type DimensionToolTarget, type SketchOverlayEntry } from "..
 import type { StandardView } from "../viewer/standardViews";
 
 /**
- * ツールバーで選択中の作図ツール(未選択はnull)。line=既存の複数頂点閉多角形描画、rect/circleは
- * Phase 14の2クリック作図、slot/regularPolygonはPhase 17の2クリック作図(幅/辺数はツール開始時に
- * 固定)、segmentはPhase 19bの自由な線分・円弧チェーン作図(閉じる必要が無い)。
+ * ツールバーで選択中の作図ツール(未選択はnull)。rect/circleはPhase 14の2クリック作図、
+ * slotはPhase 17→Phase 21で3クリック作図(始点・終点・幅)に変更、regularPolygonは
+ * Phase 17の2クリック作図(中心・頂点、辺数はツール開始時に固定。Phase 21でボタン名を
+ * 「多角形」に改名し、生成エンティティをregularPolygonから頂点計算済みのpolygonに変更した。
+ * 内部の tool state キー名は"regularPolygon"のまま据え置く)、segmentはPhase 19bの自由な
+ * 線分・円弧チェーン作図(閉じる必要が無い。フリーな多角形を描きたい場合はこちらを使う)。
+ * "line"(旧: 複数頂点の閉多角形を自由にクリックして描く専用ツール)はPhase 21で廃止した
+ * (自由描画はsegmentツールが担い、regularPolygon経由でも頂点編集でpolygonエンティティを
+ * 個別に調整できるため)。
  */
-type DrawingTool = "line" | "rect" | "circle" | "slot" | "regularPolygon" | "segment" | null;
+type DrawingTool = "rect" | "circle" | "slot" | "regularPolygon" | "segment" | null;
 
 /** ツールバーの標準ビューボタン(正面/背面/左/右/上/下/等角、Phase 16)。 */
 const STANDARD_VIEW_BUTTONS: { view: StandardView; label: string; title: string }[] = [
@@ -128,8 +133,6 @@ export default function App() {
   }, []);
   // フィレット/面取りツールで頂点クリック時に適用するサイズ(mm、デフォルト5)。
   const [cornerSize, setCornerSize] = useState(5);
-  // スロットツール開始時に固定する全幅(mm、デフォルト10、Phase 17)。
-  const [slotWidth, setSlotWidth] = useState(10);
   // 正多角形ツール開始時に固定する辺数(3〜24、デフォルト6、Phase 17)。
   const [polygonSides, setPolygonSides] = useState(6);
   // 線描画モード中の円弧セグメント(Phase 17)トグルの見た目用状態(実体はCadViewer側が持つ。
@@ -338,28 +341,6 @@ export default function App() {
     viewerRef.current?.lookAtPlane(selectedSketchPlane);
   }
 
-  function handleStartLineDrawing() {
-    if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
-    const sketchId = selectedFeature.id;
-    viewerRef.current.startPolygonDrawing(selectedSketchPlane, gridSnap, selectedFeature.entities, {
-      onComplete: (points: [number, number][], bulges) => {
-        const entity = createPolygonEntity({ points, bulges });
-        updateDocument((d) => addSketchEntity(d, sketchId, entity));
-        setActiveTool(null);
-        setDrawingSketchId(null);
-        setArcModeActive(false);
-      },
-      onCancel: () => {
-        setActiveTool(null);
-        setDrawingSketchId(null);
-        setArcModeActive(false);
-      },
-      onArcModeChange: (active) => setArcModeActive(active),
-    });
-    setDrawingSketchId(sketchId);
-    setActiveTool("line");
-  }
-
   function handleStartSegmentDrawing() {
     if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
     const sketchId = selectedFeature.id;
@@ -401,12 +382,17 @@ export default function App() {
     setActiveTool("segment");
   }
 
+  /**
+   * スロットツール(3クリック、Phase 21でSolidWorks式の「始点→終点→幅」操作に変更)を開始する。
+   * onCompleteはCadViewer側でカーソルの中心線からの垂直距離×2として決定された幅(3クリック目時点)
+   * を渡してくるので、そのままcreateSlotEntity()のwidthに使う(事前の幅入力欄は廃止した)。
+   */
   function handleStartSlotDrawing() {
     if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
     const sketchId = selectedFeature.id;
-    viewerRef.current.startSlotDrawing(selectedSketchPlane, gridSnap, selectedFeature.entities, slotWidth, {
-      onComplete: (start, end) => {
-        const entity = createSlotEntity({ start, end, width: slotWidth });
+    viewerRef.current.startSlotDrawing(selectedSketchPlane, gridSnap, selectedFeature.entities, {
+      onComplete: (start, end, width) => {
+        const entity = createSlotEntity({ start, end, width });
         updateDocument((d) => addSketchEntity(d, sketchId, entity));
         setActiveTool(null);
         setDrawingSketchId(null);
@@ -420,12 +406,22 @@ export default function App() {
     setActiveTool("slot");
   }
 
+  /**
+   * 「多角形」ツール(Phase 21で「正多角形」から改名)。2クリック(中心→頂点)の作図操作自体は
+   * 従来の正多角形ツール(CadViewer.startRegularPolygonDrawing、辺数はツール開始時に固定)を
+   * そのまま使うが、確定時に作るエンティティはregularPolygonではなく、頂点を計算済みのpolygon
+   * エンティティにする(regularPolygonVertices()で頂点列を求めcreatePolygonEntity()に渡す)。
+   * こうすることで、既存の辺長寸法ラベル・頂点フィレット/面取り・頂点ごとの数値編集(いずれも
+   * polygonエンティティ前提)がそのまま使える。regularPolygon型自体は後方互換のためmodel/evaluatorに
+   * 残っているが、このツールからは作らない。
+   */
   function handleStartRegularPolygonDrawing() {
     if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
     const sketchId = selectedFeature.id;
     viewerRef.current.startRegularPolygonDrawing(selectedSketchPlane, gridSnap, selectedFeature.entities, polygonSides, {
       onComplete: (center, radius, rotation) => {
-        const entity = createRegularPolygonEntity({ center, radius, sides: polygonSides, rotation });
+        const points = regularPolygonVertices(center, radius, polygonSides, rotation);
+        const entity = createPolygonEntity({ points });
         updateDocument((d) => addSketchEntity(d, sketchId, entity));
         setActiveTool(null);
         setDrawingSketchId(null);
@@ -762,15 +758,6 @@ export default function App() {
         </span>
         <button
           type="button"
-          data-testid="btn-draw-polygon"
-          onClick={activeTool === "line" ? handleCancelDrawing : handleStartLineDrawing}
-          disabled={isToolDisabled("line")}
-          title="クリックで頂点を追加して閉じた多角形を描きます(始点付近クリックまたはEnterで確定、Escでキャンセル)。フィレット/面取りツールの対象にできます"
-        >
-          {activeTool === "line" ? "多角形キャンセル(Esc)" : "多角形"}
-        </button>
-        <button
-          type="button"
           data-testid="btn-draw-segment"
           onClick={activeTool === "segment" ? handleCancelDrawing : handleStartSegmentDrawing}
           disabled={isToolDisabled("segment")}
@@ -778,7 +765,7 @@ export default function App() {
         >
           {activeTool === "segment" ? "線分キャンセル(Esc)" : "線分"}
         </button>
-        {(activeTool === "line" || activeTool === "segment") && (
+        {activeTool === "segment" && (
           <button
             type="button"
             data-testid="btn-toggle-arc-mode"
@@ -812,52 +799,33 @@ export default function App() {
           data-testid="btn-draw-slot"
           onClick={activeTool === "slot" ? handleCancelDrawing : handleStartSlotDrawing}
           disabled={isToolDisabled("slot")}
-          title="2クリックでスロット(長円)を描きます(1点目=中心線の始点、2点目=終点。幅は右の入力欄。Escでキャンセル)"
+          title="3クリックでスロット(長円)を描きます(1点目=中心線の始点、2点目=終点、3点目=幅。Escでキャンセル)"
         >
           {activeTool === "slot" ? "スロットキャンセル(Esc)" : "スロット"}
         </button>
-        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }} title="スロットの全幅(mm)">
-          幅
-          <input
-            type="number"
-            data-testid="slot-width-input"
-            value={slotWidth}
-            min={0.1}
-            step="any"
-            disabled={activeTool === "slot"}
-            onChange={(e) => {
-              const v = Number(e.target.value);
-              if (Number.isFinite(v) && v > 0) setSlotWidth(v);
-            }}
-            style={{ width: 44 }}
-          />
-          mm
-        </label>
         <button
           type="button"
-          data-testid="btn-draw-regular-polygon"
+          data-testid="btn-draw-polygon"
           onClick={activeTool === "regularPolygon" ? handleCancelDrawing : handleStartRegularPolygonDrawing}
           disabled={isToolDisabled("regularPolygon")}
-          title="2クリックで正多角形を描きます(1点目=中心、2点目=頂点位置。辺数は右の入力欄。Escでキャンセル)"
+          title="2クリックで正多角形を描きます(1点目=中心、2点目=頂点位置。辺数は右のセレクタ。Escでキャンセル)。作成後は頂点ごとに個別編集・フィレット/面取りができます"
         >
-          {activeTool === "regularPolygon" ? "正多角形キャンセル(Esc)" : "正多角形"}
+          {activeTool === "regularPolygon" ? "多角形キャンセル(Esc)" : "多角形"}
         </button>
-        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }} title="正多角形の辺数(3〜24)">
+        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }} title="多角形の辺数">
           辺数
-          <input
-            type="number"
-            data-testid="polygon-sides-input"
+          <select
+            data-testid="polygon-sides-select"
             value={polygonSides}
-            min={3}
-            max={24}
-            step={1}
             disabled={activeTool === "regularPolygon"}
-            onChange={(e) => {
-              const v = Math.round(Number(e.target.value));
-              if (Number.isInteger(v) && v >= 3 && v <= 24) setPolygonSides(v);
-            }}
-            style={{ width: 40 }}
-          />
+            onChange={(e) => setPolygonSides(Number(e.target.value))}
+          >
+            {[3, 4, 5, 6, 8].map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
         </label>
         <span
           style={{ display: "flex", gap: 4, alignItems: "center", paddingLeft: 8, borderLeft: "1px solid #444" }}

@@ -12,6 +12,7 @@ import {
   regularPolygonFromCenterVertex,
   regularPolygonVertices,
   slotOutlinePoints,
+  slotWidthFromCursor,
 } from "../sketch/shapeFromPoints";
 import {
   collectSegmentSnapCandidates,
@@ -151,10 +152,17 @@ export interface CircleDrawingCallbacks {
   onCancel: () => void;
 }
 
-/** スロットツール(2クリック)の完了/キャンセル時に呼ばれるコールバック(Phase 17)。 */
+/**
+ * スロットツール(3クリック、Phase 17→Phase 21でSolidWorks式の「始点→終点→幅」操作に変更)の
+ * 完了/キャンセル時に呼ばれるコールバック。
+ */
 export interface SlotDrawingCallbacks {
-  /** 2クリック目で確定したときに呼ばれる(中心線の始点・終点、ローカル2D座標、スナップ適用済み)。widthはツール開始時に固定済みのため呼び出し側が把握している。 */
-  onComplete: (start: [number, number], end: [number, number]) => void;
+  /**
+   * 3クリック目(幅確定)で確定したときに呼ばれる(中心線の始点・終点・全幅、ローカル2D座標/mm、
+   * スナップ適用済み)。widthは1クリック目・2クリック目確定後のマウス移動でカーソルの中心線からの
+   * 垂直距離×2として継続的にプレビューされ、3クリック目の時点の値が渡される(Phase 21)。
+   */
+  onComplete: (start: [number, number], end: [number, number], width: number) => void;
   /** Escapeキーまたはcancel呼び出しで中断したときに呼ばれる(1クリック目前でも呼ばれうる)。 */
   onCancel: () => void;
 }
@@ -272,6 +280,13 @@ declare global {
       projectPoint: (world: Tuple3) => { x: number; y: number } | null;
       /** 寸法ツール中、直近のホバーでヒットしたentity対象の種別(ヒット無しはnull、開発ビルド限定、E2E用、Phase 21)。 */
       dimensionHoverEntityKind: () => EntityDimensionHit["kind"] | null;
+      /**
+       * 描画モード中(polygon/segment/rectangle/circle/slot/regularPolygon)の確定済み頂点列
+       * (ローカル2D、スナップ・軸ロック適用済み)のスナップショットを返す(開発ビルド限定、E2E用、
+       * Phase 21)。線分ツールのスナップ・軸ロックの結果を、確定(finish)前に検証するために使う
+       * (segmentsは確定後の座標編集UIを持たないため)。非アクティブ時は空配列。
+       */
+      drawingPointsSnapshot: () => [number, number][];
     };
   }
 }
@@ -570,8 +585,12 @@ export class CadViewer {
   private segmentCallbacks: SegmentDrawingCallbacks | null = null;
   /** 描画対象スケッチの既存segments(Phase 19b)。segmentツールのスナップ候補収集元として使う。 */
   private drawingSegments: SketchSegment[] = [];
-  /** スロットツール開始時に固定した全幅(mm、Phase 17)。プレビュー描画にのみ使う(確定値はApp側が把握)。 */
-  private drawingSlotWidth = 10;
+  /**
+   * スロットツールの現在の全幅プレビュー値(mm、Phase 17→Phase 21で「3クリック目確定前に
+   * カーソルの中心線からの垂直距離×2として継続更新される値」に変更)。始点・終点の2点が
+   * まだ確定していない間は未使用(0のまま)。
+   */
+  private drawingSlotWidth = 0;
   /** 正多角形ツール開始時に固定した辺数(Phase 17)。プレビュー描画にのみ使う。 */
   private drawingPolygonSides = 6;
   /**
@@ -758,6 +777,7 @@ export class CadViewer {
         gridVisible: () => this.sketchGridBuilt && this.sketchOverlayGroup.visible,
         projectPoint: (world) => this.projectPoint(world),
         dimensionHoverEntityKind: () => this.dimensionHoverEntityHit?.kind ?? null,
+        drawingPointsSnapshot: () => this.drawingPoints.map((p): [number, number] => [p[0], p[1]]),
       };
     }
   }
@@ -925,6 +945,8 @@ export class CadViewer {
         this.handlePolygonClick(event);
       } else if (this.drawingShape === "segment") {
         this.handleSegmentClick(event);
+      } else if (this.drawingShape === "slot") {
+        this.handleSlotClick(event);
       } else {
         this.handleShapeClick(event);
       }
@@ -1472,19 +1494,15 @@ export class CadViewer {
   }
 
   /**
-   * スロットツール(2クリック)を開始する(Phase 17)。1クリック目で中心線の始点を確定、
-   * マウス移動でスロット(直線+半円キャップ)のラバーバンドプレビュー、2クリック目で終点を確定して
-   * onCompleteが呼ばれる。widthはツール開始時に固定する(プレビュー描画にのみ使う)。
+   * スロットツール(3クリック、Phase 17→Phase 21でSolidWorks式に変更)を開始する。
+   * 1クリック目で中心線の始点を確定、2クリック目で終点を確定(長さ・向きが決まり、この間は
+   * ラバーバンドで中心線のみプレビューする)、その後のマウス移動でカーソルの中心線からの
+   * 垂直距離×2を幅としてスロット輪郭をライブプレビューし、3クリック目で幅を確定して
+   * onCompleteが呼ばれる(handleSlotClick/updateShapePreview参照)。
    */
-  startSlotDrawing(
-    basis: PlaneBasis,
-    snap: boolean,
-    existingEntities: SketchEntity[],
-    width: number,
-    callbacks: SlotDrawingCallbacks,
-  ) {
+  startSlotDrawing(basis: PlaneBasis, snap: boolean, existingEntities: SketchEntity[], callbacks: SlotDrawingCallbacks) {
     this.beginDrawing("slot", basis, snap, existingEntities);
-    this.drawingSlotWidth = width;
+    this.drawingSlotWidth = 0;
     this.slotCallbacks = callbacks;
   }
 
@@ -2021,8 +2039,10 @@ export class CadViewer {
   }
 
   /**
-   * 矩形/円/スロット/正多角形ツールの2クリック目を確定する(onCompleteが呼ばれる)。始点と終点が
-   * 実質同一点(縮退)の場合は無視して描画モードを継続する(誤クリックで幅・高さ0の図形ができるのを防ぐ)。
+   * 矩形/円/正多角形ツールの2クリック目を確定する(onCompleteが呼ばれる。スロットツールは
+   * Phase 21から3クリック制の専用フローhandleSlotClick()を使うためここでは扱わない)。
+   * 始点と終点が実質同一点(縮退)の場合は無視して描画モードを継続する
+   * (誤クリックで幅・高さ0の図形ができるのを防ぐ)。
    */
   private finishShapeDrawing(first: [number, number], second: [number, number]) {
     if (Math.hypot(second[0] - first[0], second[1] - first[1]) < 1e-6) return;
@@ -2035,10 +2055,6 @@ export class CadViewer {
       const radius = circleRadiusFromPoints(first, second);
       this.exitDrawingState();
       callbacks?.onComplete(first, radius);
-    } else if (this.drawingShape === "slot") {
-      const callbacks = this.slotCallbacks;
-      this.exitDrawingState();
-      callbacks?.onComplete(first, second);
     } else if (this.drawingShape === "regularPolygon") {
       const callbacks = this.regularPolygonCallbacks;
       const { radius, rotation } = regularPolygonFromCenterVertex(first, second);
@@ -2093,6 +2109,51 @@ export class CadViewer {
       return;
     }
     this.finishShapeDrawing(this.drawingPoints[0], resolved.point);
+  }
+
+  /**
+   * スロットツール(3クリック、Phase 21)のクリック処理。
+   * 1クリック目: 中心線の始点を確定する(drawingPoints=[start])。
+   * 2クリック目: 中心線の終点を確定する(drawingPoints=[start,end]。始点と実質同一点(縮退)なら
+   * 無視して継続する)。この時点ではまだonCompleteを呼ばない(幅が未確定のため)。
+   * 3クリック目: drawingPointsが既に2点(start,end確定済み)の状態でのクリック。その時点の
+   * カーソル位置から幅(slotWidthFromCursor、中心線からの垂直距離×2)を計算して確定する
+   * (幅が実質0(縮退)なら無視して継続する)。
+   */
+  private handleSlotClick(event: MouseEvent) {
+    if (!this.drawingBasis) return;
+    const basis = this.drawingBasis;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+
+    const hit = this.raycastDrawingPlane(basis, px, py, rect);
+    if (!hit) return;
+    const resolved = this.resolveDrawingCursor(basis, hit, event.shiftKey);
+
+    if (this.drawingPoints.length === 0) {
+      this.drawingPoints.push(resolved.point);
+      this.updateDrawingPreview();
+      this.updateShapeCoordOverlay(px, py, null, resolved.point);
+      return;
+    }
+
+    if (this.drawingPoints.length === 1) {
+      const start = this.drawingPoints[0];
+      if (Math.hypot(resolved.point[0] - start[0], resolved.point[1] - start[1]) < 1e-6) return;
+      this.drawingPoints.push(resolved.point);
+      this.drawingSlotWidth = 0;
+      this.updateDrawingPreview();
+      this.updateShapeCoordOverlay(px, py, start, resolved.point);
+      return;
+    }
+
+    const [start, end] = this.drawingPoints;
+    const width = slotWidthFromCursor(start, end, resolved.point);
+    if (width < 1e-6) return;
+    const callbacks = this.slotCallbacks;
+    this.exitDrawingState();
+    callbacks?.onComplete(start, end, width);
   }
 
   /**
@@ -2481,9 +2542,10 @@ export class CadViewer {
   }
 
   /**
-   * 矩形/円/スロット/正多角形ツール(2クリック)のプレビュー(Phase 14/17)。1クリック目
-   * (drawingPoints[0])がまだ無ければスナップマーカーのみ、あればコーナー1/中心からhoverまでの
-   * 破線ループ(スロットは非ループの輪郭だが同じヘルパーで閉じても実害無いため流用)を描く。
+   * 矩形/円/スロット/正多角形ツールのプレビュー(Phase 14/17、スロットはPhase 21で3クリック制に変更)。
+   * 1クリック目(drawingPoints[0])がまだ無ければスナップマーカーのみ、あればコーナー1/中心から
+   * hoverまでの破線ループ(スロットの中心線決定中は非ループの直線、幅決定中は輪郭。同じヘルパーで
+   * 閉じても実害無いため流用)を描く。
    */
   private updateShapePreview(hover?: { local: [number, number]; snapKind: SnapKind | null; axis: AxisLockKind }) {
     const basis = this.drawingBasis;
@@ -2497,7 +2559,15 @@ export class CadViewer {
       } else if (this.drawingShape === "circle") {
         localPoints = circleLocalPoints(first, circleRadiusFromPoints(first, hover.local), CIRCLE_SEGMENTS);
       } else if (this.drawingShape === "slot") {
-        localPoints = slotOutlinePoints(first, hover.local, this.drawingSlotWidth);
+        if (this.drawingPoints.length === 1) {
+          // 始点→終点決定中(Phase 21): 幅はまだ未確定のため中心線のラバーバンドのみ表示する。
+          localPoints = [first, hover.local];
+        } else {
+          // 終点確定済み(Phase 21): カーソルの中心線からの垂直距離×2を幅としてスロット輪郭を表示する。
+          const end = this.drawingPoints[1];
+          this.drawingSlotWidth = slotWidthFromCursor(first, end, hover.local);
+          localPoints = slotOutlinePoints(first, end, this.drawingSlotWidth);
+        }
       } else {
         const { radius, rotation } = regularPolygonFromCenterVertex(first, hover.local);
         localPoints = regularPolygonVertices(first, radius, this.drawingPolygonSides, rotation);
@@ -2537,9 +2607,10 @@ export class CadViewer {
   }
 
   /**
-   * 矩形/円/スロット/正多角形ツール(2クリック)のカーソル付近ライブ表示(Phase 14/17)。
-   * 1クリック目前はローカル座標のみ、1クリック目後は矩形なら「幅×高さ」、円なら「R半径」、
-   * スロットなら「L長さ(幅固定)」、正多角形なら「R半径(辺数固定)」を表示する。
+   * 矩形/円/スロット/正多角形ツールのカーソル付近ライブ表示(Phase 14/17、スロットはPhase 21で
+   * 3クリック制に変更)。1クリック目前はローカル座標のみ、1クリック目後は矩形なら「幅×高さ」、
+   * 円なら「R半径」、スロットは始点→終点決定中なら「L長さ(幅は次のクリックで確定)」・
+   * 終点確定後(幅決定中)なら「L長さ×W幅(ライブ)」、正多角形なら「R半径(辺数固定)」を表示する。
    */
   private updateShapeCoordOverlay(px: number, py: number, first: [number, number] | null, current: [number, number]) {
     let text: string;
@@ -2552,8 +2623,14 @@ export class CadViewer {
     } else if (this.drawingShape === "circle") {
       text = `R${circleRadiusFromPoints(first, current).toFixed(1)} mm`;
     } else if (this.drawingShape === "slot") {
-      const len = circleRadiusFromPoints(first, current);
-      text = `L${len.toFixed(1)} × W${this.drawingSlotWidth.toFixed(1)} mm`;
+      if (this.drawingPoints.length === 1) {
+        const len = circleRadiusFromPoints(first, current);
+        text = `L${len.toFixed(1)} mm(次のクリックで幅を確定)`;
+      } else {
+        const end = this.drawingPoints[1];
+        const len = circleRadiusFromPoints(first, end);
+        text = `L${len.toFixed(1)} × W${this.drawingSlotWidth.toFixed(1)} mm`;
+      }
     } else {
       const { radius } = regularPolygonFromCenterVertex(first, current);
       text = `${this.drawingPolygonSides}角形 R${radius.toFixed(1)} mm`;

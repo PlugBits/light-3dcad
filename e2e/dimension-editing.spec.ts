@@ -1,9 +1,24 @@
-// Phase 10: 寸法駆動編集のE2E。
-// ①線描画モードで多角形を描く→寸法ラベルをクリック→長さを変更→頂点座標が再計算されることを検証。
-// ②線描画モード中に数字キー入力+Enterで、指定長の辺を引けることを検証(頂点編集パネルの値で確認)。
-import { expect, test } from "@playwright/test";
+// Phase 10: 寸法駆動編集のE2E(Phase 21で自由描画の「多角形」ツールが廃止されたため、
+// テストシナリオを更新した)。
+// ①多角形ツール(Phase 21で「正多角形」から改名、2クリックで頂点を計算したpolygonエンティティを
+//   作る)で正方形を描く→寸法ラベルをクリック→長さを変更→頂点座標が再計算されることを検証。
+// ②線分ツール(自由な線分・円弧チェーン作図)中に数字キー入力+Enterで、指定長の辺を引けることを
+//   window.__cadViewerDebug.drawingPointsSnapshot()(Phase 21で追加。segmentsは頂点編集UIを
+//   持たないため)で検証。
+import { expect, type Locator, test } from "@playwright/test";
 
 import { collectPageErrors, screenPointForWorld, waitForReady } from "./helpers";
+
+/**
+ * 数値入力欄(input[type=number])の値を誤差許容付きで検証する。
+ * 多角形ツールは中心・頂点クリックからatan2/cos/sinで頂点座標を逆算するため、"きれいな"整数を
+ * クリックしても浮動小数点誤差(例: 10.000000000000002)で厳密な文字列一致が崩れうる
+ * (toHaveValueは文字列完全一致のため使えない)。
+ */
+async function expectNumClose(locator: Locator, expected: number, precision = 6) {
+  const raw = await locator.inputValue();
+  expect(Number(raw)).toBeCloseTo(expected, precision);
+}
 
 test("寸法ラベルをクリックして長さを変更すると、始点を固定したまま終点が再計算される", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
@@ -17,28 +32,26 @@ test("寸法ラベルをクリックして長さを変更すると、始点を�
   await waitForReady(page);
 
   await page.getByTestId("btn-align-to-plane").click();
+  // 辺数4(正方形)にしてから、中心(0,0)→頂点(10,10)の2クリックで描く。
+  // regularPolygonVertices()の角度基準(atan2)により、この頂点は45°方向の頂点(10,10)になり、
+  // 4頂点は軸に平行な正方形(10,10)/(-10,10)/(-10,-10)/(10,-10)になる(辺は45°刻みではなく
+  // 軸平行になる、中心からの「頂点位置」基準で作図するツールの性質上こうなる)。
+  await page.getByTestId("polygon-sides-select").selectOption("4");
   await page.getByTestId("btn-draw-polygon").click();
   await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形キャンセル(Esc)");
 
-  // 一辺20mmの正方形を描く(辺0は頂点0(-10,-10)→頂点1(10,-10)の水平な下辺)。
-  const corners: [number, number, number][] = [
-    [-10, -10, 0],
-    [10, -10, 0],
-    [10, 10, 0],
-    [-10, 10, 0],
-  ];
-  for (const corner of corners) {
-    const pt = await screenPointForWorld(page, corner);
-    await page.mouse.click(pt.x, pt.y);
-  }
-  const start = await screenPointForWorld(page, corners[0]);
-  await page.mouse.click(start.x + 2, start.y + 2);
+  const center = await screenPointForWorld(page, [0, 0, 0]);
+  await page.mouse.click(center.x, center.y);
+  const vertex = await screenPointForWorld(page, [10, 10, 0]);
+  await page.mouse.click(vertex.x, vertex.y);
   await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形");
 
-  await expect(page.getByTestId("entity-polygon-0-vertex-0-x")).toHaveValue("-10");
-  await expect(page.getByTestId("entity-polygon-0-vertex-1-x")).toHaveValue("10");
+  await expectNumClose(page.getByTestId("entity-polygon-0-vertex-0-x"), 10);
+  await expectNumClose(page.getByTestId("entity-polygon-0-vertex-0-y"), 10);
+  await expectNumClose(page.getByTestId("entity-polygon-0-vertex-1-x"), -10);
+  await expectNumClose(page.getByTestId("entity-polygon-0-vertex-1-y"), 10);
 
-  // 辺0(下辺、水平)の寸法ラベルをクリックして編集ポップアップを開く。
+  // 辺0(頂点0→頂点1、水平・長さ20・-X方向=角度180°)の寸法ラベルをクリックして編集ポップアップを開く。
   const edgeLabel = page.locator('[data-testid^="dim-label-"][data-testid$="-0"]');
   await expect(edgeLabel).toBeVisible();
   await expect(edgeLabel).toHaveText("20.0");
@@ -46,28 +59,28 @@ test("寸法ラベルをクリックして長さを変更すると、始点を�
 
   const popup = page.getByTestId("dim-edit-popup");
   await expect(popup).toBeVisible();
-  await expect(page.getByTestId("dim-edit-angle")).toHaveValue("0.00");
+  await expect(page.getByTestId("dim-edit-angle")).toHaveValue("180.00");
 
-  // 長さのみ50に変更する(角度欄は初期値0.00のまま=水平を維持)。
+  // 長さのみ50に変更する(角度欄は初期値180.00のまま=水平を維持)。
   await page.getByTestId("dim-edit-length").fill("50");
   await page.getByTestId("dim-edit-apply").click();
   await expect(popup).toHaveCount(0);
 
   await waitForReady(page);
 
-  // 始点(頂点0)は固定のまま、終点(頂点1)のみが水平方向に50mm先へ移動している。
-  await expect(page.getByTestId("entity-polygon-0-vertex-0-x")).toHaveValue("-10");
-  await expect(page.getByTestId("entity-polygon-0-vertex-0-y")).toHaveValue("-10");
-  await expect(page.getByTestId("entity-polygon-0-vertex-1-x")).toHaveValue("40");
-  await expect(page.getByTestId("entity-polygon-0-vertex-1-y")).toHaveValue("-10");
+  // 始点(頂点0)は固定のまま、終点(頂点1)のみが-X方向に50mm先(10-50=-40)へ移動している。
+  await expectNumClose(page.getByTestId("entity-polygon-0-vertex-0-x"), 10);
+  await expectNumClose(page.getByTestId("entity-polygon-0-vertex-0-y"), 10);
+  await expectNumClose(page.getByTestId("entity-polygon-0-vertex-1-x"), -40);
+  await expectNumClose(page.getByTestId("entity-polygon-0-vertex-1-y"), 10);
   // 後続の頂点(始点でも今回の終点でもない)は変更されない。
-  await expect(page.getByTestId("entity-polygon-0-vertex-2-x")).toHaveValue("10");
-  await expect(page.getByTestId("entity-polygon-0-vertex-2-y")).toHaveValue("10");
+  await expectNumClose(page.getByTestId("entity-polygon-0-vertex-2-x"), -10);
+  await expectNumClose(page.getByTestId("entity-polygon-0-vertex-2-y"), -10);
 
   expect(pageErrors).toEqual([]);
 });
 
-test("線描画モード中に数字キー入力+Enterで指定長の辺を引ける", async ({ page }) => {
+test("線分ツール中に数字キー入力+Enterで指定長の辺を引ける", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
 
   await page.goto("/");
@@ -78,8 +91,8 @@ test("線描画モード中に数字キー入力+Enterで指定長の辺を引�
   await waitForReady(page);
 
   await page.getByTestId("btn-align-to-plane").click();
-  await page.getByTestId("btn-draw-polygon").click();
-  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形キャンセル(Esc)");
+  await page.getByTestId("btn-draw-segment").click();
+  await expect(page.getByTestId("btn-draw-segment")).toHaveText("線分キャンセル(Esc)");
 
   // 1頂点目: 原点付近をクリックする(原点スナップにより厳密に(0,0)になる)。
   const p0 = await screenPointForWorld(page, [0.3, -0.2, 0]);
@@ -100,20 +113,17 @@ test("線描画モード中に数字キー入力+Enterで指定長の辺を引�
   await page.keyboard.press("Enter");
   await expect(page.getByTestId("drawing-length-input")).toBeHidden();
 
-  // 3・4頂点目を追加して閉じる(3点以上必要なため)。
-  const p2 = await screenPointForWorld(page, [30, 30, 0]);
-  await page.mouse.click(p2.x, p2.y);
-  const p3 = await screenPointForWorld(page, [0, 30, 0]);
-  await page.mouse.click(p3.x, p3.y);
-  const start = await screenPointForWorld(page, [0, 0, 0]);
-  await page.mouse.click(start.x + 2, start.y + 2);
-  await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形");
-
-  await expect(page.getByTestId("entity-polygon-0-vertex-0-x")).toHaveValue("0");
-  await expect(page.getByTestId("entity-polygon-0-vertex-0-y")).toHaveValue("0");
+  const points = await page.evaluate(() => window.__cadViewerDebug?.drawingPointsSnapshot() ?? []);
+  expect(points).toHaveLength(2);
+  expect(points[0][0]).toBe(0);
+  expect(points[0][1]).toBe(0);
   // 数値入力で確定した頂点: 直前点(0,0)から水平方向へ厳密に30mm。
-  await expect(page.getByTestId("entity-polygon-0-vertex-1-x")).toHaveValue("30");
-  await expect(page.getByTestId("entity-polygon-0-vertex-1-y")).toHaveValue("0");
+  expect(points[1][0]).toBe(30);
+  expect(points[1][1]).toBe(0);
+
+  // 後始末: Escでキャンセルし、segmentsを確定しない。
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("btn-draw-segment")).toHaveText("線分");
 
   expect(pageErrors).toEqual([]);
 });

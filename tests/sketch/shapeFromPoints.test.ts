@@ -9,6 +9,7 @@ import {
   regularPolygonFromCenterVertex,
   regularPolygonVertices,
   slotOutlinePoints,
+  slotWidthFromCursor,
 } from "../../src/sketch/shapeFromPoints";
 
 describe("rectangleFromCorners", () => {
@@ -75,5 +76,27 @@ describe("slotOutlinePoints", () => {
         expect(Math.hypot(x - capCenterX, y)).toBeCloseTo(3, 3);
       }
     }
+  });
+});
+
+describe("slotWidthFromCursor", () => {
+  it("水平な中心線からカーソルの垂直距離×2を幅として返す", () => {
+    expect(slotWidthFromCursor([-10, 0], [10, 0], [0, 3])).toBeCloseTo(6, 6);
+  });
+
+  it("中心線の反対側(負のY)にカーソルがあっても正の幅を返す(絶対値)", () => {
+    expect(slotWidthFromCursor([-10, 0], [10, 0], [0, -4])).toBeCloseTo(8, 6);
+  });
+
+  it("垂直な中心線でも正しく垂直距離を求める", () => {
+    expect(slotWidthFromCursor([0, -10], [0, 10], [5, 0])).toBeCloseTo(10, 6);
+  });
+
+  it("中心線ちょうど上のカーソルは幅0を返す", () => {
+    expect(slotWidthFromCursor([-10, 0], [10, 0], [3, 0])).toBeCloseTo(0, 6);
+  });
+
+  it("始点と終点が同一(縮退)でもフォールバック法線([0,1])で例外を投げず計算する", () => {
+    expect(slotWidthFromCursor([5, 5], [5, 5], [5, 8])).toBeCloseTo(6, 6);
   });
 });

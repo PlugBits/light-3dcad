@@ -1,15 +1,19 @@
-// 線描画モード(Phase 8)のE2E: 新規スケッチ→平面に正対→線描画モードで矩形を4クリック+
-// 始点付近クリックで確定→押し出し追加、までを一気通貫で検証する。
+// 多角形ツール(Phase 8で導入、Phase 21で「正多角形」から改名・仕様変更)のE2E。
+// Phase 21より前は自由な頂点列クリックで閉多角形を描く専用ツールだったが、フリー描画は
+// 「線分」ツール(Phase 19b、segments)に一本化され、「多角形」ボタンは2クリック(中心→頂点、
+// 辺数セレクタで固定)の正多角形作図に変わった。作成されるエンティティは引き続きpolygon
+// (頂点を計算済み、regularPolygonではない)なので、既存の頂点編集・フィレット/面取りUIが
+// そのまま使える。
 // 初期ドキュメントには既にNew Bodyの押し出し(Extrude1)がある(Phase 13以降、押し出し追加時の
 // デフォルトoperationはボディの有無に応じて自動的に"add"になるため、この時点ではエラーにならない)。
 // 新規スケッチの押し出しは最終的にCut(初期ボックスをZ方向に貫通させる穴)にする
 // (sketchPlanesはWorkerの直近の評価成功時のものが保持され続けるため、ドキュメントを常に
-// 評価成功する状態に保っておかないと「平面に正対」「線描画」ボタンが有効化されない)。
+// 評価成功する状態に保っておかないと「平面に正対」「多角形」ボタンが有効化されない)。
 import { expect, test } from "@playwright/test";
 
 import { collectPageErrors, screenPointForWorld, waitForReady, waitForStatus } from "./helpers";
 
-test("線描画モードでクリックして矩形を描き、閉じて押し出し(Cut)できる", async ({ page }) => {
+test("多角形ツールで正六角形を描き、押し出し(Cut)できる", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
 
   await page.goto("/");
@@ -21,32 +25,24 @@ test("線描画モードでクリックして矩形を描き、閉じて押し�
   await expect(page.getByTestId("feature-item-Sketch2")).toBeVisible();
   await waitForReady(page);
 
-  // 平面に正対してから線描画モードに入る。
+  // 平面に正対してから多角形ツールに入る(既定の辺数6のまま)。
   await page.getByTestId("btn-align-to-plane").click();
+  await expect(page.getByTestId("polygon-sides-select")).toHaveValue("6");
   await page.getByTestId("btn-draw-polygon").click();
   await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形キャンセル(Esc)");
 
-  // 一辺20mmの正方形(4頂点、初期ボックスの60x40の範囲内)をクリックで描く。
-  // 1mmスナップはデフォルトONのまま。
-  const corners: [number, number, number][] = [
-    [-10, -10, 0],
-    [10, -10, 0],
-    [10, 10, 0],
-    [-10, 10, 0],
-  ];
-  for (const corner of corners) {
-    const pt = await screenPointForWorld(page, corner);
-    await page.mouse.click(pt.x, pt.y);
-  }
-
-  // 始点付近(数px以内)をクリックして閉じる。5クリック目で確定し、描画モードを抜ける。
-  const start = await screenPointForWorld(page, corners[0]);
-  await page.mouse.click(start.x + 2, start.y + 2);
+  // 中心(0,0)→頂点(10,0)の2クリックで外接円半径10mmの正六角形を描く。
+  const center = await screenPointForWorld(page, [0, 0, 0]);
+  await page.mouse.click(center.x, center.y);
+  const vertex = await screenPointForWorld(page, [10, 0, 0]);
+  await page.mouse.click(vertex.x, vertex.y);
   await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形");
 
-  // 多角形エンティティがスケッチ編集パネルに反映されている(頂点4点)。
-  await expect(page.getByTestId("entity-polygon-0-vertex-0-x")).toHaveValue("-10");
-  await expect(page.getByTestId("entity-polygon-0-vertex-2-y")).toHaveValue("10");
+  // polygonエンティティ(regularPolygonではない)としてスケッチ編集パネルに反映され、
+  // 頂点ごとの数値編集フィールド(6頂点)が使える。
+  await expect(page.getByTestId("entity-polygon-0-vertex-0-x")).toHaveValue("10");
+  await expect(page.getByTestId("entity-polygon-0-vertex-0-y")).toHaveValue("0");
+  await expect(page.locator('[data-testid^="entity-polygon-0-vertex-"][data-testid$="-x"]')).toHaveCount(6);
 
   // 押し出し追加(既にボディが存在するためデフォルトoperationは"add"であり、直ちに評価が成功する。Phase 13)。
   await page.getByTestId("btn-add-extrude").click();
@@ -73,24 +69,17 @@ test("多角形の頂点にフィレットを設定すると、エラーなく�
   await waitForReady(page);
 
   await page.getByTestId("btn-align-to-plane").click();
+  // 辺数を4(正方形)に変更してから描く。
+  await page.getByTestId("polygon-sides-select").selectOption("4");
   await page.getByTestId("btn-draw-polygon").click();
   await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形キャンセル(Esc)");
 
-  // 一辺20mmの正方形(4頂点)をクリックで描く。
-  const corners: [number, number, number][] = [
-    [-10, -10, 0],
-    [10, -10, 0],
-    [10, 10, 0],
-    [-10, 10, 0],
-  ];
-  for (const corner of corners) {
-    const pt = await screenPointForWorld(page, corner);
-    await page.mouse.click(pt.x, pt.y);
-  }
-  const start = await screenPointForWorld(page, corners[0]);
-  await page.mouse.click(start.x + 2, start.y + 2);
+  const center = await screenPointForWorld(page, [0, 0, 0]);
+  await page.mouse.click(center.x, center.y);
+  const vertex = await screenPointForWorld(page, [10, 0, 0]);
+  await page.mouse.click(vertex.x, vertex.y);
   await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形");
-  await expect(page.getByTestId("entity-polygon-0-vertex-0-x")).toHaveValue("-10");
+  await expect(page.locator('[data-testid^="entity-polygon-0-vertex-"][data-testid$="-x"]')).toHaveCount(4);
 
   // 頂点0にフィレット(サイズ5)を設定する。
   await page.getByTestId("entity-polygon-0-vertex-0-corner-kind").selectOption("fillet");
@@ -111,7 +100,7 @@ test("多角形の頂点にフィレットを設定すると、エラーなく�
   expect(pageErrors).toEqual([]);
 });
 
-test("Escキーで描画中の頂点列を破棄してモードを終了できる", async ({ page }) => {
+test("Escキーで描画中の多角形ツールを中断してモードを終了できる", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
 
   await page.goto("/");
@@ -122,13 +111,14 @@ test("Escキーで描画中の頂点列を破棄してモードを終了でき�
   await page.getByTestId("btn-draw-polygon").click();
   await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形キャンセル(Esc)");
 
+  // 1クリック目(中心)のみ入力した状態でEscする。
   const pt = await screenPointForWorld(page, [5, 5, 0]);
   await page.mouse.click(pt.x, pt.y);
 
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("btn-draw-polygon")).toHaveText("多角形");
 
-  // 頂点1点のみでキャンセルしたため、多角形エンティティは追加されていない。
+  // 1クリックのみでキャンセルしたため、多角形エンティティは追加されていない。
   await expect(page.locator('[data-testid^="entity-polygon-"]')).toHaveCount(0);
   // ドキュメントは変更されていないため再評価も走っておらず、既にready状態のまま。
   await waitForStatus(page, "ready");

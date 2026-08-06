@@ -70,6 +70,24 @@ export function slotAxisNormal(start: [number, number], end: [number, number]): 
 }
 
 /**
+ * 中心線(start→end)からcursorまでの垂直距離×2、すなわちカーソル位置に追従させるスロットの
+ * 全幅を返す(Phase 21: スロットツールをSolidWorks式の「始点→終点→幅」の3クリック操作に変更した際、
+ * 3クリック目(幅確定)のプレビュー計算・確定計算の両方に使う)。cursorが中心線のどちら側にあっても
+ * 符号を無視した絶対値(常に正の幅)を返す。start===endの場合はslotAxisNormalのフォールバック
+ * ([0,1])を使ってcursorのY成分の差分で計算する(縮退時も例外を投げない)。
+ */
+export function slotWidthFromCursor(
+  start: [number, number],
+  end: [number, number],
+  cursor: [number, number],
+): number {
+  const n = slotAxisNormal(start, end);
+  const dx = cursor[0] - start[0];
+  const dy = cursor[1] - start[1];
+  return Math.abs(dx * n[0] + dy * n[1]) * 2;
+}
+
+/**
  * 直線スロット(中心線start→end、全幅width)の輪郭(閉ループ、両端は半円キャップ)を
  * ポリライン近似で返す(Phase 17)。evaluatorが実際のB-Rep形状を作る際に使うbulgeArcTo(±1)と
  * 同じ弧の定義(src/sketch/bulge.ts)を使うため、オーバーレイと実形状が一致する。
