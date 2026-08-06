@@ -476,3 +476,17 @@ Vitest243件(ソルバ17件[長さ/水平/垂直/coincident伝播/矩形4辺リ�
 の既存9件は無修正で全通過、evaluator統合に新規1件[矩形20x20+円r10のタンジェント回帰]、ドーナツ
 面数比較を実装変更に追従させ円柱面カウント方式に更新)。ブラウザ確認: SketchEditorの「矩形/円を
 数値で追加」既定値の組み合わせで穴が正しく貫通することを確認(修正前は無変化の直方体だった)。
+
+項目2(寸法ツールの対象拡大+ホバー強調)を実装。寸法ツール(Phase 20b、`CadViewer.startDimensionTool`)は
+segments(自由な線分・円弧)のみがヒット判定対象で、rectangle/circleのようなraw entityは対象外
+だった。新設`src/sketch/entityDimensionPick.ts`(純TS、Vitest9件)の`findEntityDimensionHit()`が
+circleの円周・rectangleの4辺(上下=幅、左右=高さ)への最短距離でヒット判定する。`DimensionToolTarget`に
+`entity-radius`/`entity-width`/`entity-height`を追加し、ヒット時は拘束を経由せずApp.tsx側で
+`updateSketchEntity()`によりentityのradius/width/heightを直接更新する(ソルバ非経由のため
+矛盾巻き戻しの対象外)。ホバー強調は`handleDimensionToolMouseMove`(新設、既存のtrimツールの
+ホバープレビューと同じ`drawingGroup`への一時ライン追加方式)でHOVER_COLORのプレビューを描く形にした
+(セグメント・entityどちらのヒット候補も対象)。ブラウザ確認: 矩形+円のスケッチで寸法ツールを有効化し、
+円周へのホバーでハイライトが表示されること・クリックで半径ポップアップ(既定値がentityの現在半径と
+一致)が開き値変更で実際にradiusが更新されること、矩形の辺のホバー/クリックでも同様に幅/高さが
+更新されることを確認した。既存のsegment系(length/radius/distance)ヒット判定は無修正のロジックの
+まま(entityとの距離比較を追加しただけ)で、既存動作に変化がないことも確認した。

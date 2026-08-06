@@ -6,7 +6,16 @@ import { ExtrudeEditor } from "../components/ExtrudeEditor";
 import { FeatureTree } from "../components/FeatureTree";
 import { SketchEditor } from "../components/SketchEditor";
 import { downloadStl } from "../export/downloadStl";
-import { addSketchEntity, addSketchSegments, findFeature, getDependentFeatureIds, setPolygonVertexCorner, setSketchConstraints, setSketchSegments } from "../model/document";
+import {
+  addSketchEntity,
+  addSketchSegments,
+  findFeature,
+  getDependentFeatureIds,
+  setPolygonVertexCorner,
+  setSketchConstraints,
+  setSketchSegments,
+  updateSketchEntity,
+} from "../model/document";
 import { buildAutoConstraintsForChain } from "../sketch/autoConstraints";
 import {
   createArcSegment,
@@ -247,13 +256,13 @@ export default function App() {
     }
   }, [trimTool, doc, selectedFeatureId]);
 
-  // 寸法ツール中、対象スケッチのsegmentsが変わった場合(拘束適用・アンドゥ等)はヒット判定対象を
-  // 最新化する(Phase 20b)。
+  // 寸法ツール中、対象スケッチのsegments/entitiesが変わった場合(拘束適用・entity直接更新・アンドゥ等)は
+  // ヒット判定対象を最新化する(Phase 20b、Phase 21でentitiesも対象に追加)。
   useEffect(() => {
     if (!dimensionTool) return;
     const feature = selectedFeatureId ? findFeature(doc, selectedFeatureId) : undefined;
     if (feature?.type === "sketch") {
-      viewerRef.current?.updateDimensionToolSegments(feature.segments ?? []);
+      viewerRef.current?.updateDimensionToolTargets(feature.segments ?? [], feature.entities);
     }
   }, [dimensionTool, doc, selectedFeatureId]);
 
@@ -568,18 +577,21 @@ export default function App() {
   }
 
   /**
-   * 寸法ツール(Phase 20b)を開始する。ビューア上でセグメント本体をクリックするとlength/radius、
-   * 端点を2つ順にクリックするとdistanceのヒット対象として`onTargetPicked`が呼ばれ、現在値を
-   * デフォルトにした値入力ポップアップを開く。適用は`handleApplyDimensionTarget`が行う。
+   * 寸法ツール(Phase 20b、Phase 21でrectangle/circleエンティティにも対応)を開始する。
+   * ビューア上でセグメント本体をクリックするとlength/radius、端点を2つ順にクリックするとdistance、
+   * circleの円周・rectangleの辺をクリックするとentity-radius/entity-width/entity-heightの
+   * ヒット対象として`onTargetPicked`が呼ばれ、現在値をデフォルトにした値入力ポップアップを開く。
+   * 適用は`handleApplyDimensionTarget`が行う(entity系は拘束を経由せずentity自身を直接更新する)。
    */
   function handleStartDimensionTool() {
     if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
     const sketchId = selectedFeature.id;
-    viewerRef.current.startDimensionTool(selectedSketchPlane, selectedFeature.segments ?? [], {
+    viewerRef.current.startDimensionTool(selectedSketchPlane, selectedFeature.segments ?? [], selectedFeature.entities, {
       onTargetPicked: (target, screenX, screenY) => {
         const currentDoc = useCadStore.getState().doc;
         const feature = findFeature(currentDoc, sketchId);
         const segments = feature?.type === "sketch" ? (feature.segments ?? []) : [];
+        const entities = feature?.type === "sketch" ? feature.entities : [];
         let titleLabel = "距離 (mm)";
         let initialValue = 0;
         if (target.kind === "length") {
@@ -590,8 +602,17 @@ export default function App() {
           titleLabel = "半径 (mm)";
           const seg = segments.find((s) => s.id === target.segmentId);
           initialValue = (seg && segmentRadius(seg)) ?? 0;
-        } else {
+        } else if (target.kind === "distance") {
           initialValue = distanceBetweenRefs(segments, target.a, target.b) ?? 0;
+        } else if (target.kind === "entity-radius") {
+          titleLabel = "半径 (mm)";
+          const entity = entities.find((e) => e.id === target.entityId);
+          initialValue = entity?.kind === "circle" ? entity.radius : 0;
+        } else {
+          titleLabel = target.kind === "entity-width" ? "幅 (mm)" : "高さ (mm)";
+          const entity = entities.find((e) => e.id === target.entityId);
+          initialValue =
+            entity?.kind === "rectangle" ? (target.kind === "entity-width" ? entity.width : entity.height) : 0;
         }
         setDimensionPopup({ target, titleLabel, initialValue, screen: { x: screenX, y: screenY } });
       },
@@ -616,11 +637,30 @@ export default function App() {
     return !selectedSketchPlane;
   }
 
-  /** 寸法ツールの値入力ポップアップの確定(既存拘束があれば流用、無ければ新規作成)。矛盾したら自動的に巻き戻す。 */
+  /**
+   * 寸法ツールの値入力ポップアップの確定。
+   * segments系(length/radius/distance)は既存拘束があれば流用・無ければ新規作成し、矛盾したら
+   * 自動的に巻き戻す。entity系(entity-radius/entity-width/entity-height、Phase 21)は拘束を
+   * 経由せずrectangle/circleエンティティのradius/width/heightフィールドを直接更新する
+   * (SketchEditorの数値編集と同じ経路。ソルバを経由しないため矛盾巻き戻しの対象外)。
+   */
   function handleApplyDimensionTarget(value: number) {
     if (!dimensionPopup || !selectedFeature || selectedFeature.type !== "sketch") return;
     const sketchId = selectedFeature.id;
     const target = dimensionPopup.target;
+
+    if (target.kind === "entity-radius") {
+      updateDocument((doc) => updateSketchEntity(doc, sketchId, target.entityId, { radius: value }));
+      setDimensionPopup(null);
+      return;
+    }
+    if (target.kind === "entity-width" || target.kind === "entity-height") {
+      const field = target.kind === "entity-width" ? "width" : "height";
+      updateDocument((doc) => updateSketchEntity(doc, sketchId, target.entityId, { [field]: value }));
+      setDimensionPopup(null);
+      return;
+    }
+
     updateDocumentWithConflictRollback(
       sketchId,
       (doc) => {

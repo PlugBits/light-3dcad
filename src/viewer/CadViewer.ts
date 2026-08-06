@@ -4,6 +4,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { FeatureId, PointRef, SketchEntity, SketchSegment } from "../model/types";
 import type { FaceGroup, FaceInfo, MeshData } from "../protocol/messages";
 import { bulgeArcPoints, bulgeFromThreePoints, DEFAULT_BULGE_SEGMENTS } from "../sketch/bulge";
+import { findEntityDimensionHit, type EntityDimensionHit } from "../sketch/entityDimensionPick";
 import { polygonOutlinePoints } from "../sketch/polygonOutline";
 import {
   circleRadiusFromPoints,
@@ -233,11 +234,17 @@ const TRIM_HOVER_TOLERANCE_PX = 16;
  * 「何をクリックしたか」の情報のみを持つ(実際の拘束データ生成・現在値の計算はApp側の責務。
  * src/sketch/constraintDimensions.tsのupsert系関数・segmentLength/segmentRadius/distanceBetweenRefs
  * を使う想定)。
+ * "entity-radius"/"entity-width"/"entity-height"(Phase 21)はrectangle/circleエンティティ本体への
+ * ヒットで、segments系と違い拘束を経由しない(entityIdの示すentityのradius/width/heightフィールドを
+ * 直接更新する。src/sketch/entityDimensionPick.ts参照)。
  */
 export type DimensionToolTarget =
   | { kind: "length"; segmentId: string }
   | { kind: "radius"; segmentId: string }
-  | { kind: "distance"; a: PointRef; b: PointRef };
+  | { kind: "distance"; a: PointRef; b: PointRef }
+  | { kind: "entity-radius"; entityId: string }
+  | { kind: "entity-width"; entityId: string }
+  | { kind: "entity-height"; entityId: string };
 
 /** 寸法ツール(Phase 20b)の開始/終了時に呼ばれるコールバック。 */
 export interface DimensionToolCallbacks {
@@ -263,6 +270,8 @@ declare global {
       gridVisible: () => boolean;
       /** 現在のカメラでワールド座標をcanvas内ピクセル座標に投影する(開発ビルド限定、E2E用)。 */
       projectPoint: (world: Tuple3) => { x: number; y: number } | null;
+      /** 寸法ツール中、直近のホバーでヒットしたentity対象の種別(ヒット無しはnull、開発ビルド限定、E2E用、Phase 21)。 */
+      dimensionHoverEntityKind: () => EntityDimensionHit["kind"] | null;
     };
   }
 }
@@ -626,9 +635,13 @@ export class CadViewer {
   private dimensionToolBasis: PlaneBasis | null = null;
   /** ヒット判定対象のセグメント(対象スケッチのsegments)。 */
   private dimensionToolSegments: SketchSegment[] = [];
+  /** ヒット判定対象のentities(rectangle/circleのみ対象、Phase 21)。 */
+  private dimensionToolEntities: SketchEntity[] = [];
   private dimensionToolCallbacks: DimensionToolCallbacks | null = null;
   /** distance拘束の1点目としてクリック済みの端点(未選択はnull)。2点目のクリックでonTargetPickedを呼ぶ。 */
   private dimensionPendingPoint: PointRef | null = null;
+  /** 直近のホバーでヒットしたentity対象(ハイライト再描画の要否判定・デバッグ用、Phase 21)。ヒット無しはnull。 */
+  private dimensionHoverEntityHit: EntityDimensionHit | null = null;
 
   constructor(
     container: HTMLElement,
@@ -744,6 +757,7 @@ export class CadViewer {
         sketchLineCount: () => this.sketchLineCount,
         gridVisible: () => this.sketchGridBuilt && this.sketchOverlayGroup.visible,
         projectPoint: (world) => this.projectPoint(world),
+        dimensionHoverEntityKind: () => this.dimensionHoverEntityHit?.kind ?? null,
       };
     }
   }
@@ -1022,6 +1036,10 @@ export class CadViewer {
   private handleMouseLeave = () => {
     this.setHoverGroup(null);
     this.setHoveredReferencePlane(null);
+    if (this.dimensionToolActive && !this.dimensionPendingPoint) {
+      this.clearDrawingPreview();
+      this.dimensionHoverEntityHit = null;
+    }
   };
 
   /** 基準平面(XY/XZ/YZ)を60x60mmの半透明四角として構築する(Phase 13)。色分け: XY=青系/XZ=緑系/YZ=赤系。 */
@@ -1728,14 +1746,17 @@ export class CadViewer {
   }
 
   /**
-   * 寸法ツール(Phase 20b)を開始する。既存の線描画モード・フィレット/面取りツール・トリムツール・
-   * 面選択は中断/解除する。以後のクリックは、まず全segmentsの端点をスクリーン距離
-   * DIMENSION_ENDPOINT_TOLERANCE_PX以内で探し(優先)、無ければセグメント本体を
-   * DIMENSION_SEGMENT_TOLERANCE_PX以内で探す。端点を2つ順にクリックするとdistance、
-   * セグメント本体(線分)をクリックするとlength、円弧をクリックするとradiusのターゲットとして
-   * `callbacks.onTargetPicked`が呼ばれる(実際の拘束の作成/更新はApp側の責務)。
+   * 寸法ツール(Phase 20b、Phase 21でrectangle/circleエンティティにも対応)を開始する。
+   * 既存の線描画モード・フィレット/面取りツール・トリムツール・面選択は中断/解除する。
+   * 以後のクリックは、まず全segmentsの端点をスクリーン距離DIMENSION_ENDPOINT_TOLERANCE_PX以内で
+   * 探し(優先)、無ければセグメント本体・entities(rectangle/circle)の境界を合わせて
+   * DIMENSION_SEGMENT_TOLERANCE_PX以内で最も近いものを探す。端点を2つ順にクリックするとdistance、
+   * セグメント本体(線分)をクリックするとlength、円弧をクリックするとradius、circleの円周を
+   * クリックするとentity-radius、rectangleの辺をクリックするとentity-width/entity-heightの
+   * ターゲットとして`callbacks.onTargetPicked`が呼ばれる(実際の拘束の作成/更新・entityの直接更新は
+   * App側の責務)。マウス移動中はヒット候補をホバー色でハイライトする(handleDimensionToolMouseMove)。
    */
-  startDimensionTool(basis: PlaneBasis, segments: SketchSegment[], callbacks: DimensionToolCallbacks) {
+  startDimensionTool(basis: PlaneBasis, segments: SketchSegment[], entities: SketchEntity[], callbacks: DimensionToolCallbacks) {
     this.cancelDimensionTool();
     this.cancelPolygonDrawing();
     this.cancelCornerTool();
@@ -1745,21 +1766,25 @@ export class CadViewer {
     this.dimensionToolActive = true;
     this.dimensionToolBasis = basis;
     this.dimensionToolSegments = segments;
+    this.dimensionToolEntities = entities;
     this.dimensionToolCallbacks = callbacks;
     this.dimensionPendingPoint = null;
+    this.dimensionHoverEntityHit = null;
     this.renderer.domElement.style.cursor = "crosshair";
   }
 
   /**
-   * ヒット判定対象のsegments一覧を更新する(拘束追加・値変更でsegments座標が変わった後、
+   * ヒット判定対象のsegments/entities一覧を更新する(拘束追加・値変更で座標が変わった後、
    * 呼び出し側の最新値を反映するために使う想定)。1点目の保留状態・プレビューはリセットする
    * (更新前のsegmentIdを参照したままにしないため)。ツール非アクティブ時は何もしない。
    */
-  updateDimensionToolSegments(segments: SketchSegment[]) {
+  updateDimensionToolTargets(segments: SketchSegment[], entities: SketchEntity[]) {
     if (!this.dimensionToolActive) return;
     this.dimensionToolSegments = segments;
+    this.dimensionToolEntities = entities;
     this.clearDrawingPreview();
     this.dimensionPendingPoint = null;
+    this.dimensionHoverEntityHit = null;
   }
 
   isDimensionToolActive(): boolean {
@@ -1773,8 +1798,10 @@ export class CadViewer {
     this.dimensionToolActive = false;
     this.dimensionToolBasis = null;
     this.dimensionToolSegments = [];
+    this.dimensionToolEntities = [];
     this.dimensionToolCallbacks = null;
     this.dimensionPendingPoint = null;
+    this.dimensionHoverEntityHit = null;
     this.renderer.domElement.style.cursor = "";
     this.clearDrawingPreview();
     callbacks?.onCancel();
@@ -1793,10 +1820,12 @@ export class CadViewer {
   /**
    * 寸法ツール中のクリック処理。まず全segmentsの端点をスクリーン距離
    * DIMENSION_ENDPOINT_TOLERANCE_PX以内で探索し、最も近いものがあれば端点ヒットとして扱う
-   * (セグメント本体より優先)。1点目のクリックではdimensionPendingPointに保存してマーカー表示のみ、
-   * 2点目のクリック(異なる点)でdistanceターゲットとしてonTargetPickedを呼ぶ。
-   * 端点ヒットが無ければセグメント本体をDIMENSION_SEGMENT_TOLERANCE_PX以内で探し、見つかれば
-   * kindがarcならradius、それ以外はlengthのターゲットとしてonTargetPickedを呼ぶ(保留中の1点目は破棄する)。
+   * (セグメント本体・entitiesより優先)。1点目のクリックではdimensionPendingPointに保存して
+   * マーカー表示のみ、2点目のクリック(異なる点)でdistanceターゲットとしてonTargetPickedを呼ぶ。
+   * 端点ヒットが無ければセグメント本体・entities(rectangle/circle、Phase 21)の境界を合わせて
+   * DIMENSION_SEGMENT_TOLERANCE_PX以内で最も近いものを探し、セグメントがヒットすればkindがarcなら
+   * radius・それ以外はlength、entityがヒットすればentity-radius/entity-width/entity-heightの
+   * ターゲットとしてonTargetPickedを呼ぶ(保留中の1点目は破棄する)。
    */
   private handleDimensionToolClick(event: MouseEvent) {
     if (!this.dimensionToolBasis) return;
@@ -1849,6 +1878,16 @@ export class CadViewer {
         nearestId = seg.id;
       }
     }
+    const entityHit = findEntityDimensionHit(local, this.dimensionToolEntities);
+
+    // セグメントとentityの両方が許容距離内にヒットしうる場合は、より近い方を優先する。
+    if (entityHit && entityHit.dist <= toleranceMm && (nearestId === null || entityHit.dist < nearestDist)) {
+      this.dimensionPendingPoint = null;
+      this.clearDrawingPreview();
+      this.dimensionToolCallbacks?.onTargetPicked({ kind: entityHit.kind, entityId: entityHit.entityId }, px, py);
+      return;
+    }
+
     if (nearestId === null || nearestDist > toleranceMm) return;
 
     this.dimensionPendingPoint = null;
@@ -1859,6 +1898,66 @@ export class CadViewer {
       this.dimensionToolCallbacks?.onTargetPicked({ kind: "radius", segmentId: nearestId }, px, py);
     } else {
       this.dimensionToolCallbacks?.onTargetPicked({ kind: "length", segmentId: nearestId }, px, py);
+    }
+  }
+
+  /** 寸法ツールのヒット候補(セグメント・entity)をホバー色でプレビュー表示する(Phase 21)。 */
+  private drawDimensionHoverPreview(basis: PlaneBasis, localPoints: [number, number][]) {
+    const worldPts = localPoints.map(([u, v]) => planeLocalToWorld(basis, u, v));
+    const positions = new Float32Array(worldPts.length * 3);
+    worldPts.forEach((p, i) => positions.set(p, i * 3));
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    const material = new THREE.LineBasicMaterial({ color: HOVER_COLOR, linewidth: 3, depthTest: false });
+    const line = new THREE.Line(geometry, material);
+    line.renderOrder = DRAWING_FEEDBACK_RENDER_ORDER + 2;
+    this.drawingGroup.add(line);
+    this.drawingPreviewGeometries.push(geometry);
+    this.drawingPreviewMaterials.push(material);
+  }
+
+  /**
+   * 寸法ツール中のマウス移動処理(Phase 21)。カーソル位置に最も近いヒット候補
+   * (セグメント本体・entitiesの境界。端点は対象外、クリック時のdistance用の特別扱いのため)を
+   * DIMENSION_SEGMENT_TOLERANCE_PX以内で求め、ヒットがあればホバー色でハイライト表示する
+   * (「選べるものが分かる」ようにするための視覚フィードバック)。distance入力の1点目待ち中
+   * (dimensionPendingPoint)はそのマーカー表示を優先し、ホバープレビューは描かない。
+   */
+  private handleDimensionToolMouseMove(event: MouseEvent) {
+    if (!this.dimensionToolBasis || this.dimensionPendingPoint) return;
+    const basis = this.dimensionToolBasis;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+    const hit = this.raycastDrawingPlane(basis, px, py, rect);
+    if (!hit) {
+      this.clearDrawingPreview();
+      this.dimensionHoverEntityHit = null;
+      return;
+    }
+    const local = planeWorldToLocal(basis, hit);
+    const toleranceMm = this.pxToMm(DIMENSION_SEGMENT_TOLERANCE_PX, hit);
+
+    let nearestSeg: SketchSegment | null = null;
+    let nearestSegDist = Infinity;
+    for (const seg of this.dimensionToolSegments) {
+      const d = distPointToSegmentShape(local, seg);
+      if (d < nearestSegDist) {
+        nearestSegDist = d;
+        nearestSeg = seg;
+      }
+    }
+    const entityHit = findEntityDimensionHit(local, this.dimensionToolEntities);
+
+    this.clearDrawingPreview();
+    if (entityHit && entityHit.dist <= toleranceMm && (!nearestSeg || entityHit.dist < nearestSegDist)) {
+      this.dimensionHoverEntityHit = entityHit;
+      this.drawDimensionHoverPreview(basis, entityHit.highlightPoints);
+      return;
+    }
+    this.dimensionHoverEntityHit = null;
+    if (nearestSeg && nearestSegDist <= toleranceMm) {
+      this.drawDimensionHoverPreview(basis, segmentLocalPoints(nearestSeg));
     }
   }
 
@@ -2158,9 +2257,12 @@ export class CadViewer {
       this.handleTrimMouseMove(event);
       return;
     }
-    // フィレット/面取りツール・寸法ツール中は面ホバーハイライトも描画プレビューも不要(クリックのみで完結する)。
+    if (this.dimensionToolActive) {
+      this.handleDimensionToolMouseMove(event);
+      return;
+    }
+    // フィレット/面取りツール中は面ホバーハイライトも描画プレビューも不要(クリックのみで完結する)。
     if (this.cornerToolActive) return;
-    if (this.dimensionToolActive) return;
     if (!this.drawingActive || !this.drawingBasis) {
       this.handleHoverMouseMove(event);
       return;
