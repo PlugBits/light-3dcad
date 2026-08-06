@@ -11,13 +11,31 @@
 // さらに「各変数の初期位置からの移動量」に弱い正則化(小さい重み)をかけた擬似残差を加えることで、
 // 拘束が不足している(劣拘束)自由度については「入力形状に最も近い解」を選ぶ(SolidWorks等の
 // スケッチソルバに倣った自然な挙動。無関係な点が意図せず動かないようにする効果もある)。
-import type { CadDocument, EntityRef, FeatureId, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
-import { resolveLineRefPoints } from "./entityEdges";
+import type { CadDocument, EntityRef, FeatureId, LineRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
+import { polygonEdgePointsWithOffset, rectangleEdgePointsAtCenter, resolveLineRefPoints } from "./entityEdges";
 
 export type Point2 = [number, number];
 
 /** circleエンティティのみを抜き出す型ガード(solverの変数対象、Phase 22)。 */
 type CircleEntity = Extract<SketchEntity, { kind: "circle" }>;
+
+/**
+ * ソルバの変数として動かせるエンティティ種別(矩形・多角形をソルバで動かせるようにする改善)。
+ * circle/rectangle/regularPolygonは中心(cx,cy)を、polygon/slotは剛体並進オフセット(dx,dy、
+ * 全頂点/始終点が一緒に動く。頂点間の相対位置=コーナーのフィレット形状は保たれる)を2変数として持つ。
+ * 回転・変形(頂点ごとの独立移動)は変数にしない(v1、既知の制限)。
+ */
+type MovableEntity = Extract<SketchEntity, { kind: "circle" | "rectangle" | "polygon" | "regularPolygon" | "slot" }>;
+
+function isMovableEntity(entity: SketchEntity): entity is MovableEntity {
+  return (
+    entity.kind === "circle" ||
+    entity.kind === "rectangle" ||
+    entity.kind === "polygon" ||
+    entity.kind === "regularPolygon" ||
+    entity.kind === "slot"
+  );
+}
 
 /** 収束判定: 全残差(拘束+正則化)のノルムがこれを下回れば打ち切る。 */
 const CONVERGE_NORM = 1e-8;
@@ -225,6 +243,62 @@ function lineSideSign(initX: number[], idx: [number, number], a: Point2, b: Poin
   const dy = b[1] - a[1];
   const cross = (initX[idx[0]] - a[0]) * dy - (initX[idx[1]] - a[1]) * dx;
   return cross < 0 ? -1 : 1;
+}
+
+/**
+ * LineRefを、entities配列の元の形状ではなく「ソルバの現在の変数値x」から解決する
+ * (矩形・多角形をソルバで動かせるようにする改善)。rectangle/regularPolygonはentityVarIdxに
+ * 積んだ中心(cx,cy)、polygonは並進オフセット(dx,dy)を使って辺の座標を組み立てる。
+ * refEdge(ボディ端面参照のスナップショット)は常に固定座標のままなのでvarsを見ない。
+ * entityVarIdxに載っていないentity(=このソルバ呼び出しの対象外)は元のentities側の値を使う
+ * (通常は起きないが、防御的なフォールバック)。
+ */
+function resolveLineRefPointsFromVars(
+  line: LineRef,
+  entities: readonly SketchEntity[],
+  entityVarIdx: EntityVarIndexMap,
+  x: number[],
+): [Point2, Point2] | null {
+  if (line.kind === "refEdge") return [line.p1, line.p2];
+  const entity = entities.find((e) => e.id === line.entityId);
+  if (!entity) return null;
+  const base = entityVarIdx.get(entity.id);
+  if (entity.kind === "rectangle") {
+    const center: Point2 = base !== undefined ? [x[base], x[base + 1]] : entity.center;
+    return rectangleEdgePointsAtCenter(center, entity.width, entity.height, line.edgeIndex);
+  }
+  if (entity.kind === "polygon") {
+    const offset: Point2 = base !== undefined ? [x[base], x[base + 1]] : [0, 0];
+    return polygonEdgePointsWithOffset(entity.points, offset, line.edgeIndex);
+  }
+  return null;
+}
+
+/**
+ * circleエンティティの中心↔辺(LineRef)の符号付き垂直距離(distanceEntityLine拘束の残差値)。
+ * lineの辺は「今の変数値」から解決する(resolveLineRefPointsFromVars)ため、entity側(円)だけで
+ * なくline側(rectangle/polygonの辺)が変数として動いてもこの値は正しく追従する。
+ * 解析的な偏微分の導出はentity+line両方が可変になったことで煩雑なため、tangent/distanceLineLine
+ * と同じくnumericResidual(中心差分)でヤコビアンを近似する(value自体は厳密値)。
+ */
+function distanceEntityLineValue(
+  x: number[],
+  idx: [number, number],
+  line: LineRef,
+  entities: readonly SketchEntity[],
+  entityVarIdx: EntityVarIndexMap,
+  sign: number,
+): number {
+  const pts = resolveLineRefPointsFromVars(line, entities, entityVarIdx, x);
+  if (!pts) return 0;
+  const [a, b] = pts;
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const len = Math.max(Math.hypot(dx, dy), MIN_SAFE_LENGTH);
+  const px = x[idx[0]];
+  const py = x[idx[1]];
+  const cross = (px - a[0]) * dy - (py - a[1]) * dx;
+  return (sign * cross) / len;
 }
 
 /**
@@ -450,12 +524,27 @@ function buildConstraintResiduals(
         break;
       }
       case "distanceEntityLine": {
+        // 矩形・多角形をソルバで動かせるようにする改善: lineがrectangle/polygonの辺(entityEdge)を
+        // 参照している場合、その辺の座標もソルバの変数(entityVarIdx)から解決するため、円の中心
+        // だけでなく辺(の親エンティティ)も拘束に応じて動く(例: 円を固定して距離を指定すると
+        // 矩形側が並進する)。refEdge(ボディ端面参照)は常に固定なのでvarIndicesに追加しない。
         const idx = entityVarIndex(entityVarIdx, c.entity);
         if (!idx) break;
-        const line = resolveLineRefPoints(c.line, entities);
-        if (!line) break;
-        const sign = lineSideSign(initX, idx, line[0], line[1]);
-        eqs.push(pointToFixedLineResidual(x, idx, line[0], line[1], c.value, sign));
+        const line0 = resolveLineRefPoints(c.line, entities);
+        if (!line0) break;
+        const sign = lineSideSign(initX, idx, line0[0], line0[1]);
+        const varIndices: number[] = [idx[0], idx[1]];
+        if (c.line.kind === "entityEdge") {
+          const lineBase = entityVarIdx.get(c.line.entityId);
+          if (lineBase !== undefined) varIndices.push(lineBase, lineBase + 1);
+        }
+        eqs.push(
+          numericResidual(
+            (vars) => distanceEntityLineValue(vars, idx, c.line, entities, entityVarIdx, sign) - c.value,
+            x,
+            varIndices,
+          ),
+        );
         break;
       }
       case "perpendicular": {
@@ -711,14 +800,35 @@ function segmentsFromVars(segments: readonly SketchSegment[], x: number[], varIn
   });
 }
 
-/** circleエンティティのcenterを解いた変数値に置き換える(circle以外はそのままコピー、Phase 22)。 */
+/**
+ * 可動エンティティ(circle/rectangle/regularPolygon/polygon/slot)の座標を解いた変数値に置き換える
+ * (それ以外はそのままコピー)。circle/rectangle/regularPolygonは中心(center)を変数値そのものに、
+ * polygon/slotは並進オフセット(dx,dy)を元の頂点・始終点に加算する(コーナーのフィレット形状や
+ * 各頂点の相対位置は変わらない)。
+ */
 function entitiesFromVars(entities: readonly SketchEntity[], x: number[], entityVarIdx: EntityVarIndexMap): SketchEntity[] {
   return entities.map((entity) => {
-    if (entity.kind !== "circle") return { ...entity };
     const base = entityVarIdx.get(entity.id);
     if (base === undefined) return { ...entity };
-    const center: Point2 = [x[base], x[base + 1]];
-    return { ...entity, center };
+    if (entity.kind === "circle" || entity.kind === "rectangle" || entity.kind === "regularPolygon") {
+      const center: Point2 = [x[base], x[base + 1]];
+      return { ...entity, center };
+    }
+    const dx = x[base];
+    const dy = x[base + 1];
+    if (dx === 0 && dy === 0) return { ...entity };
+    if (entity.kind === "polygon") {
+      const points: [number, number][] = entity.points.map((p) => [p[0] + dx, p[1] + dy]);
+      return { ...entity, points };
+    }
+    if (entity.kind === "slot") {
+      return {
+        ...entity,
+        start: [entity.start[0] + dx, entity.start[1] + dy] as [number, number],
+        end: [entity.end[0] + dx, entity.end[1] + dy] as [number, number],
+      };
+    }
+    return entity;
   });
 }
 
@@ -791,9 +901,11 @@ export function solveSketch(
   constraints: readonly SketchConstraint[] = [],
   entities: readonly SketchEntity[] = [],
 ): SolveResult {
-  const circles: CircleEntity[] = entities.filter((e): e is CircleEntity => e.kind === "circle");
+  // 矩形・多角形をソルバで動かせるようにする改善: circleに加えrectangle/polygon/regularPolygon/slotも
+  // entityVarIdxに積む(2変数ずつ。circle/rectangle/regularPolygonは中心、polygon/slotは並進オフセット)。
+  const movableEntities: MovableEntity[] = entities.filter(isMovableEntity);
 
-  if (segments.length === 0 && circles.length === 0) {
+  if (segments.length === 0 && movableEntities.length === 0) {
     return { ok: true, segments: [], entities: entities.map((e) => ({ ...e })) };
   }
   if (constraints.length === 0) {
@@ -806,8 +918,8 @@ export function solveSketch(
   const segVarCount = segments.length * 4;
 
   const entityVarIdx: EntityVarIndexMap = new Map();
-  circles.forEach((c, i) => entityVarIdx.set(c.id, segVarCount + i * 2));
-  const m = segVarCount + circles.length * 2;
+  movableEntities.forEach((e, i) => entityVarIdx.set(e.id, segVarCount + i * 2));
+  const m = segVarCount + movableEntities.length * 2;
 
   const initX = new Array(m);
   segments.forEach((seg, i) => {
@@ -816,10 +928,13 @@ export function solveSketch(
     initX[i * 4 + 2] = seg.p2[0];
     initX[i * 4 + 3] = seg.p2[1];
   });
-  circles.forEach((c, i) => {
+  movableEntities.forEach((e, i) => {
     const base = segVarCount + i * 2;
-    initX[base] = c.center[0];
-    initX[base + 1] = c.center[1];
+    // 絶対中心(circle/rectangle/regularPolygon)は現在のcenterから、並進オフセット(polygon/slot)は
+    // 0,0(=まだ動いていない)から始める。
+    const init: Point2 = e.kind === "circle" || e.kind === "rectangle" || e.kind === "regularPolygon" ? e.center : [0, 0];
+    initX[base] = init[0];
+    initX[base + 1] = init[1];
   });
 
   const buildHardResiduals = (vars: number[]): ResidualEq[] => [

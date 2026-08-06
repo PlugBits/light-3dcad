@@ -16,9 +16,17 @@ export function rectangleEdgePoints(
   entity: Extract<SketchEntity, { kind: "rectangle" }>,
   edgeIndex: number,
 ): [Point2, Point2] {
-  const [cx, cy] = entity.center;
-  const hw = entity.width / 2;
-  const hh = entity.height / 2;
+  return rectangleEdgePointsAtCenter(entity.center, entity.width, entity.height, edgeIndex);
+}
+
+/**
+ * rectangleEdgePointsの中心指定版(src/sketch/solver.tsが、ソルバの現在の変数値[中心]から辺を
+ * 解決するために使う。中心が動けば辺も追従することをソルバの残差計算でも成立させるため)。
+ */
+export function rectangleEdgePointsAtCenter(center: Point2, width: number, height: number, edgeIndex: number): [Point2, Point2] {
+  const [cx, cy] = center;
+  const hw = width / 2;
+  const hh = height / 2;
   const corners: Point2[] = [
     [cx - hw, cy - hh],
     [cx + hw, cy - hh],
@@ -32,10 +40,23 @@ export function rectangleEdgePoints(
 
 /** polygonエンティティの辺edgeIndex(points[i]→points[i+1 mod n])の両端点を返す。 */
 export function polygonEdgePoints(entity: Extract<SketchEntity, { kind: "polygon" }>, edgeIndex: number): [Point2, Point2] {
-  const n = entity.points.length;
+  return polygonEdgePointsWithOffset(entity.points, [0, 0], edgeIndex);
+}
+
+/**
+ * polygonEdgePointsの並進オフセット指定版(src/sketch/solver.tsが、ソルバの現在の変数値
+ * [剛体並進オフセットdx,dy]から辺を解決するために使う。offset=[0,0]ならpolygonEdgePointsと同じ)。
+ */
+export function polygonEdgePointsWithOffset(points: readonly Point2[], offset: Point2, edgeIndex: number): [Point2, Point2] {
+  const n = points.length;
   if (n === 0) return [[0, 0], [0, 0]];
   const i = ((edgeIndex % n) + n) % n;
-  return [entity.points[i], entity.points[(i + 1) % n]];
+  const a = points[i];
+  const b = points[(i + 1) % n];
+  return [
+    [a[0] + offset[0], a[1] + offset[1]],
+    [b[0] + offset[0], b[1] + offset[1]],
+  ];
 }
 
 /**

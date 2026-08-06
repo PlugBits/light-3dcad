@@ -164,14 +164,15 @@ export function upsertDistanceEntityLineConstraint(
   return [...constraints, { id: generateId("constraint"), kind: "distanceEntityLine", entity: { entityId }, line, value }];
 }
 
-/** circleエンティティの中心が固定(fixEntity拘束を持つ)かどうか。 */
+/** エンティティが固定(fixEntity拘束を持つ)かどうか。circle/rectangle/polygon/regularPolygon/slotいずれも対象。 */
 export function isEntityFixed(constraints: readonly SketchConstraint[], entityId: string): boolean {
   return constraints.some((c) => c.kind === "fixEntity" && c.entity.entityId === entityId);
 }
 
 /**
- * circleエンティティのfixEntity拘束をon/offする(固定トグル、Phase 22)。fixed:trueで無ければ追加、
- * fixed:falseで有れば削除する(既に望む状態なら元の配列と等価な新しい配列を返す)。
+ * エンティティのfixEntity拘束をon/offする(固定トグル、Phase 22。矩形・多角形をソルバで動かせる
+ * ようにする改善でcircle以外のkindにも対応)。fixed:trueで無ければ追加、fixed:falseで有れば削除する
+ * (既に望む状態なら元の配列と等価な新しい配列を返す)。
  */
 export function setEntityFixed(constraints: readonly SketchConstraint[], entityId: string, fixed: boolean): SketchConstraint[] {
   const idx = constraints.findIndex((c) => c.kind === "fixEntity" && c.entity.entityId === entityId);

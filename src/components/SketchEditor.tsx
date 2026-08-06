@@ -121,7 +121,8 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
   }
 
   /**
-   * circleエンティティの中心を固定/解除する(fixEntity拘束のon/off、Phase 22)。
+   * エンティティの位置を固定/解除する(fixEntity拘束のon/off、Phase 22。矩形・多角形をソルバで
+   * 動かせるようにする改善でcircle以外のkindにも対応)。
    * 既存の位置寸法拘束(distanceEntityOrigin等)と矛盾する場合は自動的に取り消す
    * (App.tsxのhandleApplyDimensionTargetと同じupdateDocumentWithConflictRollback経路)。
    */
@@ -346,20 +347,23 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
                 )}
               </div>
             )}
-            {entity.kind === "circle" && (
-              <label
-                style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11 }}
-                title="中心を現在位置に固定します(fixEntity拘束のon/off)。他の位置寸法拘束と矛盾する場合は取り消されます"
-              >
-                <input
-                  type="checkbox"
-                  data-testid={`entity-${entity.kind}-${index}-fixed`}
-                  checked={isEntityFixed(sketch.constraints ?? [], entity.id)}
-                  onChange={(e) => handleToggleEntityFixed(entity.id, e.target.checked)}
-                />
-                固定
-              </label>
-            )}
+            {/*
+              固定チェックボックス(fixEntity拘束のon/off)。矩形・多角形をソルバで動かせるようにする
+              改善: 円だけでなくrectangle/polygon/regularPolygon/slotもソルバの変数(中心、または
+              polygon/slotは並進オフセット)を持つようになったため、これらも固定対象にできる。
+            */}
+            <label
+              style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11 }}
+              title="現在位置(circle/rectangle/regularPolygonは中心、polygon/slotは全体位置)を固定します(fixEntity拘束のon/off)。他の位置寸法拘束と矛盾する場合は取り消されます"
+            >
+              <input
+                type="checkbox"
+                data-testid={`entity-${entity.kind}-${index}-fixed`}
+                checked={isEntityFixed(sketch.constraints ?? [], entity.id)}
+                onChange={(e) => handleToggleEntityFixed(entity.id, e.target.checked)}
+              />
+              固定
+            </label>
           </div>
         ))}
       </div>

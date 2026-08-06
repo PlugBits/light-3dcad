@@ -345,11 +345,44 @@ describe("solveSketch circleエンティティの位置拘束(Phase 22)", () => 
     expect(dist(outA.center, outB.center)).toBeCloseTo(25, 4);
   });
 
-  it("③ distanceEntityLine(entityEdge): 円の中心↔rectangle辺の垂直距離が指定値に解ける(辺は動かない)", () => {
+  it("③ distanceEntityLine(entityEdge): rectangleを固定すれば円の中心↔rectangle辺の垂直距離が指定値に解ける(辺は動かない)", () => {
     const c = circle("c1", [5, 5]);
     const rect: SketchEntity = { kind: "rectangle", id: "r1", center: [0, 0], width: 20, height: 20 };
     // rectangleのedgeIndex0(下辺、y=-10の水平線)からの距離を30に指定 => 中心のy座標が20になる(現在+y側)。
+    // rectangleにfixEntityを付けて固定するため、辺は動かず円だけが動く(矩形・多角形をソルバで
+    // 動かせるようにする改善で、rectangleもデフォルトでは動きうるようになったため、旧来の
+    // 「辺は動かない」挙動を再現するには明示的な固定が必要になった)。
     const constraints: SketchConstraint[] = [
+      {
+        id: "d1",
+        kind: "distanceEntityLine",
+        entity: { entityId: "c1" },
+        line: { kind: "entityEdge", entityId: "r1", edgeIndex: 0 },
+        value: 30,
+      },
+      { id: "fix1", kind: "fixEntity", entity: { entityId: "r1" } },
+    ];
+    const result = solveSketch([], constraints, [c, rect]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outC = result.entities.find((e) => e.id === "c1")!;
+    const outR = result.entities.find((e) => e.id === "r1")!;
+    if (outC.kind !== "circle" || outR.kind !== "rectangle") throw new Error("unexpected kind");
+    expect(outC.center[1]).toBeCloseTo(20, 3);
+    // rectangle自体は動いていない(fixEntity)。center[0]は-0になりうるためtoBeCloseToで比較する。
+    expect(outR.center[0]).toBeCloseTo(rect.kind === "rectangle" ? rect.center[0] : 0, 6);
+    expect(outR.center[1]).toBeCloseTo(rect.kind === "rectangle" ? rect.center[1] : 0, 6);
+    expect(outR.width).toBe(20);
+    expect(outR.height).toBe(20);
+  });
+
+  it("③a distanceEntityLine(entityEdge): 円を固定するとrectangle側(辺)が並進して距離を満たす", () => {
+    const c = circle("c1", [5, 5]);
+    const rect: SketchEntity = { kind: "rectangle", id: "r1", center: [0, 0], width: 20, height: 20 };
+    // 円を固定して同じ拘束(edgeIndex0=下辺との距離30)を課すと、rectangleの中心が-y方向に並進して
+    // (中心のyが-20になる)距離を満たす(円は動かない)。
+    const constraints: SketchConstraint[] = [
+      { id: "fixc", kind: "fixEntity", entity: { entityId: "c1" } },
       {
         id: "d1",
         kind: "distanceEntityLine",
@@ -363,10 +396,75 @@ describe("solveSketch circleエンティティの位置拘束(Phase 22)", () => 
     if (!result.ok) return;
     const outC = result.entities.find((e) => e.id === "c1")!;
     const outR = result.entities.find((e) => e.id === "r1")!;
-    if (outC.kind !== "circle") throw new Error("not circle");
-    expect(outC.center[1]).toBeCloseTo(20, 3);
-    // rectangle自体は動いていない。
-    expect(outR).toEqual(rect);
+    if (outC.kind !== "circle" || outR.kind !== "rectangle") throw new Error("unexpected kind");
+    // 円は動いていない(fixEntity)。
+    expect(outC.center).toEqual(c.center);
+    // rectangleの中心が並進して距離30を満たす(下辺は中心よりheight/2=10下、円のyは5なので
+    // 中心y = 5 - 30 + 10 = -15)。
+    expect(outR.center[1]).toBeCloseTo(-15, 3);
+    expect(outR.center[0]).toBeCloseTo(0, 3);
+    expect(outR.width).toBe(20);
+    expect(outR.height).toBe(20);
+  });
+
+  it("③b distanceEntityLine(entityEdge、polygon): 円を固定するとpolygon側が剛体並進して距離を満たす(頂点の相対位置は維持)", () => {
+    const c = circle("c1", [0, 30]);
+    // 正方形polygon(辺0: [-10,-10]→[10,-10]、下辺)。
+    const poly: SketchEntity = {
+      kind: "polygon",
+      id: "p1",
+      points: [
+        [-10, -10],
+        [10, -10],
+        [10, 10],
+        [-10, 10],
+      ],
+    };
+    const constraints: SketchConstraint[] = [
+      { id: "fixc", kind: "fixEntity", entity: { entityId: "c1" } },
+      {
+        id: "d1",
+        kind: "distanceEntityLine",
+        entity: { entityId: "c1" },
+        line: { kind: "entityEdge", entityId: "p1", edgeIndex: 0 },
+        value: 50,
+      },
+    ];
+    const result = solveSketch([], constraints, [c, poly]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outC = result.entities.find((e) => e.id === "c1")!;
+    const outP = result.entities.find((e) => e.id === "p1")!;
+    if (outC.kind !== "circle" || outP.kind !== "polygon") throw new Error("unexpected kind");
+    expect(outC.center).toEqual(c.center);
+    // 円中心y=30、下辺との距離50を満たすには下辺がy=-20になる必要がある(元は-10なので-10だけ並進)。
+    expect(outP.points[0][1]).toBeCloseTo(-20, 3);
+    expect(outP.points[1][1]).toBeCloseTo(-20, 3);
+    // 剛体並進なので頂点間の相対位置(辺の長さ=20)は維持される。
+    expect(outP.points[1][0] - outP.points[0][0]).toBeCloseTo(20, 3);
+    // X方向は拘束されていないため、正則化により入力(0)に近いまま。
+    expect(outP.points[0][0]).toBeCloseTo(-10, 2);
+  });
+
+  it("③c fixEntity: circleとrectangleを両方固定した状態でdistanceEntityLineが矛盾すれば検出する", () => {
+    const c = circle("c1", [5, 5]);
+    const rect: SketchEntity = { kind: "rectangle", id: "r1", center: [0, 0], width: 20, height: 20 };
+    // 現在の距離(下辺との距離=15)と異なる値(30)を要求するが、両方固定されているためどちらも動けず矛盾する。
+    const constraints: SketchConstraint[] = [
+      { id: "fixc", kind: "fixEntity", entity: { entityId: "c1" } },
+      { id: "fixr", kind: "fixEntity", entity: { entityId: "r1" } },
+      {
+        id: "d1",
+        kind: "distanceEntityLine",
+        entity: { entityId: "c1" },
+        line: { kind: "entityEdge", entityId: "r1", edgeIndex: 0 },
+        value: 30,
+      },
+    ];
+    const result = solveSketch([], constraints, [c, rect]);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.conflicting).toBe(true);
   });
 
   it("④ distanceEntityLine(refEdge): ボディ端面参照エッジのスナップショット座標を固定線として解く", () => {

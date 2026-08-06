@@ -581,3 +581,13 @@ Vitest312件(trim.ts entity輪郭2件、segmentCorner.ts 7件が新規)。
 (表示のみ小数3桁丸め、内部値・3桁超入力はそのまま尊重)を適用し、拘束由来の寸法ポップアップに
 削除ボタンを追加した。カメラFOVを45→30度に変更(pxToMm/fitToView等は`camera.fov`参照のため自動追従、
 E2Eの`verticalFractionForZ`も追従)。Vitest324件。E2E全通過。
+
+## 寸法ツール改善2件: 矩形・多角形をソルバで動かせるように+選択順の柔軟化
+
+`solveSketch`のentity変数をcircleからrectangle/polygon/regularPolygon/slotへ拡張(rectangle/
+regularPolygonは中心、polygon/slotは剛体並進オフセット。フィレット形状・回転は変数にしない)、
+`distanceEntityLine`の残差(円中心↔辺の垂直距離)が参照する辺の座標をentityEdgeなら現在の変数値から
+解決するようにし(数値微分でヤコビアン近似)、円↔矩形辺のどちらを動かすかをfixEntity拘束(SketchEditorの
+「固定」チェックボックスを全entity種別に拡大)で選べるようにした。寸法ツールはrectangle/polygonの辺を
+1点目としてクリックできるようにし(`dimensionPendingEdgeLine`、円が2点目でも同じ`distanceEntityLine`
+拘束になる)。Vitest331件。

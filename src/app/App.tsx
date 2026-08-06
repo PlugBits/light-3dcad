@@ -787,6 +787,10 @@ export default function App() {
           setDimensionPendingLabel("1つ目: 円 → 2つ目を選択(原点/円/辺/端面)");
         } else if (state.kind === "line") {
           setDimensionPendingLabel("1つ目: 線分 → 2つ目の線分/参照エッジを選択(距離/角度)");
+        } else if (state.kind === "edge") {
+          // 選択順柔軟化(UI改善): 辺(矩形・多角形)を1つ目としてクリックした状態。
+          // 混乱を避けるため線分↔線分の「距離/角度」ではなく「次: 円をクリック」と明示する。
+          setDimensionPendingLabel("1つ目: 辺 → 次: 円をクリック");
         } else {
           setDimensionPendingLabel("1つ目: 端点 → 2つ目の端点を選択(距離)");
         }

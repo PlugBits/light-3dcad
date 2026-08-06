@@ -326,7 +326,7 @@ export type DimensionToolTarget =
  * 端点1点目クリック後で2点目の端点待ち、"line"は直線セグメントのlengthポップアップ表示中で
  * 2点目の直線セグメント待ち(Phase 24、線分↔線分の寸法)。未保留はnull。
  */
-export type DimensionPendingState = { kind: "circle" | "point" | "line" } | null;
+export type DimensionPendingState = { kind: "circle" | "point" | "line" | "edge" } | null;
 
 /** 寸法ツール(Phase 20b)の開始/終了時に呼ばれるコールバック。 */
 export interface DimensionToolCallbacks {
@@ -834,6 +834,15 @@ export class CadViewer {
    * onTargetPickedを呼ぶ(円のdimensionPendingCircleIdと同じ「1点目保持→2点目」パターン)。
    */
   private dimensionPendingLineId: string | null = null;
+  /**
+   * 寸法ツールの選択順柔軟化(UI改善): rectangle/polygonのエンティティ辺を1つ目としてクリックした
+   * 直後、そのLineRef(+ハイライト用の実座標)を保持する(未保留はnull)。保持中に円(entity-radius)を
+   * クリックすると、円が先にクリックされたとき(dimensionPendingCircleId→辺クリック)と同じ
+   * circle-distance-edge/refedgeターゲットとしてonTargetPickedを呼ぶ(entity+lineの組み合わせは
+   * クリック順に依らず同じ拘束[distanceEntityLine]になるため、target種別自体は流用できる)。
+   * dimensionPendingCircleIdとは相互排他(どちらか一方のみ保持される想定)。
+   */
+  private dimensionPendingEdgeLine: { line: LineRef; edgeA: [number, number]; edgeB: [number, number] } | null = null;
 
   /** 拘束ツール(Phase 23)がアクティブかどうか。trueの間はクリックを面選択でなく拘束対象クリックとして扱う。 */
   private constraintToolActive = false;
@@ -2113,6 +2122,7 @@ export class CadViewer {
     this.dimensionHoverEntityHit = null;
     this.setDimensionPendingCircle(null);
     this.setDimensionPendingLine(null);
+    this.setDimensionPendingEdge(null);
     this.renderer.domElement.style.cursor = "crosshair";
   }
 
@@ -2130,6 +2140,7 @@ export class CadViewer {
     this.dimensionHoverEntityHit = null;
     this.setDimensionPendingCircle(null);
     this.setDimensionPendingLine(null);
+    this.setDimensionPendingEdge(null);
   }
 
   isDimensionToolActive(): boolean {
@@ -2185,6 +2196,7 @@ export class CadViewer {
     this.dimensionHoverEntityHit = null;
     this.setDimensionPendingCircle(null);
     this.setDimensionPendingLine(null);
+    this.setDimensionPendingEdge(null);
     this.renderer.domElement.style.cursor = "";
     this.clearDrawingPreview();
     callbacks?.onCancel();
@@ -2288,7 +2300,10 @@ export class CadViewer {
         nearestId = seg.id;
       }
     }
-    const entityHit = findEntityDimensionHit(local, this.dimensionToolEntities, !!this.dimensionPendingCircleId);
+    // includePolygon: 常にtrue(選択順柔軟化、UI改善)。辺(矩形・多角形)を1つ目としてクリックできる
+    // ようにするため、円クリック前でもpolygonの辺をヒット対象に含める(以前はdimensionPendingCircleId
+    // 保持中のみtrueだった)。
+    const entityHit = findEntityDimensionHit(local, this.dimensionToolEntities, true);
 
     // 位置寸法(Phase 21b): circleクリック済み(dimensionPendingCircleId)の状態で別のcircleを
     // クリックした場合はcircle-distance-circleターゲットとして扱う(1点目=fromEntityIdは動かず、
@@ -2375,13 +2390,36 @@ export class CadViewer {
       this.setDimensionPendingPoint(null);
       this.setDimensionPendingLine(null);
       this.clearDrawingPreview();
+      if (entityHit.kind === "entity-radius" && this.dimensionPendingEdgeLine) {
+        // 辺(1点目)→円(2点目、選択順柔軟化、UI改善): circleが先にクリックされたときと同じ
+        // circle-distance-edge/refedgeターゲットになる(distanceEntityLine拘束はentity[円]+line[辺]の
+        // 組み合わせで決まり、クリック順には依らないため、targetの種別・後続のポップアップはcircle-first
+        // と共通のまま流用できる)。
+        const pending = this.dimensionPendingEdgeLine;
+        this.setDimensionPendingEdge(null);
+        const entityId = entityHit.entityId;
+        if (pending.line.kind === "refEdge") {
+          this.dimensionToolCallbacks?.onTargetPicked(
+            { kind: "circle-distance-refedge", entityId, edgeA: pending.edgeA, edgeB: pending.edgeB, line: pending.line },
+            px,
+            py,
+          );
+        } else {
+          this.dimensionToolCallbacks?.onTargetPicked(
+            { kind: "circle-distance-edge", entityId, edgeA: pending.edgeA, edgeB: pending.edgeB, line: pending.line },
+            px,
+            py,
+          );
+        }
+        return;
+      }
       if (entityHit.kind === "entity-radius") {
         // circle単独クリック: 従来通りentity-radius(半径編集)。以降の1クリックで距離モードへ
         // 切り替えられるよう、このcircleをdimensionPendingCircleIdとして保持する。
         this.setDimensionPendingCircle(entityHit.entityId, basis, entityHit.highlightPoints);
       } else if (this.dimensionPendingCircleId) {
-        // circleクリック済みでrectangleの辺をクリック => circle-distance-edge(辺は動かない)。
-        // edgeIndexが取れる(rectangleの辺)場合はentityEdge(エンティティが動けば辺も追従)、
+        // circleクリック済みでrectangle/polygonの辺をクリック => circle-distance-edge(辺は動かない)。
+        // edgeIndexが取れる(rectangle/polygonの辺)場合はentityEdge(エンティティが動けば辺も追従)、
         // 取れない場合はrefEdge(ピック時点の座標を凍結)にフォールバックする。
         const entityId = this.dimensionPendingCircleId;
         this.setDimensionPendingCircle(null);
@@ -2397,12 +2435,25 @@ export class CadViewer {
           py,
         );
         return;
+      } else if (entityHit.kind === "entity-width" || entityHit.kind === "entity-height" || entityHit.kind === "entity-edge") {
+        // 辺を1点目としてクリック(選択順柔軟化、UI改善): pending化してハイライト、続けて円を
+        // クリックすればcircle-distance-edge/refedgeになる(dimensionPendingLineIdと同じ
+        // 「1点目保持→2点目」パターン)。rectangleの辺(entity-width/height)は従来通り
+        // width/height編集ポップアップも即時発行する(後方互換、下のonTargetPickedへフォールスルー)。
+        const edgeA = entityHit.highlightPoints[0];
+        const edgeB = entityHit.highlightPoints[1];
+        const line: LineRef =
+          entityHit.edgeIndex !== undefined
+            ? { kind: "entityEdge", entityId: entityHit.entityId, edgeIndex: entityHit.edgeIndex }
+            : { kind: "refEdge", p1: edgeA, p2: edgeB };
+        this.setDimensionPendingEdge({ line, edgeA, edgeB }, basis);
+        // polygonの辺(entity-edge)は単独クリックで発行するターゲットが無いため、ここで打ち切り、
+        // 次のクリック(円)待ちにする。rectangleの辺(entity-width/height)は下へフォールスルーする。
+        if (entityHit.kind === "entity-edge") return;
       }
-      // entity-edge(polygonの辺)はcircle選択済み(circle-distance-edge)のときのみ意味を持つ対象で
-      // あり、上のdimensionPendingCircleId分岐で処理済みのはず。ここに来るのは理論上は起きない
-      // (includePolygonはdimensionPendingCircleId truthy時のみtrueで渡すため)が、型の網羅性のため
-      // 安全側で無視する。
-      if (entityHit.kind === "entity-edge") return;
+      // entity-edge(polygonの辺)はcircle選択済み、または辺クリック済み(上のいずれかの分岐)の
+      // ときのみ意味を持つ対象であり、いずれの分岐でも既にreturn済みのはず(TSの型上もここでは
+      // entity-radius/entity-width/entity-heightのみに絞られている)。
       this.dimensionToolCallbacks?.onTargetPicked({ kind: entityHit.kind, entityId: entityHit.entityId }, px, py);
       return;
     }
@@ -2510,7 +2561,8 @@ export class CadViewer {
         nearestSeg = seg;
       }
     }
-    const entityHit = findEntityDimensionHit(local, this.dimensionToolEntities, !!this.dimensionPendingCircleId);
+    // includePolygon: 常にtrue(handleDimensionToolClickと同じ、選択順柔軟化)。
+    const entityHit = findEntityDimensionHit(local, this.dimensionToolEntities, true);
 
     // circle選択済み、または直線セグメント選択済みの間はボディ端面参照エッジもホバー候補にする
     // (handleDimensionToolClickと同じ)。
@@ -3257,6 +3309,7 @@ export class CadViewer {
     if (!callback) return;
     if (this.dimensionPendingCircleId) callback({ kind: "circle" });
     else if (this.dimensionPendingLineId) callback({ kind: "line" });
+    else if (this.dimensionPendingEdgeLine) callback({ kind: "edge" });
     else if (this.dimensionPendingPoint) callback({ kind: "point" });
     else callback(null);
   }
@@ -3283,6 +3336,23 @@ export class CadViewer {
     this.dimensionPendingLineId = id;
     if (id && basis && highlightPoints) {
       this.drawDimensionSelectHighlight(basis, highlightPoints);
+    } else {
+      this.clearDimensionSelectHighlight();
+    }
+    this.notifyDimensionPendingState();
+  }
+
+  /**
+   * dimensionPendingEdgeLine(選択順柔軟化、UI改善)の更新+選択強調の描画/消去+ステータス通知を
+   * まとめて行う(setDimensionPendingLineと同じパターン)。
+   */
+  private setDimensionPendingEdge(
+    pending: { line: LineRef; edgeA: [number, number]; edgeB: [number, number] } | null,
+    basis?: PlaneBasis,
+  ) {
+    this.dimensionPendingEdgeLine = pending;
+    if (pending && basis) {
+      this.drawDimensionSelectHighlight(basis, [pending.edgeA, pending.edgeB]);
     } else {
       this.clearDimensionSelectHighlight();
     }
