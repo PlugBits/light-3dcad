@@ -155,3 +155,101 @@ export function trimSegmentAtPoint(
   const kept = pieces.filter((_, i) => i !== removeIndex);
   return [...others, ...kept];
 }
+
+/** 点pからentity(rectangle/circle/polygon/slot/regularPolygon)の輪郭への最短距離(explodeEntity()によるポリライン近似)。CadViewerのトリムホバー対象選定に使う。 */
+export function distPointToEntityShape(p: Point2, entity: SketchEntity): number {
+  let best = Infinity;
+  for (const seg of explodeEntity(entity)) {
+    best = Math.min(best, distPointToSegmentShape(p, seg));
+  }
+  return best;
+}
+
+/**
+ * entityId のエンティティ(rectangle/circle/polygon/slot/regularPolygon)を explodeEntity() で
+ * 一時的に自由セグメント列へ分解し、その各分解片ごとに、既存segments+他エンティティ境界との
+ * 交点で「区間」に分割する(トリムの削除候補選定・実削除の両方の土台)。findClosestSegmentPiece()と
+ * 同じ「分解した仮セグメント列+既存segments+他エンティティ境界」を対象にsplitTargetIntoPieces()を
+ * 分解片1つずつに適用する。entityIdが見つからない場合はnull。
+ */
+function explodeEntityIntoPieceGroups(
+  entities: SketchEntity[],
+  entityId: string,
+  segments: SketchSegment[],
+): SketchSegment[][] | null {
+  const target = entities.find((e) => e.id === entityId);
+  if (!target) return null;
+  const exploded = explodeEntity(target);
+  const otherEntities = entities.filter((e) => e.id !== entityId);
+  const tempSegments = [...exploded, ...segments];
+  return exploded.map((piece) => {
+    const split = splitTargetIntoPieces(tempSegments, piece.id, otherEntities);
+    return split ? split.pieces : [piece];
+  });
+}
+
+/**
+ * entityId のエンティティ上、point(ローカル2D、mm)に最も近い「区間」を返す(トリムのホバー
+ * プレビュー用、円/矩形/多角形/スロット/正多角形の輪郭をトリム対象にできるようにする、Phase 24)。
+ * entityIdが見つからない場合はnull。
+ */
+export function findClosestEntityPiece(
+  entities: SketchEntity[],
+  entityId: string,
+  segments: SketchSegment[],
+  point: Point2,
+): SketchSegment | null {
+  const groups = explodeEntityIntoPieceGroups(entities, entityId, segments);
+  if (!groups) return null;
+  let best: SketchSegment | null = null;
+  let bestDist = Infinity;
+  for (const pieces of groups) {
+    for (const piece of pieces) {
+      const d = distPointToSegmentShape(point, piece);
+      if (d < bestDist) {
+        bestDist = d;
+        best = piece;
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * entityId のエンティティを、clickPoint(ローカル2D、mm)に最も近い区間だけ取り除いた上で
+ * segmentsへ分解する(トリムクリック時のentity対応、Phase 24)。対象entityはentitiesから削除され、
+ * 残りの分解片(区間)が新しいsegmentsとして既存segmentsに追記される。App側はこれを1回の
+ * ドキュメント更新(entities・segmentsの同時置き換え)として適用すればundo1回で戻せる。
+ * entityIdが見つからない場合は元のentities/segmentsをそのまま返す。
+ */
+export function trimEntityAtPoint(
+  entities: SketchEntity[],
+  entityId: string,
+  segments: SketchSegment[],
+  clickPoint: Point2,
+): { entities: SketchEntity[]; segments: SketchSegment[] } {
+  const groups = explodeEntityIntoPieceGroups(entities, entityId, segments);
+  if (!groups) return { entities, segments };
+  let removeGroupIndex = -1;
+  let removePieceIndex = -1;
+  let bestDist = Infinity;
+  groups.forEach((pieces, gi) => {
+    pieces.forEach((piece, pi) => {
+      const d = distPointToSegmentShape(clickPoint, piece);
+      if (d < bestDist) {
+        bestDist = d;
+        removeGroupIndex = gi;
+        removePieceIndex = pi;
+      }
+    });
+  });
+  const kept: SketchSegment[] = [];
+  groups.forEach((pieces, gi) => {
+    pieces.forEach((piece, pi) => {
+      if (gi === removeGroupIndex && pi === removePieceIndex) return;
+      kept.push(piece);
+    });
+  });
+  const nextEntities = entities.filter((e) => e.id !== entityId);
+  return { entities: nextEntities, segments: [...segments, ...kept] };
+}

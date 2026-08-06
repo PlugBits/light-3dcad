@@ -27,7 +27,13 @@ import {
   type SnapCandidate,
   type SnapKind,
 } from "../sketch/snapping";
-import { distPointToSegmentShape, findClosestSegmentPiece } from "../sketch/trim";
+import { findSharedEndpoint } from "../sketch/segmentCorner";
+import {
+  distPointToEntityShape,
+  distPointToSegmentShape,
+  findClosestEntityPiece,
+  findClosestSegmentPiece,
+} from "../sketch/trim";
 import { getStandardViewOrientation, type StandardView } from "./standardViews";
 
 /** SolidWorks風の明るいグレー系ボディ色。 */
@@ -214,14 +220,16 @@ export interface SegmentDrawingCallbacks {
   onArcModeChange?: (active: boolean) => void;
 }
 
-/** トリムツール(Phase 19b)の開始/終了時に呼ばれるコールバック。 */
+/** トリムツール(Phase 19b、Phase 24でentity対応)の開始/終了時に呼ばれるコールバック。 */
 export interface TrimToolCallbacks {
   /**
-   * ホバー中の削除候補区間の上でクリックされたときに呼ばれる(targetIdは対象セグメントの元のid、
-   * clickPointはスケッチのローカル2D座標)。実際のtrimSegmentAtPoint()適用・ドキュメント更新は
-   * App側の責務とする(CadViewerはヒット判定・プレビューのみを行い、正本は持たないため)。
+   * ホバー中の削除候補区間の上でクリックされたときに呼ばれる(targetIdは対象セグメント/entityの元のid、
+   * clickPointはスケッチのローカル2D座標、isEntityはtargetIdがsegmentsではなくentities(円・矩形・
+   * 多角形・スロット等の輪郭)を指しているかどうか)。実際のtrimSegmentAtPoint()/trimEntityAtPoint()
+   * 適用・ドキュメント更新はApp側の責務とする(CadViewerはヒット判定・プレビューのみを行い、
+   * 正本は持たないため)。
    */
-  onTrimClick: (targetId: string, clickPoint: [number, number]) => void;
+  onTrimClick: (targetId: string, clickPoint: [number, number], isEntity: boolean) => void;
   /** Escapeキーまたはcancel呼び出しで終了したときに呼ばれる。 */
   onCancel: () => void;
 }
@@ -236,14 +244,22 @@ type DrawingShapeKind = "polygon" | "rectangle" | "circle" | "slot" | "regularPo
 /** 線描画モード中の円弧セグメント(Phase 17)プレビューの弧分割数。 */
 const ARC_PREVIEW_SEGMENTS = 24;
 
-/** フィレット/面取りツール(Phase 18)の開始/終了時に呼ばれるコールバック。 */
+/** フィレット/面取りツール(Phase 18、Phase 24でrectangle頂点・自由線分同士の角に対応)の開始/終了時に呼ばれるコールバック。 */
 export interface CornerToolCallbacks {
   /**
-   * polygon頂点付近(スクリーン距離10px程度以内)がクリックされたときに呼ばれる。
+   * polygon/rectangle頂点付近(スクリーン距離10px程度以内)がクリックされたときに呼ばれる。
+   * rectangleの場合、App側でまずconvertRectangleToPolygon()してからsetPolygonVertexCorner()を
+   * 適用する想定(頂点順序はsrc/model/document.tsのconvertRectangleToPolygon参照)。
    * 実際にcorners配列を更新する(トグルを含む)のはApp側の責務とする
    * (CadViewerはジオメトリのヒット判定のみを行い、ドキュメントの正本は持たないため)。
    */
   onVertexClick: (entityId: string, vertexIndex: number) => void;
+  /**
+   * 端点を共有する2本の自由な線分セグメントの角付近がクリックされたときに呼ばれる
+   * (aSegmentId/bSegmentIdはsrc/sketch/segmentCorner.tsのapplySegmentCorner()にそのまま渡すID)。
+   * 円弧セグメントが絡む角はv1では検出対象外(kind:"line"同士のみ)。
+   */
+  onSegmentCornerClick: (aSegmentId: string, bSegmentId: string) => void;
   /** Escapeキーまたはcancel呼び出しで終了したときに呼ばれる。 */
   onCancel: () => void;
 }
@@ -756,8 +772,10 @@ export class CadViewer {
   /** フィレット/面取りツール(Phase 18)がアクティブかどうか。trueの間はクリックを頂点ヒット判定として扱う。 */
   private cornerToolActive = false;
   private cornerToolBasis: PlaneBasis | null = null;
-  /** ヒット判定対象のエンティティ(対象スケッチのentities、polygon以外は無視する)。 */
+  /** ヒット判定対象のエンティティ(対象スケッチのentities、polygon/rectangleの頂点を対象とする)。 */
   private cornerToolEntities: SketchEntity[] = [];
+  /** ヒット判定対象のセグメント(対象スケッチのsegments、Phase 24。共有端点の角をヒット判定する)。 */
+  private cornerToolSegments: SketchSegment[] = [];
   private cornerToolCallbacks: CornerToolCallbacks | null = null;
 
   /** トリムツール(Phase 19b)がアクティブかどうか。trueの間はクリックを面選択でなくトリム対象クリックとして扱う。 */
@@ -765,11 +783,13 @@ export class CadViewer {
   private trimBasis: PlaneBasis | null = null;
   /** ヒット判定対象のセグメント(対象スケッチのsegments)。 */
   private trimSegments: SketchSegment[] = [];
-  /** 交点境界を提供するだけのentities(対象スケッチのentities。それ自体はトリム対象にならない)。 */
+  /** 交点境界を提供するだけでなく、Phase 24からはそれ自体もトリム対象(自動分解)になるentities。 */
   private trimEntities: SketchEntity[] = [];
   private trimCallbacks: TrimToolCallbacks | null = null;
-  /** 直近のホバーで求めた削除候補区間の元セグメントid(ヒット無しはnull)。クリック時にこれをonTrimClickへ渡す。 */
+  /** 直近のホバーで求めた削除候補区間の元セグメント/entityのid(ヒット無しはnull)。クリック時にこれをonTrimClickへ渡す。 */
   private trimHoverTargetId: string | null = null;
+  /** trimHoverTargetIdがsegmentsではなくentitiesを指しているかどうか(Phase 24)。 */
+  private trimHoverIsEntity = false;
 
   /** 寸法ツール(Phase 20b)がアクティブかどうか。trueの間はクリックを面選択でなく寸法対象クリックとして扱う。 */
   private dimensionToolActive = false;
@@ -1776,11 +1796,13 @@ export class CadViewer {
   }
 
   /**
-   * フィレット/面取りツール(Phase 18)を開始する。既存の線描画モード・面選択は中断/解除する。
-   * 以後のクリックは面選択ではなく、対象スケッチのpolygonエンティティの頂点付近ヒット判定として
-   * 扱われ、ヒットすると`callbacks.onVertexClick`が呼ばれる(実際のcorners更新はApp側の責務)。
+   * フィレット/面取りツール(Phase 18、Phase 24でrectangle頂点・自由線分の角にも対応)を開始する。
+   * 既存の線描画モード・面選択は中断/解除する。以後のクリックは面選択ではなく、対象スケッチの
+   * polygon/rectangleエンティティの頂点付近、または端点を共有する自由な線分同士の角付近の
+   * ヒット判定として扱われ、ヒットすると`callbacks.onVertexClick`/`onSegmentCornerClick`が
+   * 呼ばれる(実際のcorners更新・segments更新はApp側の責務)。
    */
-  startCornerTool(basis: PlaneBasis, entities: SketchEntity[], callbacks: CornerToolCallbacks) {
+  startCornerTool(basis: PlaneBasis, entities: SketchEntity[], segments: SketchSegment[], callbacks: CornerToolCallbacks) {
     this.cancelCornerTool();
     this.cancelPolygonDrawing();
     this.cancelTrimTool();
@@ -1791,17 +1813,19 @@ export class CadViewer {
     this.cornerToolActive = true;
     this.cornerToolBasis = basis;
     this.cornerToolEntities = entities;
+    this.cornerToolSegments = segments;
     this.cornerToolCallbacks = callbacks;
     this.renderer.domElement.style.cursor = "crosshair";
   }
 
   /**
-   * ヒット判定対象のエンティティ一覧を更新する(フィレット/面取り適用でcornersが変わった後、
-   * 呼び出し側の最新entitiesを反映するために使う想定)。ツール非アクティブ時は何もしない。
+   * ヒット判定対象のエンティティ・セグメント一覧を更新する(フィレット/面取り適用でcorners/segmentsが
+   * 変わった後、呼び出し側の最新値を反映するために使う想定)。ツール非アクティブ時は何もしない。
    */
-  updateCornerToolEntities(entities: SketchEntity[]) {
+  updateCornerToolEntities(entities: SketchEntity[], segments: SketchSegment[] = []) {
     if (!this.cornerToolActive) return;
     this.cornerToolEntities = entities;
+    this.cornerToolSegments = segments;
   }
 
   isCornerToolActive(): boolean {
@@ -1815,16 +1839,19 @@ export class CadViewer {
     this.cornerToolActive = false;
     this.cornerToolBasis = null;
     this.cornerToolEntities = [];
+    this.cornerToolSegments = [];
     this.cornerToolCallbacks = null;
     this.renderer.domElement.style.cursor = "";
     callbacks?.onCancel();
   }
 
   /**
-   * フィレット/面取りツール中のクリック処理。対象スケッチのpolygonエンティティの全頂点を
-   * スクリーン座標に投影し、クリック位置からCORNER_HIT_TOLERANCE_PX以内で最も近い頂点が
-   * あれば`onVertexClick`を呼ぶ(複数候補がある場合は最も近いものを採用)。ヒットが無ければ何もしない
-   * (連続クリックで複数頂点に適用できるよう、ツール自体は終了しない)。
+   * フィレット/面取りツール中のクリック処理。対象スケッチのpolygon/rectangleエンティティの全頂点、
+   * および端点を共有する自由な線分(kind:"line")ペアの共有端点を、それぞれスクリーン座標に投影し、
+   * クリック位置からCORNER_HIT_TOLERANCE_PX以内で最も近い候補があれば、その種別に応じて
+   * `onVertexClick`(entity頂点)または`onSegmentCornerClick`(線分の角)を呼ぶ(複数候補がある場合は
+   * 最も近いものを採用)。ヒットが無ければ何もしない(連続クリックで複数頂点に適用できるよう、
+   * ツール自体は終了しない)。
    */
   private handleCornerToolClick(event: MouseEvent) {
     if (!this.cornerToolBasis) return;
@@ -1833,26 +1860,61 @@ export class CadViewer {
     const px = event.clientX - rect.left;
     const py = event.clientY - rect.top;
 
-    type Hit = { entityId: string; vertexIndex: number; distSq: number };
-    let best: Hit | null = null;
+    type VertexHit = { kind: "vertex"; entityId: string; vertexIndex: number; distSq: number };
+    type SegmentCornerHit = { kind: "segmentCorner"; aSegmentId: string; bSegmentId: string; distSq: number };
+    let best: VertexHit | SegmentCornerHit | null = null;
+
+    const considerScreenPoint = (world: [number, number, number]) => {
+      const screen = this.projectPoint(world);
+      if (!screen) return null;
+      const dx = screen.x - px;
+      const dy = screen.y - py;
+      const distSq = dx * dx + dy * dy;
+      if (distSq > CORNER_HIT_TOLERANCE_PX * CORNER_HIT_TOLERANCE_PX) return null;
+      return distSq;
+    };
+
     for (const entity of this.cornerToolEntities) {
-      if (entity.kind !== "polygon") continue;
-      for (let vertexIndex = 0; vertexIndex < entity.points.length; vertexIndex += 1) {
-        const point = entity.points[vertexIndex];
+      let vertices: [number, number][] | null = null;
+      if (entity.kind === "polygon") vertices = entity.points;
+      else if (entity.kind === "rectangle") {
+        const [cx, cy] = entity.center;
+        const hw = entity.width / 2;
+        const hh = entity.height / 2;
+        // convertRectangleToPolygon()・rectangleEdgePoints()と同じ頂点順序(下辺左→下辺右→上辺右→上辺左)。
+        vertices = rectangleCornerPoints([cx - hw, cy - hh], [cx + hw, cy + hh]);
+      }
+      if (!vertices) continue;
+      for (let vertexIndex = 0; vertexIndex < vertices.length; vertexIndex += 1) {
+        const point = vertices[vertexIndex];
         const world = planeLocalToWorld(basis, point[0], point[1]);
-        const screen = this.projectPoint(world);
-        if (!screen) continue;
-        const dx = screen.x - px;
-        const dy = screen.y - py;
-        const distSq = dx * dx + dy * dy;
-        if (distSq > CORNER_HIT_TOLERANCE_PX * CORNER_HIT_TOLERANCE_PX) continue;
+        const distSq = considerScreenPoint(world);
+        if (distSq === null) continue;
         if (best === null || distSq < best.distSq) {
-          best = { entityId: entity.id, vertexIndex, distSq };
+          best = { kind: "vertex", entityId: entity.id, vertexIndex, distSq };
         }
       }
     }
-    if (best) {
+
+    const lineSegments = this.cornerToolSegments.filter((s) => s.kind === "line");
+    for (let i = 0; i < lineSegments.length; i += 1) {
+      for (let j = i + 1; j < lineSegments.length; j += 1) {
+        const shared = findSharedEndpoint(lineSegments[i], lineSegments[j]);
+        if (!shared) continue;
+        const world = planeLocalToWorld(basis, shared.point[0], shared.point[1]);
+        const distSq = considerScreenPoint(world);
+        if (distSq === null) continue;
+        if (best === null || distSq < best.distSq) {
+          best = { kind: "segmentCorner", aSegmentId: lineSegments[i].id, bSegmentId: lineSegments[j].id, distSq };
+        }
+      }
+    }
+
+    if (!best) return;
+    if (best.kind === "vertex") {
       this.cornerToolCallbacks?.onVertexClick(best.entityId, best.vertexIndex);
+    } else {
+      this.cornerToolCallbacks?.onSegmentCornerClick(best.aSegmentId, best.bSegmentId);
     }
   }
 
@@ -1875,6 +1937,7 @@ export class CadViewer {
     this.trimEntities = entities;
     this.trimCallbacks = callbacks;
     this.trimHoverTargetId = null;
+    this.trimHoverIsEntity = false;
     this.renderer.domElement.style.cursor = "crosshair";
   }
 
@@ -1910,9 +1973,11 @@ export class CadViewer {
   }
 
   /**
-   * トリムツール中のマウス移動処理。カーソル位置に最も近いセグメント(スクリーン距離
-   * TRIM_HOVER_TOLERANCE_PX以内)を求め、そのセグメント上でカーソルに最も近い「区間」
-   * (src/sketch/trim.ts の findClosestSegmentPiece())を赤色でプレビュー表示する。
+   * トリムツール中のマウス移動処理。カーソル位置に最も近いセグメント/entity輪郭(スクリーン距離
+   * TRIM_HOVER_TOLERANCE_PX以内、Phase 24でentity輪郭も対象)を求め、その上でカーソルに最も近い
+   * 「区間」(src/sketch/trim.ts の findClosestSegmentPiece()/findClosestEntityPiece())を
+   * 赤色でプレビュー表示する。分解後に削除される区間そのものをプレビューするため、entityを
+   * クリックした場合の見た目はsegmentの場合と変わらない。
    */
   private handleTrimMouseMove(event: MouseEvent) {
     if (!this.trimBasis) return;
@@ -1930,12 +1995,22 @@ export class CadViewer {
     const toleranceMm = this.pxToMm(TRIM_HOVER_TOLERANCE_PX, hit);
 
     let nearestId: string | null = null;
+    let nearestIsEntity = false;
     let nearestDist = Infinity;
     for (const segment of this.trimSegments) {
       const d = distPointToSegmentShape(local, segment);
       if (d < nearestDist) {
         nearestDist = d;
         nearestId = segment.id;
+        nearestIsEntity = false;
+      }
+    }
+    for (const entity of this.trimEntities) {
+      const d = distPointToEntityShape(local, entity);
+      if (d < nearestDist) {
+        nearestDist = d;
+        nearestId = entity.id;
+        nearestIsEntity = true;
       }
     }
 
@@ -1944,16 +2019,19 @@ export class CadViewer {
       this.trimHoverTargetId = null;
       return;
     }
-    const piece = findClosestSegmentPiece(this.trimSegments, nearestId, local, this.trimEntities);
+    const piece = nearestIsEntity
+      ? findClosestEntityPiece(this.trimEntities, nearestId, this.trimSegments, local)
+      : findClosestSegmentPiece(this.trimSegments, nearestId, local, this.trimEntities);
     if (!piece) {
       this.trimHoverTargetId = null;
       return;
     }
     this.trimHoverTargetId = nearestId;
+    this.trimHoverIsEntity = nearestIsEntity;
     this.drawTrimPreview(basis, piece);
   }
 
-  /** トリムツール中のクリック処理。直近のホバーでヒットした対象セグメントがあれば`onTrimClick`を呼ぶ。 */
+  /** トリムツール中のクリック処理。直近のホバーでヒットした対象セグメント/entityがあれば`onTrimClick`を呼ぶ。 */
   private handleTrimClick(event: MouseEvent) {
     if (!this.trimBasis || this.trimHoverTargetId === null) return;
     const basis = this.trimBasis;
@@ -1963,7 +2041,7 @@ export class CadViewer {
     const hit = this.raycastDrawingPlane(basis, px, py, rect);
     if (!hit) return;
     const local = planeWorldToLocal(basis, hit);
-    this.trimCallbacks?.onTrimClick(this.trimHoverTargetId, local);
+    this.trimCallbacks?.onTrimClick(this.trimHoverTargetId, local, this.trimHoverIsEntity);
   }
 
   /** トリムの削除候補区間(piece)を赤色のプレビュー線として描画する(drawingGroupを流用)。 */

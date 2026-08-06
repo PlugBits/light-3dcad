@@ -1,5 +1,7 @@
 // CadDocument に対する純粋な操作関数群。すべて非破壊(新しい CadDocument を返す)。
 import { generateId } from "./id";
+import { applySegmentCorner } from "../sketch/segmentCorner";
+import { trimEntityAtPoint, type Point2 } from "../sketch/trim";
 import type {
   CadDocument,
   ExtrudeFeature,
@@ -150,6 +152,75 @@ export function setPolygonVertexCorner(
       return { ...entity, corners: nextCorners };
     }),
   }));
+}
+
+/**
+ * rectangleエンティティを同寸法のpolygonエンティティ(4頂点、コーナー未指定)へ変換する
+ * (フィレット/面取りツールでrectangleの角をクリックしたときの下準備、Phase 24)。頂点順序は
+ * src/sketch/explode.tsのexplodeRectangle()・src/sketch/entityEdges.tsのrectangleEdgePoints()と
+ * 同じ(下辺左→下辺右→上辺右→上辺左、反時計回り)。idは維持する(参照切れを避けるため)。
+ * entity が見つからない・rectangleでない場合は元のドキュメントをそのまま返す。
+ */
+export function convertRectangleToPolygon(doc: CadDocument, sketchId: FeatureId, entityId: string): CadDocument {
+  return updateFeature<SketchFeature>(doc, sketchId, (sketch) => ({
+    ...sketch,
+    entities: sketch.entities.map((entity) => {
+      if (entity.id !== entityId || entity.kind !== "rectangle") return entity;
+      const [cx, cy] = entity.center;
+      const hw = entity.width / 2;
+      const hh = entity.height / 2;
+      const points: [number, number][] = [
+        [cx - hw, cy - hh],
+        [cx + hw, cy - hh],
+        [cx + hw, cy + hh],
+        [cx - hw, cy + hh],
+      ];
+      return { kind: "polygon", id: entity.id, points };
+    }),
+  }));
+}
+
+/**
+ * 2本の自由な線分セグメント(共有端点を持つ)にフィレット/面取りを適用する(Phase 24)。
+ * 実際の幾何計算は src/sketch/segmentCorner.ts の applySegmentCorner()。適用不可(円弧が絡む・
+ * サイズ過大等)の場合は元のドキュメントをそのまま返す。
+ */
+export function applySegmentCornerToSketch(
+  doc: CadDocument,
+  sketchId: FeatureId,
+  aSegmentId: string,
+  bSegmentId: string,
+  kind: "fillet" | "chamfer",
+  size: number,
+): CadDocument {
+  return updateFeature<SketchFeature>(doc, sketchId, (sketch) => {
+    const segments = sketch.segments ?? [];
+    const a = segments.find((s) => s.id === aSegmentId);
+    const b = segments.find((s) => s.id === bSegmentId);
+    if (!a || !b) return sketch;
+    const result = applySegmentCorner(a, b, kind, size);
+    if (!result) return sketch;
+    const nextSegments = segments.map((s) => {
+      if (s.id === aSegmentId) return result.a;
+      if (s.id === bSegmentId) return result.b;
+      return s;
+    });
+    nextSegments.push(result.corner);
+    return { ...sketch, segments: nextSegments };
+  });
+}
+
+/**
+ * entityId のエンティティ(rectangle/circle/polygon/slot/regularPolygon)を、clickPoint(ローカル2D、
+ * mm)に最も近い区間だけ削除した上でsegmentsへ分解する(トリムツールのentity対応、Phase 24)。
+ * 実際の幾何計算は src/sketch/trim.ts の trimEntityAtPoint()。entities・segmentsの置き換えを
+ * 1回のフィーチャー更新にまとめることで、undo1回で元に戻せるようにする。
+ */
+export function trimSketchEntityAtPoint(doc: CadDocument, sketchId: FeatureId, entityId: string, clickPoint: Point2): CadDocument {
+  return updateFeature<SketchFeature>(doc, sketchId, (sketch) => {
+    const result = trimEntityAtPoint(sketch.entities, entityId, sketch.segments ?? [], clickPoint);
+    return { ...sketch, entities: result.entities, segments: result.segments };
+  });
 }
 
 /** sketch に1エンティティを追加する。 */

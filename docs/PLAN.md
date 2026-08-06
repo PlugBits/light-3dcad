@@ -552,3 +552,14 @@ Vitest293件。E2E15件全通過。
 `trimSegmentAtPoint`/`findClosestSegmentPiece`が同一スケッチのentities(矩形・円・多角形・スロット・
 正多角形)を`explodeEntity`で一時セグメント化し交点境界に含めるようにした(entities自体は削除しない、
 対象はsegmentsのみ)。Vitest296件(trim.ts entities境界3件が新規)。
+
+## Phase 24: トリムのentity輪郭対応+フィレット/面取りの対象拡大
+
+トリムツールでentity(円・矩形・多角形・スロット・正多角形)の輪郭自体をクリックできるようにした
+(`trimEntityAtPoint`/`findClosestEntityPiece`が`explodeEntity`で対象entityを仮セグメント化し、
+クリック区間だけを削除してentities→segments置換とsegments更新を1回のドキュメント更新で行う。
+undo1回で戻る)。フィレット/面取りツールはrectangleエンティティの角(クリック時に同寸法のpolygonへ
+自動変換してからコーナー適用)と、端点を共有する自由な線分セグメント同士の角(新設
+`src/sketch/segmentCorner.ts`: 半径/サイズrに対しL=r/tan(φ/2)だけ両線分を短縮し、フィレットは
+接する円弧(bulge換算)、面取りは直線を挿入)にも対応した。円弧セグメントが絡む角はv1対象外。
+Vitest312件(trim.ts entity輪郭2件、segmentCorner.ts 7件が新規)。

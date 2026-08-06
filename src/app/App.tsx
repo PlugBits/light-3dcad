@@ -9,11 +9,14 @@ import { downloadStl } from "../export/downloadStl";
 import {
   addSketchEntity,
   addSketchSegments,
+  applySegmentCornerToSketch,
+  convertRectangleToPolygon,
   findFeature,
   getDependentFeatureIds,
   setPolygonVertexCorner,
   setSketchConstraints,
   setSketchSegments,
+  trimSketchEntityAtPoint,
   updateSketchEntity,
 } from "../model/document";
 import { buildAutoConstraintsForChain } from "../sketch/autoConstraints";
@@ -273,13 +276,13 @@ export default function App() {
     }
   }, [activeTool, cornerTool, trimTool, dimensionTool, constraintTool, selectedFeatureId, drawingSketchId]);
 
-  // フィレット/面取りツール中、対象スケッチのentitiesが変わった場合はヒット判定対象を更新する
-  // (フィレット/面取りは頂点座標自体は変えないため必須ではないが、将来の変更に備えて同期しておく)。
+  // フィレット/面取りツール中、対象スケッチのentities/segmentsが変わった場合はヒット判定対象を更新する
+  // (rectangle→polygon変換・線分同士のコーナー適用はentities/segmentsの両方を変えるため必須、Phase 24)。
   useEffect(() => {
     if (!cornerTool) return;
     const feature = selectedFeatureId ? findFeature(doc, selectedFeatureId) : undefined;
     if (feature?.type === "sketch") {
-      viewerRef.current?.updateCornerToolEntities(feature.entities);
+      viewerRef.current?.updateCornerToolEntities(feature.entities, feature.segments ?? []);
     }
   }, [cornerTool, doc, selectedFeatureId]);
 
@@ -562,17 +565,31 @@ export default function App() {
   function handleStartCornerTool(kind: "fillet" | "chamfer") {
     if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
     const sketchId = selectedFeature.id;
-    viewerRef.current.startCornerTool(selectedSketchPlane, selectedFeature.entities, {
+    viewerRef.current.startCornerTool(selectedSketchPlane, selectedFeature.entities, selectedFeature.segments ?? [], {
       onVertexClick: (entityId, vertexIndex) => {
         const currentDoc = useCadStore.getState().doc;
         const feature = findFeature(currentDoc, sketchId);
         if (!feature || feature.type !== "sketch") return;
         const entity = feature.entities.find((e) => e.id === entityId);
-        if (!entity || entity.kind !== "polygon") return;
+        if (!entity) return;
+        if (entity.kind === "rectangle") {
+          // rectangleは同寸法のpolygonへ変換してからコーナーを適用する(1回のドキュメント更新)。
+          const next: PolygonCorner = { kind, size: cornerSizeRef.current };
+          useCadStore.getState().updateDocument((d) =>
+            setPolygonVertexCorner(convertRectangleToPolygon(d, sketchId, entityId), sketchId, entityId, vertexIndex, next),
+          );
+          return;
+        }
+        if (entity.kind !== "polygon") return;
         const current = entity.corners?.[vertexIndex] ?? null;
         // 既に同種のコーナーが設定済みならトグルで解除、それ以外は現在のサイズで新規/種別変更する。
         const next: PolygonCorner = current && current.kind === kind ? null : { kind, size: cornerSizeRef.current };
         useCadStore.getState().updateDocument((d) => setPolygonVertexCorner(d, sketchId, entityId, vertexIndex, next));
+      },
+      onSegmentCornerClick: (aSegmentId, bSegmentId) => {
+        useCadStore.getState().updateDocument((d) =>
+          applySegmentCornerToSketch(d, sketchId, aSegmentId, bSegmentId, kind, cornerSizeRef.current),
+        );
       },
       onCancel: () => {
         setCornerTool(null);
@@ -606,10 +623,15 @@ export default function App() {
       selectedSketchPlane,
       selectedFeature.segments ?? [],
       {
-        onTrimClick: (targetId, clickPoint) => {
+        onTrimClick: (targetId, clickPoint, isEntity) => {
           const currentDoc = useCadStore.getState().doc;
           const feature = findFeature(currentDoc, sketchId);
           if (!feature || feature.type !== "sketch") return;
+          if (isEntity) {
+            // entity(円・矩形・多角形・スロット等)輪郭のトリム: entities/segmentsの置き換えを1回の更新にまとめる。
+            useCadStore.getState().updateDocument((d) => trimSketchEntityAtPoint(d, sketchId, targetId, clickPoint));
+            return;
+          }
           const nextSegments = trimSegmentAtPoint(feature.segments ?? [], targetId, clickPoint, feature.entities ?? []);
           useCadStore.getState().updateDocument((d) => setSketchSegments(d, sketchId, nextSegments));
         },
