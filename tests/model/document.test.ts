@@ -5,6 +5,7 @@ import {
   addSketchEntity,
   addSketchFeature,
   addSketchSegments,
+  applySegmentCornerToSketch,
   createEmptyDocument,
   createCircleEntity,
   createLineSegment,
@@ -24,7 +25,7 @@ import {
   validateDocument,
   validateFeature,
 } from "../../src/model";
-import type { CadDocument, ExtrudeFeature, SketchConstraint, SketchFeature } from "../../src/model";
+import type { CadDocument, ExtrudeFeature, SketchConstraint, SketchFeature, SketchSegment } from "../../src/model";
 
 function makeRectSketchDoc(): { doc: CadDocument; sketch: SketchFeature } {
   const empty = createEmptyDocument();
@@ -249,6 +250,96 @@ describe("addSketchSegments(constraints引数、Phase 20a)", () => {
     const found = findFeature(updated, sketch.id) as SketchFeature;
     expect(found.segments).toEqual([seg]);
     expect(found.constraints).toBeUndefined();
+  });
+});
+
+describe("applySegmentCornerToSketch(フィレット/面取り、Phase 24バグ修正: 隣接コーナーの拘束付け替え)", () => {
+  /** L字3本(A: (0,0)->(10,0), B: (10,0)->(10,10), C: (10,10)->(0,10))+自動拘束(コーナーA/B・B/Cのcoincident)。 */
+  function makeChainSketchDoc(): { doc: CadDocument; sketch: SketchFeature; a: SketchSegment; b: SketchSegment; c: SketchSegment } {
+    const empty = createEmptyDocument();
+    const { doc: doc0, feature } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [],
+    });
+    const a = createLineSegment({ p1: [0, 0], p2: [10, 0] });
+    const b = createLineSegment({ p1: [10, 0], p2: [10, 10] });
+    const c = createLineSegment({ p1: [10, 10], p2: [0, 10] });
+    const constraints: SketchConstraint[] = [
+      { id: "c-ab", kind: "coincident", a: { segmentId: a.id, end: "p2" }, b: { segmentId: b.id, end: "p1" } },
+      { id: "c-bc", kind: "coincident", a: { segmentId: b.id, end: "p2" }, b: { segmentId: c.id, end: "p1" } },
+    ];
+    const doc = addSketchSegments(doc0, feature.id, [a, b, c], constraints);
+    return { doc, sketch: feature, a, b, c };
+  }
+
+  it("フィレット適用時に、共有端点を結んでいた旧coincidentを削除し、a-corner/corner-bの新coincidentに置き換える", () => {
+    const { doc, sketch, a, b } = makeChainSketchDoc();
+    const next = applySegmentCornerToSketch(doc, sketch.id, a.id, b.id, "fillet", 2);
+    const found = findFeature(next, sketch.id) as SketchFeature;
+    const constraints = found.constraints ?? [];
+    // 旧: a.p2 <-> b.p1 のcoincidentは残っていない。
+    const stale = constraints.find(
+      (c) =>
+        c.kind === "coincident" &&
+        ((c.a.segmentId === a.id && c.a.end === "p2" && c.b.segmentId === b.id && c.b.end === "p1") ||
+          (c.b.segmentId === a.id && c.b.end === "p2" && c.a.segmentId === b.id && c.a.end === "p1")),
+    );
+    expect(stale).toBeUndefined();
+    // 新規に追加された円弧セグメント(corner)を特定する(a・b以外でsegments末尾に追加される)。
+    const cornerId = (found.segments ?? []).find((s) => s.id !== a.id && s.id !== b.id && s.kind === "arc")?.id;
+    expect(cornerId).toBeDefined();
+    // 新: a接点 <-> corner.p1、corner.p2 <-> b接点 のcoincidentが追加されている。
+    const hasAToCorner = constraints.some(
+      (c) =>
+        c.kind === "coincident" &&
+        ((c.a.segmentId === a.id && c.a.end === "p2" && c.b.segmentId === cornerId && c.b.end === "p1") ||
+          (c.b.segmentId === a.id && c.b.end === "p2" && c.a.segmentId === cornerId && c.a.end === "p1")),
+    );
+    const hasCornerToB = constraints.some(
+      (c) =>
+        c.kind === "coincident" &&
+        ((c.a.segmentId === cornerId && c.a.end === "p2" && c.b.segmentId === b.id && c.b.end === "p1") ||
+          (c.b.segmentId === cornerId && c.b.end === "p2" && c.a.segmentId === b.id && c.a.end === "p1")),
+    );
+    expect(hasAToCorner).toBe(true);
+    expect(hasCornerToB).toBe(true);
+    // b/cの拘束(今回のコーナーと無関係な端点)はそのまま残る。
+    expect(constraints.some((c) => c.id === "c-bc")).toBe(true);
+  });
+
+  it("隣接する2つの角を連続でフィレットしても、各セグメントの端点が新しい接点と一致し続ける(破綻しない)", () => {
+    const { doc, sketch, a, b, c } = makeChainSketchDoc();
+    const afterFirst = applySegmentCornerToSketch(doc, sketch.id, a.id, b.id, "fillet", 2);
+    const afterSecond = applySegmentCornerToSketch(afterFirst, sketch.id, b.id, c.id, "fillet", 2);
+    const found = findFeature(afterSecond, sketch.id) as SketchFeature;
+    const segments = found.segments ?? [];
+    const constraints = found.constraints ?? [];
+
+    const segA = segments.find((s) => s.id === a.id)!;
+    const segB = segments.find((s) => s.id === b.id)!;
+    const segC = segments.find((s) => s.id === c.id)!;
+    expect(segA.kind).toBe("line");
+    expect(segB.kind).toBe("line");
+    expect(segC.kind).toBe("line");
+
+    // bはp1(角1側)・p2(角2側)の両方が短縮されているはず(いずれも元の端点(10,0)/(10,10)ではない)。
+    expect(segB.p1).not.toEqual([10, 0]);
+    expect(segB.p2).not.toEqual([10, 10]);
+
+    // すべてのcoincident拘束が指す端点座標が、実際に一致していること(=拘束と幾何が整合している)。
+    const pointAt = (segId: string, end: "p1" | "p2"): [number, number] | null => {
+      const seg = segments.find((s) => s.id === segId);
+      return seg ? seg[end] : null;
+    };
+    for (const constraint of constraints) {
+      if (constraint.kind !== "coincident") continue;
+      const pa = pointAt(constraint.a.segmentId, constraint.a.end);
+      const pb = pointAt(constraint.b.segmentId, constraint.b.end);
+      expect(pa).not.toBeNull();
+      expect(pb).not.toBeNull();
+      expect(Math.hypot(pa![0] - pb![0], pa![1] - pb![1])).toBeLessThan(1e-9);
+    }
   });
 });
 

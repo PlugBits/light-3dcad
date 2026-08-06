@@ -1,6 +1,6 @@
 // CadDocument に対する純粋な操作関数群。すべて非破壊(新しい CadDocument を返す)。
 import { generateId } from "./id";
-import { applySegmentCorner } from "../sketch/segmentCorner";
+import { applySegmentCorner, findSharedEndpoint } from "../sketch/segmentCorner";
 import { trimEntityAtPoint, type Point2 } from "../sketch/trim";
 import type {
   CadDocument,
@@ -206,7 +206,41 @@ export function applySegmentCornerToSketch(
       return s;
     });
     nextSegments.push(result.corner);
-    return { ...sketch, segments: nextSegments };
+
+    // a・bが共有していた元の端点を結んでいたcoincident拘束は、フィレット/面取りで両端点が
+    // 接点まで短縮されて別の座標になるため、そのまま残すと次のソルバ実行時に接点が元の角の
+    // 位置へ引き戻されて円弧が破綻する(隣接する角を連続でフィレットしたときに顕著)。
+    // 元のcoincidentを削除し、代わりに「a接点↔挿入セグメント始端」「挿入セグメント末端↔b接点」の
+    // coincidentを付け直す(buildAutoConstraintsForChainが線分描画確定時に付与する形式と同じ)。
+    const shared = findSharedEndpoint(a, b);
+    let nextConstraints = sketch.constraints ?? [];
+    if (shared) {
+      const { aEnd, bEnd } = shared;
+      nextConstraints = nextConstraints.filter((c) => {
+        if (c.kind !== "coincident") return true;
+        const linksSharedPair =
+          (c.a.segmentId === aSegmentId && c.a.end === aEnd && c.b.segmentId === bSegmentId && c.b.end === bEnd) ||
+          (c.b.segmentId === aSegmentId && c.b.end === aEnd && c.a.segmentId === bSegmentId && c.a.end === bEnd);
+        return !linksSharedPair;
+      });
+      nextConstraints = [
+        ...nextConstraints,
+        {
+          id: generateId("constraint"),
+          kind: "coincident",
+          a: { segmentId: aSegmentId, end: aEnd },
+          b: { segmentId: result.corner.id, end: "p1" },
+        },
+        {
+          id: generateId("constraint"),
+          kind: "coincident",
+          a: { segmentId: result.corner.id, end: "p2" },
+          b: { segmentId: bSegmentId, end: bEnd },
+        },
+      ];
+    }
+
+    return { ...sketch, segments: nextSegments, constraints: nextConstraints };
   });
 }
 
