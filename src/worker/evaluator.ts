@@ -18,6 +18,7 @@ import { Plane, draw, drawCircle, drawRectangle, type Drawing, type Face, type S
 
 import type { CadDocument, FeatureId, PolygonCorner, SketchEntity, SketchFeature } from "../model/types";
 import { validatePolygonCorners } from "../model/validation";
+import { classifySketchEntities } from "../sketch/containment";
 import type { SketchPlaneInfo } from "../protocol/messages";
 
 export interface EvaluationSuccess {
@@ -146,28 +147,50 @@ function validateSketchPolygonCorners(sketch: SketchFeature): void {
   }
 }
 
-/** sketch内のentities(rectangle/circle/polygon)を1つのDrawingに合成する。 */
+/** 1つのエンティティ(rectangle/circle/polygon)をDrawingに変換する。 */
+function entityDrawing(entity: SketchEntity): Drawing {
+  if (entity.kind === "rectangle") {
+    const [cx, cy] = entity.center;
+    return drawRectangle(entity.width, entity.height).translate(cx, cy);
+  }
+  if (entity.kind === "circle") {
+    const [cx, cy] = entity.center;
+    return drawCircle(entity.radius).translate(cx, cy);
+  }
+  return polygonDrawing(entity.points, entity.corners);
+}
+
+/** エンティティ列をfuseで1つのDrawingに合成する(entitiesは非空を前提)。 */
+function fuseEntities(entities: SketchEntity[]): Drawing {
+  let drawing: Drawing | null = null;
+  for (const entity of entities) {
+    const piece = entityDrawing(entity);
+    drawing = drawing ? drawing.fuse(piece) : piece;
+  }
+  // 呼び出し側で entities.length > 0 を保証しているため drawing は必ず非null。
+  return drawing as Drawing;
+}
+
+/**
+ * sketch内のentities(rectangle/circle/polygon)を1つのDrawingに合成する(Phase 15: 入れ子穴対応)。
+ * src/sketch/containment.ts の分類(2階層: 外枠/穴)に基づき、
+ * 外枠(outers)同士をfuseしたのち、穴(holes)を外枠に含まれる他のいずれのエンティティにも
+ * 完全に含まれるエンティティ)をまとめてfuseしてcutする。部分的に重なる(包含ではない)
+ * エンティティは従来どおりfuse対象のまま(いずれもoutersに分類される)。
+ */
 function buildDrawing(entities: SketchEntity[]): Drawing {
   if (entities.length === 0) {
     throw new Error("スケッチに図形がありません");
   }
 
-  let drawing: Drawing | null = null;
-  for (const entity of entities) {
-    let piece: Drawing;
-    if (entity.kind === "rectangle") {
-      const [cx, cy] = entity.center;
-      piece = drawRectangle(entity.width, entity.height).translate(cx, cy);
-    } else if (entity.kind === "circle") {
-      const [cx, cy] = entity.center;
-      piece = drawCircle(entity.radius).translate(cx, cy);
-    } else {
-      piece = polygonDrawing(entity.points, entity.corners);
-    }
-    drawing = drawing ? drawing.fuse(piece) : piece;
+  const { outers, holes } = classifySketchEntities(entities);
+  // entitiesが非空である限り、包含関係に循環は起こり得ないため outers は必ず1件以上になる。
+  let drawing = fuseEntities(outers);
+  if (holes.length > 0) {
+    const holeDrawing = fuseEntities(holes);
+    drawing = drawing.cut(holeDrawing);
   }
-  // entities.length > 0 が保証されているため drawing は必ず非null。
-  return drawing as Drawing;
+  return drawing;
 }
 
 /** faceの中心・法線をプレーンなタプルとして取り出す(Vectorラッパーは即delete)。 */

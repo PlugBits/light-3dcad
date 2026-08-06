@@ -662,6 +662,96 @@ describe("evaluateDocument (WASM統合)", () => {
       result.shape.delete();
     }
   });
+  it("矩形60x40の中に完全に含まれる円r=10を同一スケッチに置いて押し出すと、穴あき板の体積になる(Phase 15)", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const rect = createRectangleEntity({ width: 60, height: 40 });
+    const hole = createCircleEntity({ radius: 10 });
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect, hole],
+    });
+    const { doc } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const bbox = result.shape.boundingBox;
+    // 穴は外形の内側に収まるので外形のバウンディングボックス(60x40x20)は変わらない。
+    expect(bbox.width).toBeCloseTo(60, 6);
+    expect(bbox.height).toBeCloseTo(40, 6);
+    expect(bbox.depth).toBeCloseTo(20, 6);
+    bbox.delete();
+
+    // 断面積 = 60*40 - π*10^2、高さ20の押し出し体積。
+    const expectedVolume = (60 * 40 - Math.PI * 10 * 10) * 20;
+    const volume = measureVolume(result.shape);
+    expect(volume).toBeLessThan(60 * 40 * 20);
+    expect(volume).toBeCloseTo(expectedVolume, 0);
+
+    result.shape.delete();
+  });
+
+  it("円(半径20)の中に完全に含まれる円(半径8)でドーナツ形状になる(Phase 15)", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+
+    // 比較基準: 穴なしの単純な円柱(半径20)。
+    const plainDoc0 = createEmptyDocument();
+    const { doc: plainDoc1, feature: plainSketch } = addSketchFeature(plainDoc0, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [createCircleEntity({ radius: 20 })],
+    });
+    const { doc: plainDoc } = addExtrudeFeature(plainDoc1, {
+      name: "Extrude1",
+      sketchId: plainSketch.id,
+      distance: 5,
+      direction: 1,
+      operation: "newBody",
+    });
+    const plainResult = evaluateDocument(plainDoc);
+    expect(plainResult.ok).toBe(true);
+    if (!plainResult.ok) return;
+    const plainFaces = countFaces(plainResult.shape);
+    plainResult.shape.delete();
+
+    const outer = createCircleEntity({ radius: 20 });
+    const inner = createCircleEntity({ radius: 8 });
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [outer, inner],
+    });
+    const { doc } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: 5,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    // ドーナツ形状は中心を貫通する穴があるため、単純な円柱(穴なし)より面数が多い。
+    expect(countFaces(result.shape)).toBeGreaterThan(plainFaces);
+
+    const expectedVolume = (Math.PI * 20 * 20 - Math.PI * 8 * 8) * 5;
+    const volume = measureVolume(result.shape);
+    expect(volume).toBeCloseTo(expectedVolume, 0);
+
+    result.shape.delete();
+  });
 });
 
 describe("evaluateDocument (WASM統合): スケッチ・オン・フェイス", () => {
