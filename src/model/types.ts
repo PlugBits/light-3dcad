@@ -166,7 +166,18 @@ export type SketchConstraint =
       kind: "tangent";
       entity: EntityRef;
       target: { kind: "segment"; segmentId: string } | { kind: "entity"; entityId: string; mode: "external" | "internal" };
-    };
+    }
+  /**
+   * 2本の直線セグメント(kind:"line"のみ対象)がほぼ平行なときの、平行距離拘束(Phase 24)。
+   * 残差は線分aの両端点それぞれから線分bの無限直線への符号付き垂直距離−value(2残差)。
+   * これにより平行(両端点が同じ距離になる)と距離が同時に拘束される。
+   */
+  | { id: string; kind: "distanceLineLine"; a: string; b: string; value: number }
+  /**
+   * 2本の直線セグメント(kind:"line"のみ対象)が非平行なときの、方向のなす角拘束(度、Phase 24)。
+   * 残差は方向ベクトルのなす角(atan2ベース、0〜180度)−value。
+   */
+  | { id: string; kind: "angleLineLine"; a: string; b: string; value: number };
 
 /**
  * 2Dスケッチフィーチャー。

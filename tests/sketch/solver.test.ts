@@ -563,6 +563,80 @@ describe("solveSketch 幾何拘束(perpendicular/concentric/tangent、Phase 23)"
   });
 });
 
+describe("solveSketch 線分↔線分の寸法(distanceLineLine/angleLineLine、Phase 24)", () => {
+  it("① distanceLineLine: ほぼ平行な2直線が、指定距離だけ離れた平行線に解ける", () => {
+    const a: SketchSegment = { id: "a", kind: "line", p1: [0, 0], p2: [10, 0.1] };
+    const b: SketchSegment = { id: "b", kind: "line", p1: [0, 4], p2: [10, 4.2] };
+    const constraints: SketchConstraint[] = [{ id: "c1", kind: "distanceLineLine", a: "a", b: "b", value: 8 }];
+    const result = solveSketch([a, b], constraints);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const [outA, outB] = result.segments;
+    // 平行(方向ベクトルが揃う)であること。
+    const dax = outA.p2[0] - outA.p1[0];
+    const day = outA.p2[1] - outA.p1[1];
+    const dbx = outB.p2[0] - outB.p1[0];
+    const dby = outB.p2[1] - outB.p1[1];
+    const cross = dax * dby - day * dbx;
+    expect(cross).toBeCloseTo(0, 3);
+    // aの両端点それぞれから直線bまでの距離が8mmに解けていること。
+    const lenB = Math.hypot(dbx, dby);
+    const distP1 = Math.abs((outA.p1[0] - outB.p1[0]) * dby - (outA.p1[1] - outB.p1[1]) * dbx) / lenB;
+    const distP2 = Math.abs((outA.p2[0] - outB.p1[0]) * dby - (outA.p2[1] - outB.p1[1]) * dbx) / lenB;
+    expect(distP1).toBeCloseTo(8, 3);
+    expect(distP2).toBeCloseTo(8, 3);
+  });
+
+  it("② distanceLineLine + length: 平行距離を維持したまま片方の長さも指定値に解ける(併用)", () => {
+    const a: SketchSegment = { id: "a", kind: "line", p1: [0, 0], p2: [10, 0] };
+    const b: SketchSegment = { id: "b", kind: "line", p1: [0, 5], p2: [10, 5.3] };
+    const constraints: SketchConstraint[] = [
+      { id: "c1", kind: "distanceLineLine", a: "a", b: "b", value: 6 },
+      { id: "c2", kind: "length", segmentId: "b", value: 15 },
+    ];
+    const result = solveSketch([a, b], constraints);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const [outA, outB] = result.segments;
+    expect(dist(outB.p1, outB.p2)).toBeCloseTo(15, 3);
+    const dbx = outB.p2[0] - outB.p1[0];
+    const dby = outB.p2[1] - outB.p1[1];
+    const lenB = Math.hypot(dbx, dby);
+    const distP1 = Math.abs((outA.p1[0] - outB.p1[0]) * dby - (outA.p1[1] - outB.p1[1]) * dbx) / lenB;
+    const distP2 = Math.abs((outA.p2[0] - outB.p1[0]) * dby - (outA.p2[1] - outB.p1[1]) * dbx) / lenB;
+    expect(distP1).toBeCloseTo(6, 2);
+    expect(distP2).toBeCloseTo(6, 2);
+  });
+
+  it("③ angleLineLine: 角度90度を指定すると垂直相当に解ける(内積が0に収束)", () => {
+    const a: SketchSegment = { id: "a", kind: "line", p1: [0, 0], p2: [10, 0.3] };
+    const b: SketchSegment = { id: "b", kind: "line", p1: [5, -5], p2: [5.2, 5] };
+    const constraints: SketchConstraint[] = [{ id: "c1", kind: "angleLineLine", a: "a", b: "b", value: 90 }];
+    const result = solveSketch([a, b], constraints);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const [outA, outB] = result.segments;
+    const dax = outA.p2[0] - outA.p1[0];
+    const day = outA.p2[1] - outA.p1[1];
+    const dbx = outB.p2[0] - outB.p1[0];
+    const dby = outB.p2[1] - outB.p1[1];
+    expect(dax * dbx + day * dby).toBeCloseTo(0, 3);
+  });
+
+  it("④ 矛盾: 同じ2直線にdistanceLineLine(平行距離8)とangleLineLine(60度)を同時指定すると矛盾する", () => {
+    const a: SketchSegment = { id: "a", kind: "line", p1: [0, 0], p2: [10, 0.1] };
+    const b: SketchSegment = { id: "b", kind: "line", p1: [0, 4], p2: [10, 4.2] };
+    const constraints: SketchConstraint[] = [
+      { id: "c1", kind: "distanceLineLine", a: "a", b: "b", value: 8 },
+      { id: "c2", kind: "angleLineLine", a: "a", b: "b", value: 60 },
+    ];
+    const result = solveSketch([a, b], constraints);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.conflicting).toBe(true);
+  });
+});
+
 describe("solveDocumentSketches", () => {
   function makeDoc(features: SketchFeature[]): CadDocument {
     return { version: 1, features };

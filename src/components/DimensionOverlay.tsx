@@ -13,10 +13,12 @@ import {
   computeConstraintDimensions,
   constraintDimensionKey,
   formatConstraintDimensionLabel,
+  upsertAngleLineLineConstraint,
   upsertDistanceConstraint,
   upsertDistanceEntityEntityConstraint,
   upsertDistanceEntityLineConstraint,
   upsertDistanceEntityOriginConstraint,
+  upsertDistanceLineLineConstraint,
   upsertLengthConstraint,
   upsertRadiusConstraint,
   type ConstraintDimension,
@@ -140,6 +142,22 @@ function constraintDimensionGraphics(
     const foot: Point2 = [a[0] + t * dx, a[1] + t * dy];
     return computeLinearDimensionGraphics(c, foot);
   }
+  if (dimension.kind === "seg-distance-line-line") {
+    const segA = segments.find((s) => s.id === dimension.a);
+    const segB = segments.find((s) => s.id === dimension.b);
+    if (!segA || !segB) return null;
+    // 線分aの中点から線分b(無限直線扱い)への垂線の足までを寸法線にする(両線分間の垂直寸法線)。
+    const mid: Point2 = [(segA.p1[0] + segA.p2[0]) / 2, (segA.p1[1] + segA.p2[1]) / 2];
+    const dx = segB.p2[0] - segB.p1[0];
+    const dy = segB.p2[1] - segB.p1[1];
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq < 1e-12) return null;
+    const t = ((mid[0] - segB.p1[0]) * dx + (mid[1] - segB.p1[1]) * dy) / lenSq;
+    const foot: Point2 = [segB.p1[0] + t * dx, segB.p1[1] + t * dy];
+    return computeLinearDimensionGraphics(mid, foot);
+  }
+  // seg-angle-line-line(Phase 24)は弧の描画をv1では省略し、ラベルのみ表示する(既知の制限)。
+  if (dimension.kind === "seg-angle-line-line") return null;
   const seg = segments.find((s) => s.id === dimension.segmentId);
   if (!seg || seg.kind !== "arc" || !seg.bulge) return null;
   const geo = arcGeometryFromBulge(seg.p1, seg.p2, seg.bulge);
@@ -201,6 +219,8 @@ const CONSTRAINT_DIMENSION_LABELS: Record<ConstraintDimension["kind"], string> =
   "entity-distance-origin": "中心↔原点の距離 (mm)",
   "entity-distance-entity": "中心間の距離 (mm)",
   "entity-distance-line": "中心↔辺の距離 (mm)",
+  "seg-distance-line-line": "距離 (mm)",
+  "seg-angle-line-line": "角度 (°)",
 };
 
 export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflictRollback }: DimensionOverlayProps) {
@@ -339,7 +359,11 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
                   ? upsertDistanceEntityOriginConstraint(constraints, dimension.entityId, value)
                   : dimension.kind === "entity-distance-entity"
                     ? upsertDistanceEntityEntityConstraint(constraints, dimension.aEntityId, dimension.bEntityId, value, axis)
-                    : upsertDistanceEntityLineConstraint(constraints, dimension.entityId, dimension.line, value);
+                    : dimension.kind === "entity-distance-line"
+                      ? upsertDistanceEntityLineConstraint(constraints, dimension.entityId, dimension.line, value)
+                      : dimension.kind === "seg-distance-line-line"
+                        ? upsertDistanceLineLineConstraint(constraints, dimension.a, dimension.b, value)
+                        : upsertAngleLineLineConstraint(constraints, dimension.a, dimension.b, value);
         return setSketchConstraints(doc, sketch.id, next);
       },
       onConflictRollback,

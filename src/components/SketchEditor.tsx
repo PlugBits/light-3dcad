@@ -399,6 +399,8 @@ const CONSTRAINT_KIND_LABELS: Record<SketchConstraint["kind"], string> = {
   perpendicular: "垂直",
   concentric: "同心",
   tangent: "接線",
+  distanceLineLine: "平行距離",
+  angleLineLine: "角度",
 };
 
 /** entityIdから「円1」のような表示用の短いラベルを作る(順序はentities配列準拠)。 */
@@ -439,6 +441,10 @@ function describeConstraint(
       return entityLabel(entities, constraint.entity.entityId);
     case "perpendicular":
       return `${segmentLabel(segments, constraint.a)} ⊥ ${segmentLabel(segments, constraint.b)}`;
+    case "distanceLineLine":
+      return `${segmentLabel(segments, constraint.a)} // ${segmentLabel(segments, constraint.b)} = ${constraint.value.toFixed(2)}mm`;
+    case "angleLineLine":
+      return `${segmentLabel(segments, constraint.a)} ∠ ${segmentLabel(segments, constraint.b)} = ${constraint.value.toFixed(2)}°`;
     case "concentric":
       return `${entityLabel(entities, constraint.a.entityId)} = ${entityLabel(entities, constraint.b.entityId)}`;
     case "tangent": {

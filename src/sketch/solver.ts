@@ -284,6 +284,38 @@ function tangentLineValue(x: number[], centerIdx: [number, number], lineBase: nu
   return (sign * cross) / len - radius;
 }
 
+/**
+ * 点(pointIdx、変数)から直線セグメント(lineBase、両端点とも変数)への符号付き垂直距離 − value
+ * (distanceLineLine拘束、Phase 24)。tangentLineValueと同形だが、対象が円の半径ではなく
+ * 平行距離拘束のvalueである点のみが異なる(circleの中心↔線分は片方だけ変数、こちらは
+ * 点・線分ともに変数という違いはあるが、cross/len自体の式は共通のため関数は共有できる)。
+ */
+function pointToVariableLineDistanceValue(
+  x: number[],
+  pointIdx: [number, number],
+  lineBase: number,
+  value: number,
+  sign: number,
+): number {
+  return tangentLineValue(x, pointIdx, lineBase, value, sign);
+}
+
+/**
+ * 2本の直線(方向ベクトル)のなす角(度、0〜180)。atan2(|cross|, dot)を使うことで
+ * 直線に向きの区別が無いことを反映する(方向を反転しても同じ角度になる)。
+ * 数値微分(numericResidual)前提の値なので、角度の折り返し境界(0度・180度ぴったり)付近の
+ * 微分不連続は実用上は初期形状からの小さな反復では問題にならない(既知の制限)。
+ */
+function angleLineLineValueDeg(x: number[], aBase: number, bBase: number): number {
+  const dax = x[aBase + 2] - x[aBase];
+  const day = x[aBase + 3] - x[aBase + 1];
+  const dbx = x[bBase + 2] - x[bBase];
+  const dby = x[bBase + 3] - x[bBase + 1];
+  const cross = dax * dby - day * dbx;
+  const dot = dax * dbx + day * dby;
+  return (Math.atan2(Math.abs(cross), dot) * 180) / Math.PI;
+}
+
 /** 拘束由来の残差式一覧を作る(正則化は含まない)。参照先セグメントが見つからない拘束は無視する(呼び出し側でバリデーション済みの前提)。 */
 function buildConstraintResiduals(
   constraints: readonly SketchConstraint[],
@@ -450,6 +482,48 @@ function buildConstraintResiduals(
           const value = target.mode === "internal" ? Math.abs(circle.radius - other.radius) : circle.radius + other.radius;
           eqs.push(lengthLikeResidual(x, idx, bIdx, value));
         }
+        break;
+      }
+      case "distanceLineLine": {
+        const baseA = varIndex.get(c.a);
+        const baseB = varIndex.get(c.b);
+        if (baseA === undefined || baseB === undefined) break;
+        const lineA0: Point2 = [initX[baseB], initX[baseB + 1]];
+        const lineB0: Point2 = [initX[baseB + 2], initX[baseB + 3]];
+        const signP1 = lineSideSign(initX, [baseA, baseA + 1], lineA0, lineB0);
+        const signP2 = lineSideSign(initX, [baseA + 2, baseA + 3], lineA0, lineB0);
+        eqs.push(
+          numericResidual(
+            (vars) => pointToVariableLineDistanceValue(vars, [baseA, baseA + 1], baseB, c.value, signP1),
+            x,
+            [baseA, baseA + 1, baseB, baseB + 1, baseB + 2, baseB + 3],
+          ),
+        );
+        eqs.push(
+          numericResidual(
+            (vars) => pointToVariableLineDistanceValue(vars, [baseA + 2, baseA + 3], baseB, c.value, signP2),
+            x,
+            [baseA + 2, baseA + 3, baseB, baseB + 1, baseB + 2, baseB + 3],
+          ),
+        );
+        break;
+      }
+      case "angleLineLine": {
+        const baseA = varIndex.get(c.a);
+        const baseB = varIndex.get(c.b);
+        if (baseA === undefined || baseB === undefined) break;
+        eqs.push(
+          numericResidual((vars) => angleLineLineValueDeg(vars, baseA, baseB) - c.value, x, [
+            baseA,
+            baseA + 1,
+            baseA + 2,
+            baseA + 3,
+            baseB,
+            baseB + 1,
+            baseB + 2,
+            baseB + 3,
+          ]),
+        );
         break;
       }
     }

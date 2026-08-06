@@ -304,14 +304,22 @@ export type DimensionToolTarget =
    */
   | { kind: "circle-distance-edge"; entityId: string; edgeA: [number, number]; edgeB: [number, number]; line: LineRef }
   /** ボディ端面参照エッジ(Phase 22)への距離。lineは常に"refEdge"(ピック時点のスナップショット)。 */
-  | { kind: "circle-distance-refedge"; entityId: string; edgeA: [number, number]; edgeB: [number, number]; line: LineRef };
+  | { kind: "circle-distance-refedge"; entityId: string; edgeA: [number, number]; edgeB: [number, number]; line: LineRef }
+  /**
+   * 線分↔線分の寸法(Phase 24)。aが1点目(lengthポップアップが開いていた直線セグメント)、
+   * bが2点目(後にクリックした直線セグメント)。平行(方向のなす角<5度)かどうか・実際に
+   * distanceLineLine/angleLineLineのどちらの拘束にするかの判定はApp側の責務とする
+   * (src/sketch/constraintDimensions.tsのangleBetweenSegments参照)。
+   */
+  | { kind: "line-line"; a: string; b: string };
 
 /**
  * 位置寸法(circle-distance-*)の1点目待ち状態(UI改善: ユーザー実機フィードバック対応)。
  * "circle"はcircleエンティティをクリックして2点目(原点/円/辺/端面)待ち、"point"はdistance拘束の
- * 端点1点目クリック後で2点目の端点待ち。未保留はnull。
+ * 端点1点目クリック後で2点目の端点待ち、"line"は直線セグメントのlengthポップアップ表示中で
+ * 2点目の直線セグメント待ち(Phase 24、線分↔線分の寸法)。未保留はnull。
  */
-export type DimensionPendingState = { kind: "circle" | "point" } | null;
+export type DimensionPendingState = { kind: "circle" | "point" | "line" } | null;
 
 /** 寸法ツール(Phase 20b)の開始/終了時に呼ばれるコールバック。 */
 export interface DimensionToolCallbacks {
@@ -812,6 +820,13 @@ export class CadViewer {
    * 通常のdistance拘束用ペア(dimensionPendingPoint)とは独立した状態。
    */
   private dimensionPendingCircleId: string | null = null;
+  /**
+   * 線分↔線分の寸法(Phase 24)用: 直線セグメント(kind:"line")をクリックしてlengthターゲットを
+   * 確定させた直後、そのsegmentIdを保持する(未保留はnull、length入力ポップアップが開いている間に
+   * 相当)。保持中に別の直線セグメントをクリックすると、通常のlengthではなくline-lineターゲットとして
+   * onTargetPickedを呼ぶ(円のdimensionPendingCircleIdと同じ「1点目保持→2点目」パターン)。
+   */
+  private dimensionPendingLineId: string | null = null;
 
   /** 拘束ツール(Phase 23)がアクティブかどうか。trueの間はクリックを面選択でなく拘束対象クリックとして扱う。 */
   private constraintToolActive = false;
@@ -2087,6 +2102,7 @@ export class CadViewer {
     this.setDimensionPendingPoint(null);
     this.dimensionHoverEntityHit = null;
     this.setDimensionPendingCircle(null);
+    this.setDimensionPendingLine(null);
     this.renderer.domElement.style.cursor = "crosshair";
   }
 
@@ -2103,6 +2119,7 @@ export class CadViewer {
     this.setDimensionPendingPoint(null);
     this.dimensionHoverEntityHit = null;
     this.setDimensionPendingCircle(null);
+    this.setDimensionPendingLine(null);
   }
 
   isDimensionToolActive(): boolean {
@@ -2157,6 +2174,7 @@ export class CadViewer {
     this.setDimensionPendingPoint(null);
     this.dimensionHoverEntityHit = null;
     this.setDimensionPendingCircle(null);
+    this.setDimensionPendingLine(null);
     this.renderer.domElement.style.cursor = "";
     this.clearDrawingPreview();
     callbacks?.onCancel();
@@ -2234,6 +2252,7 @@ export class CadViewer {
 
     if (bestPoint) {
       this.setDimensionPendingCircle(null);
+      this.setDimensionPendingLine(null);
       const pending = this.dimensionPendingPoint;
       if (pending && !(pending.segmentId === bestPoint.ref.segmentId && pending.end === bestPoint.ref.end)) {
         this.setDimensionPendingPoint(null);
@@ -2275,6 +2294,7 @@ export class CadViewer {
       const fromEntityId = this.dimensionPendingCircleId;
       this.setDimensionPendingCircle(null);
       this.setDimensionPendingPoint(null);
+      this.setDimensionPendingLine(null);
       this.clearDrawingPreview();
       this.dimensionToolCallbacks?.onTargetPicked(
         { kind: "circle-distance-circle", fromEntityId, toEntityId: entityHit.entityId },
@@ -2304,6 +2324,7 @@ export class CadViewer {
       const entityId = this.dimensionPendingCircleId as string;
       this.setDimensionPendingCircle(null);
       this.setDimensionPendingPoint(null);
+      this.setDimensionPendingLine(null);
       this.clearDrawingPreview();
       this.dimensionToolCallbacks?.onTargetPicked(
         {
@@ -2322,6 +2343,7 @@ export class CadViewer {
     // セグメントとentityの両方が許容距離内にヒットしうる場合は、より近い方を優先する。
     if (entityHit && entityHit.dist <= toleranceMm && (nearestId === null || entityHit.dist < nearestDist)) {
       this.setDimensionPendingPoint(null);
+      this.setDimensionPendingLine(null);
       this.clearDrawingPreview();
       if (entityHit.kind === "entity-radius") {
         // circle単独クリック: 従来通りentity-radius(半径編集)。以降の1クリックで距離モードへ
@@ -2363,18 +2385,31 @@ export class CadViewer {
     if (!seg) return;
     if (seg.kind === "arc" && seg.bulge) {
       this.setDimensionPendingCircle(null);
+      this.setDimensionPendingLine(null);
       this.dimensionToolCallbacks?.onTargetPicked({ kind: "radius", segmentId: nearestId }, px, py);
     } else if (this.dimensionPendingCircleId) {
       // circleクリック済みで自由線分(セグメント本体)をクリック => circle-distance-edge
       // (自由なsegmentsはEntityRefで指せないためrefEdgeとして座標を凍結する、v1の簡易対応)。
       const entityId = this.dimensionPendingCircleId;
       this.setDimensionPendingCircle(null);
+      this.setDimensionPendingLine(null);
       this.dimensionToolCallbacks?.onTargetPicked(
         { kind: "circle-distance-edge", entityId, edgeA: seg.p1, edgeB: seg.p2, line: { kind: "refEdge", p1: seg.p1, p2: seg.p2 } },
         px,
         py,
       );
+    } else if (this.dimensionPendingLineId && this.dimensionPendingLineId !== nearestId) {
+      // 線分↔線分の寸法(Phase 24): 直前にlengthポップアップを開いた直線セグメント(1点目)が
+      // 保持されている状態で別の直線セグメント(2点目)をクリック => line-lineターゲットへ移行する。
+      const a = this.dimensionPendingLineId;
+      this.setDimensionPendingLine(null);
+      this.dimensionToolCallbacks?.onTargetPicked({ kind: "line-line", a, b: nearestId }, px, py);
     } else {
+      // 直線セグメントの単独クリック: 従来通りlength(長さ編集)。以降の1クリックで線分↔線分の
+      // 寸法へ切り替えられるよう、このsegmentIdをdimensionPendingLineIdとして保持する
+      // (circleのdimensionPendingCircleIdと同じ「1点目保持→2点目」パターン)。
+      if (seg.kind === "line") this.setDimensionPendingLine(nearestId, basis, [seg.p1, seg.p2]);
+      else this.setDimensionPendingLine(null);
       this.dimensionToolCallbacks?.onTargetPicked({ kind: "length", segmentId: nearestId }, px, py);
     }
   }
@@ -3190,6 +3225,7 @@ export class CadViewer {
     const callback = this.dimensionToolCallbacks?.onPendingChange;
     if (!callback) return;
     if (this.dimensionPendingCircleId) callback({ kind: "circle" });
+    else if (this.dimensionPendingLineId) callback({ kind: "line" });
     else if (this.dimensionPendingPoint) callback({ kind: "point" });
     else callback(null);
   }
@@ -3208,6 +3244,17 @@ export class CadViewer {
   /** dimensionPendingPointの更新+ステータス通知をまとめて行う。 */
   private setDimensionPendingPoint(ref: PointRef | null) {
     this.dimensionPendingPoint = ref;
+    this.notifyDimensionPendingState();
+  }
+
+  /** dimensionPendingLineId(Phase 24)の更新+選択強調の描画/消去+ステータス通知をまとめて行う。 */
+  private setDimensionPendingLine(id: string | null, basis?: PlaneBasis, highlightPoints?: [number, number][]) {
+    this.dimensionPendingLineId = id;
+    if (id && basis && highlightPoints) {
+      this.drawDimensionSelectHighlight(basis, highlightPoints);
+    } else {
+      this.clearDimensionSelectHighlight();
+    }
     this.notifyDimensionPendingState();
   }
 

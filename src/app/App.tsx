@@ -34,13 +34,16 @@ import {
   addPerpendicularConstraint,
   addTangentEntityConstraint,
   addTangentSegmentConstraint,
+  angleBetweenSegments,
   distanceBetweenRefs,
   segmentLength,
   segmentRadius,
+  upsertAngleLineLineConstraint,
   upsertDistanceConstraint,
   upsertDistanceEntityEntityConstraint,
   upsertDistanceEntityLineConstraint,
   upsertDistanceEntityOriginConstraint,
+  upsertDistanceLineLineConstraint,
   upsertLengthConstraint,
   upsertRadiusConstraint,
 } from "../sketch/constraintDimensions";
@@ -70,6 +73,9 @@ type DrawingTool = "rect" | "circle" | "slot" | "regularPolygon" | "segment" | n
  * UI改善(ツールバー整理)で主要3つ(正面/上/等角)だけをボタンで常設し、残り4つ(背面/左/右/下)は
  * コンパクトなセレクトにまとめる。
  */
+/** 線分↔線分の寸法(Phase 24)で「ほぼ平行」とみなす角度のしきい値(度)。これ未満は平行距離、以上は角度拘束にする。 */
+const LINE_LINE_PARALLEL_ANGLE_DEG = 5;
+
 const STANDARD_VIEW_BUTTONS: { view: StandardView; label: string; title: string }[] = [
   { view: "front", label: "正面", title: "正面(-Y側)から見る" },
   { view: "back", label: "背面", title: "背面(+Y側)から見る" },
@@ -720,6 +726,19 @@ export default function App() {
           const entity = entities.find((e) => e.id === target.entityId);
           initialValue = entity?.kind === "circle" ? distancePointToLine(entity.center, target.edgeA, target.edgeB) : 0;
           hintLabel = "辺は動かず、円の中心だけが移動します";
+        } else if (target.kind === "line-line") {
+          // 線分↔線分の寸法(Phase 24): ほぼ平行(方向のなす角<5度)なら平行距離、それ以外は角度を入力させる。
+          const segA = segments.find((s) => s.id === target.a);
+          const segB = segments.find((s) => s.id === target.b);
+          const angle = segA && segB ? angleBetweenSegments(segA, segB) : null;
+          const isParallel = angle !== null && angle < LINE_LINE_PARALLEL_ANGLE_DEG;
+          if (isParallel) {
+            titleLabel = "距離 (mm)";
+            initialValue = segA && segB ? distancePointToLine(segA.p1, segB.p1, segB.p2) : 0;
+          } else {
+            titleLabel = "角度 (°)";
+            initialValue = angle ?? 0;
+          }
         }
         setDimensionPopup({ target, titleLabel, initialValue, screen: { x: screenX, y: screenY }, hintLabel, axisOptions });
       },
@@ -735,6 +754,8 @@ export default function App() {
           setDimensionPendingLabel(null);
         } else if (state.kind === "circle") {
           setDimensionPendingLabel("1つ目: 円 → 2つ目を選択(原点/円/辺/端面)");
+        } else if (state.kind === "line") {
+          setDimensionPendingLabel("1つ目: 線分 → 2つ目の線分を選択(平行なら距離/それ以外は角度)");
         } else {
           setDimensionPendingLabel("1つ目: 端点 → 2つ目の端点を選択(距離)");
         }
@@ -779,6 +800,31 @@ export default function App() {
     if (target.kind === "entity-width" || target.kind === "entity-height") {
       const field = target.kind === "entity-width" ? "width" : "height";
       updateDocument((doc) => updateSketchEntity(doc, sketchId, target.entityId, { [field]: value }));
+      setDimensionPopup(null);
+      return;
+    }
+
+    if (target.kind === "line-line") {
+      // 線分↔線分の寸法(Phase 24): 適用時点の最新segmentsから改めて平行判定する
+      // (ポップアップ表示中に他の編集で角度が変わる可能性はほぼ無いが、常に最新値で判定する)。
+      updateDocumentWithConflictRollback(
+        sketchId,
+        (doc) => {
+          const feature = doc.features.find((f) => f.id === sketchId);
+          if (feature?.type !== "sketch") return doc;
+          const constraints = feature.constraints ?? [];
+          const segments = feature.segments ?? [];
+          const segA = segments.find((s) => s.id === target.a);
+          const segB = segments.find((s) => s.id === target.b);
+          const angle = segA && segB ? angleBetweenSegments(segA, segB) : null;
+          const isParallel = angle !== null && angle < LINE_LINE_PARALLEL_ANGLE_DEG;
+          const next = isParallel
+            ? upsertDistanceLineLineConstraint(constraints, target.a, target.b, value)
+            : upsertAngleLineLineConstraint(constraints, target.a, target.b, value);
+          return setSketchConstraints(doc, sketchId, next);
+        },
+        showTransientMessage,
+      );
       setDimensionPopup(null);
       return;
     }

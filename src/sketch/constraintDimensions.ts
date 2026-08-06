@@ -279,6 +279,65 @@ export function addTangentEntityConstraint(
   ];
 }
 
+// ---- 線分↔線分の寸法(Phase 24) ----
+// 平行(方向のなす角<5度)ならdistanceLineLine、非平行ならangleLineLineをupsertする。
+// どちらのkindになるかは呼び出し側(CadViewer/App)が方向ベクトルから判定して選ぶ想定で、
+// このモジュールはkindに応じたupsertのみを提供する(既存があれば値だけ差し替え)。
+
+function sameSegmentPair(constraint: SketchConstraint, kind: "distanceLineLine" | "angleLineLine", a: string, b: string): boolean {
+  if (constraint.kind !== kind) return false;
+  return (constraint.a === a && constraint.b === b) || (constraint.a === b && constraint.b === a);
+}
+
+/** 2直線セグメントのdistanceLineLine拘束(平行距離)を追加/更新する。 */
+export function upsertDistanceLineLineConstraint(
+  constraints: readonly SketchConstraint[],
+  segmentIdA: string,
+  segmentIdB: string,
+  value: number,
+): SketchConstraint[] {
+  const idx = constraints.findIndex((c) => sameSegmentPair(c, "distanceLineLine", segmentIdA, segmentIdB));
+  if (idx >= 0) {
+    const next = constraints.slice();
+    next[idx] = { ...next[idx], value } as SketchConstraint;
+    return next;
+  }
+  return [...constraints, { id: generateId("constraint"), kind: "distanceLineLine", a: segmentIdA, b: segmentIdB, value }];
+}
+
+/** 2直線セグメントのangleLineLine拘束(方向のなす角、度)を追加/更新する。 */
+export function upsertAngleLineLineConstraint(
+  constraints: readonly SketchConstraint[],
+  segmentIdA: string,
+  segmentIdB: string,
+  value: number,
+): SketchConstraint[] {
+  const idx = constraints.findIndex((c) => sameSegmentPair(c, "angleLineLine", segmentIdA, segmentIdB));
+  if (idx >= 0) {
+    const next = constraints.slice();
+    next[idx] = { ...next[idx], value } as SketchConstraint;
+    return next;
+  }
+  return [...constraints, { id: generateId("constraint"), kind: "angleLineLine", a: segmentIdA, b: segmentIdB, value }];
+}
+
+/**
+ * 2本の直線セグメントの方向ベクトルのなす角(度、0〜180)を返す。平行判定
+ * (<5度)・angleLineLine拘束の初期値計算の両方に使う。どちらかが退化(長さ0近傍)の場合はnull。
+ */
+export function angleBetweenSegments(a: SketchSegment, b: SketchSegment): number | null {
+  const dax = a.p2[0] - a.p1[0];
+  const day = a.p2[1] - a.p1[1];
+  const dbx = b.p2[0] - b.p1[0];
+  const dby = b.p2[1] - b.p1[1];
+  const la = Math.hypot(dax, day);
+  const lb = Math.hypot(dbx, dby);
+  if (la < 1e-9 || lb < 1e-9) return null;
+  const cross = dax * dby - day * dbx;
+  const dot = dax * dbx + day * dby;
+  return (Math.atan2(Math.abs(cross), dot) * 180) / Math.PI;
+}
+
 // ---- 常時表示する拘束寸法ラベル(表示用、ReactにもThree.jsにも依存しない) ----
 
 export interface SegLengthDimension {
@@ -328,13 +387,33 @@ export interface EntityLineDimension {
   value: number;
   anchor: Point2;
 }
+/** 2直線の平行距離(mm、Phase 24)。寸法線は両線分間の垂直寸法線(src/components/DimensionOverlay.tsx参照)。 */
+export interface SegDistanceLineLineDimension {
+  kind: "seg-distance-line-line";
+  constraintId: string;
+  a: string;
+  b: string;
+  value: number;
+  anchor: Point2;
+}
+/** 2直線の方向のなす角(度、Phase 24)。v1は弧を描かずラベルのみ表示する(既知の制限)。 */
+export interface SegAngleLineLineDimension {
+  kind: "seg-angle-line-line";
+  constraintId: string;
+  a: string;
+  b: string;
+  value: number;
+  anchor: Point2;
+}
 export type ConstraintDimension =
   | SegLengthDimension
   | SegRadiusDimension
   | SegDistanceDimension
   | EntityOriginDimension
   | EntityEntityDimension
-  | EntityLineDimension;
+  | EntityLineDimension
+  | SegDistanceLineLineDimension
+  | SegAngleLineLineDimension;
 
 /**
  * スケッチのsegments/constraintsから、常時表示すべき拘束寸法(length/distance/radius)の
@@ -391,6 +470,20 @@ export function computeConstraintDimensions(
       dims.push({ kind: "entity-distance-line", constraintId: c.id, entityId: c.entity.entityId, line: c.line, value: c.value, anchor });
       continue;
     }
+    if (c.kind === "distanceLineLine" || c.kind === "angleLineLine") {
+      const segA = findSegment(segments, c.a);
+      const segB = findSegment(segments, c.b);
+      if (!segA || !segB) continue;
+      const midA: Point2 = [(segA.p1[0] + segA.p2[0]) / 2, (segA.p1[1] + segA.p2[1]) / 2];
+      const midB: Point2 = [(segB.p1[0] + segB.p2[0]) / 2, (segB.p1[1] + segB.p2[1]) / 2];
+      const anchor: Point2 = [(midA[0] + midB[0]) / 2, (midA[1] + midB[1]) / 2];
+      if (c.kind === "distanceLineLine") {
+        dims.push({ kind: "seg-distance-line-line", constraintId: c.id, a: c.a, b: c.b, value: c.value, anchor });
+      } else {
+        dims.push({ kind: "seg-angle-line-line", constraintId: c.id, a: c.a, b: c.b, value: c.value, anchor });
+      }
+      continue;
+    }
     if (c.kind === "length") {
       const seg = findSegment(segments, c.segmentId);
       if (!seg) continue;
@@ -424,6 +517,7 @@ export function computeConstraintDimensions(
  */
 export function formatConstraintDimensionLabel(dimension: ConstraintDimension): string {
   if (dimension.kind === "seg-radius") return `R${dimension.value.toFixed(1)}`;
+  if (dimension.kind === "seg-angle-line-line") return `${dimension.value.toFixed(1)}°`;
   if (dimension.kind === "entity-distance-entity") {
     if (dimension.axis === "x") return `X${dimension.value.toFixed(1)}`;
     if (dimension.axis === "y") return `Y${dimension.value.toFixed(1)}`;
