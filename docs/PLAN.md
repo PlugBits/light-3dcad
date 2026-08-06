@@ -513,3 +513,23 @@ CadViewerに専用の`handleSlotClick()`(3クリックの状態遷移)を追加�
 `window.__cadViewerDebug.drawingPointsSnapshot()`(描画モード中の確定済み頂点列を返す)で検証する
 ようにした。Vitest267件(shapeFromPoints.tsのslotWidthFromCursor5件が新規)。E2E15件全通過
 (既存12件+nested-hole.spec.ts 1件、うち3件を本フェーズで書き換え)。
+
+## Phase 22: 円の拘束ソルバ統合+固定トグル+ボディ端面参照寸法
+
+前回(Phase 21b)の「円の位置寸法は即時移動(positionDimensions.ts)」を、ソルバ(solver.ts)経由の
+拘束(`distanceEntityOrigin`/`distanceEntityEntity`/`distanceEntityLine`/`fixEntity`、いずれも
+`EntityRef`でcircleエンティティのみ対象v1)に置き換えた。solveSketch()の変数モデルにcircleの中心
+(cx,cy)を追加し(半径は非変数のまま)、既存のsegment系拘束と同一のLM法で共存して解く。
+`distanceEntityLine`の辺は「固定線」として扱う(rectangle/polygonの辺=`entityEdge`は毎回entities
+から生値解決、ボディ端面参照=`refEdge`はピック時点のスナップショット)。SketchEditorのcircleに
+「固定」チェックボックス(fixEntity拘束のon/off)を追加。
+
+ボディ端面参照寸法: evaluator.tsがスケッチ評価時点の「現在ボディ」から`Shape.edges`
+(`Edge.geomType==="LINE"`のみ)を抽出し、スケッチ平面上に載っている(両端点の平面距離<1e-4)ものを
+ローカル2D座標に投影して`referenceEdges`としてWorker応答(protocol拡張)に追加した。ビューアは
+これを控えめな破線でオーバーレイし、寸法ツール中は円クリック後にピック対象になる。再評価のたびに
+`referenceEdgeMatch.ts`が既存の`refEdge`拘束のスナップショットを最新の座標へ幾何マッチング
+(方向cos>0.999+最近傍)して追従させる(マッチ無しはスナップショット維持、既知の制限)。
+Vitest284件(solver.ts循円拘束7件・evaluator.ts referenceEdges統合1件が新規)。ブラウザ確認:
+円→原点拘束→矩形リサイズ後も距離維持(30.0mm→再解決後29.999...)/箱上面のfaceスケッチで
+円→参照エッジ距離指定(中心が期待通り移動)/固定トグルのon・offをスクリーンショットで確認した。
