@@ -34,6 +34,12 @@ import {
   upsertLengthConstraint,
   upsertRadiusConstraint,
 } from "../sketch/constraintDimensions";
+import {
+  distanceBetweenPoints,
+  distancePointToLine,
+  moveCenterAlongDirection,
+  moveCenterToLineDistance,
+} from "../sketch/positionDimensions";
 import { rectangleFromCorners, regularPolygonVertices } from "../sketch/shapeFromPoints";
 import { trimSegmentAtPoint } from "../sketch/trim";
 import { updateDocumentWithConflictRollback } from "../state/constraintUpdate";
@@ -117,6 +123,8 @@ export default function App() {
     titleLabel: string;
     initialValue: number;
     screen: { x: number; y: number };
+    /** ポップアップ下に一行表示する補足(Phase 21b、位置寸法)。未指定は非表示。 */
+    hintLabel?: string;
   } | null>(null);
   // 拘束の矛盾で自動巻き戻しが起きたときの一時メッセージ(Phase 20b)。数秒後に自動で消える。
   const [transientMessage, setTransientMessage] = useState<string | null>(null);
@@ -573,11 +581,17 @@ export default function App() {
   }
 
   /**
-   * 寸法ツール(Phase 20b、Phase 21でrectangle/circleエンティティにも対応)を開始する。
-   * ビューア上でセグメント本体をクリックするとlength/radius、端点を2つ順にクリックするとdistance、
-   * circleの円周・rectangleの辺をクリックするとentity-radius/entity-width/entity-heightの
-   * ヒット対象として`onTargetPicked`が呼ばれ、現在値をデフォルトにした値入力ポップアップを開く。
-   * 適用は`handleApplyDimensionTarget`が行う(entity系は拘束を経由せずentity自身を直接更新する)。
+   * 寸法ツール(Phase 20b、Phase 21でrectangle/circleエンティティにも対応、Phase 21bで
+   * 円の位置寸法に対応)を開始する。ビューア上でセグメント本体をクリックするとlength/radius、
+   * 端点を2つ順にクリックするとdistance、circleの円周・rectangleの辺をクリックすると
+   * entity-radius/entity-width/entity-heightのヒット対象として`onTargetPicked`が呼ばれ、
+   * 現在値をデフォルトにした値入力ポップアップを開く。
+   * 位置寸法(circle-distance-*): circleをクリックした直後(entity-radiusポップアップが開いている間)に
+   * 続けて原点マーカー/別のcircle/辺をクリックすると、CadViewer側がそのcircleを基準にした
+   * circle-distance-origin/circle-distance-circle/circle-distance-edgeを渡してくる
+   * (「後にクリックした方(2点目)が移動する」)。
+   * 適用は`handleApplyDimensionTarget`が行う(entity系・circle-distance系はいずれも拘束を経由せず
+   * entity自身を直接更新する)。
    */
   function handleStartDimensionTool() {
     if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
@@ -590,6 +604,7 @@ export default function App() {
         const entities = feature?.type === "sketch" ? feature.entities : [];
         let titleLabel = "距離 (mm)";
         let initialValue = 0;
+        let hintLabel: string | undefined;
         if (target.kind === "length") {
           titleLabel = "長さ (mm)";
           const seg = segments.find((s) => s.id === target.segmentId);
@@ -604,13 +619,30 @@ export default function App() {
           titleLabel = "半径 (mm)";
           const entity = entities.find((e) => e.id === target.entityId);
           initialValue = entity?.kind === "circle" ? entity.radius : 0;
-        } else {
+          hintLabel = "距離指定へ: 原点/別の円/辺(直線)をクリック";
+        } else if (target.kind === "entity-width" || target.kind === "entity-height") {
           titleLabel = target.kind === "entity-width" ? "幅 (mm)" : "高さ (mm)";
           const entity = entities.find((e) => e.id === target.entityId);
           initialValue =
             entity?.kind === "rectangle" ? (target.kind === "entity-width" ? entity.width : entity.height) : 0;
+        } else if (target.kind === "circle-distance-origin") {
+          titleLabel = "中心↔原点の距離 (mm)";
+          const entity = entities.find((e) => e.id === target.entityId);
+          initialValue = entity?.kind === "circle" ? distanceBetweenPoints(entity.center, [0, 0]) : 0;
+        } else if (target.kind === "circle-distance-circle") {
+          titleLabel = "中心間の距離 (mm)";
+          const from = entities.find((e) => e.id === target.fromEntityId);
+          const to = entities.find((e) => e.id === target.toEntityId);
+          initialValue =
+            from?.kind === "circle" && to?.kind === "circle" ? distanceBetweenPoints(from.center, to.center) : 0;
+          hintLabel = "後にクリックした円(この円)が移動します";
+        } else if (target.kind === "circle-distance-edge") {
+          titleLabel = "中心↔辺の距離 (mm)";
+          const entity = entities.find((e) => e.id === target.entityId);
+          initialValue = entity?.kind === "circle" ? distancePointToLine(entity.center, target.edgeA, target.edgeB) : 0;
+          hintLabel = "辺は動かず、円の中心だけが移動します";
         }
-        setDimensionPopup({ target, titleLabel, initialValue, screen: { x: screenX, y: screenY } });
+        setDimensionPopup({ target, titleLabel, initialValue, screen: { x: screenX, y: screenY }, hintLabel });
       },
       onCancel: () => {
         setDimensionTool(false);
@@ -639,6 +671,9 @@ export default function App() {
    * 自動的に巻き戻す。entity系(entity-radius/entity-width/entity-height、Phase 21)は拘束を
    * 経由せずrectangle/circleエンティティのradius/width/heightフィールドを直接更新する
    * (SketchEditorの数値編集と同じ経路。ソルバを経由しないため矛盾巻き戻しの対象外)。
+   * circle-distance-*(Phase 21b、位置寸法)も同様に拘束・ソルバを経由せず、
+   * src/sketch/positionDimensions.ts の純関数で新しいcenterを計算してentityを直接更新する
+   * (半径は不変、相手側=原点/1点目の円/辺は動かさない)。
    */
   function handleApplyDimensionTarget(value: number) {
     if (!dimensionPopup || !selectedFeature || selectedFeature.type !== "sketch") return;
@@ -653,6 +688,41 @@ export default function App() {
     if (target.kind === "entity-width" || target.kind === "entity-height") {
       const field = target.kind === "entity-width" ? "width" : "height";
       updateDocument((doc) => updateSketchEntity(doc, sketchId, target.entityId, { [field]: value }));
+      setDimensionPopup(null);
+      return;
+    }
+    if (target.kind === "circle-distance-origin") {
+      updateDocument((doc) => {
+        const feature = findFeature(doc, sketchId);
+        const entity = feature?.type === "sketch" ? feature.entities.find((e) => e.id === target.entityId) : null;
+        if (!entity || entity.kind !== "circle") return doc;
+        const center = moveCenterAlongDirection(entity.center, [0, 0], value);
+        return updateSketchEntity(doc, sketchId, target.entityId, { center });
+      });
+      setDimensionPopup(null);
+      return;
+    }
+    if (target.kind === "circle-distance-circle") {
+      updateDocument((doc) => {
+        const feature = findFeature(doc, sketchId);
+        const entities = feature?.type === "sketch" ? feature.entities : [];
+        const from = entities.find((e) => e.id === target.fromEntityId);
+        const to = entities.find((e) => e.id === target.toEntityId);
+        if (!from || from.kind !== "circle" || !to || to.kind !== "circle") return doc;
+        const center = moveCenterAlongDirection(to.center, from.center, value);
+        return updateSketchEntity(doc, sketchId, target.toEntityId, { center });
+      });
+      setDimensionPopup(null);
+      return;
+    }
+    if (target.kind === "circle-distance-edge") {
+      updateDocument((doc) => {
+        const feature = findFeature(doc, sketchId);
+        const entity = feature?.type === "sketch" ? feature.entities.find((e) => e.id === target.entityId) : null;
+        if (!entity || entity.kind !== "circle") return doc;
+        const center = moveCenterToLineDistance(entity.center, target.edgeA, target.edgeB, value);
+        return updateSketchEntity(doc, sketchId, target.entityId, { center });
+      });
       setDimensionPopup(null);
       return;
     }
@@ -1053,6 +1123,7 @@ export default function App() {
               titleLabel={dimensionPopup.titleLabel}
               initialValue={dimensionPopup.initialValue}
               screen={dimensionPopup.screen}
+              hintLabel={dimensionPopup.hintLabel}
               onCancel={() => setDimensionPopup(null)}
               onApply={handleApplyDimensionTarget}
             />

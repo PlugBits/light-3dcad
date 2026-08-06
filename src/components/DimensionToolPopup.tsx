@@ -7,6 +7,7 @@ export function DimensionToolPopup({
   titleLabel,
   initialValue,
   screen,
+  hintLabel,
   onApply,
   onCancel,
 }: {
@@ -14,6 +15,12 @@ export function DimensionToolPopup({
   titleLabel: string;
   initialValue: number;
   screen: { x: number; y: number };
+  /**
+   * タイトルの下に小さく表示する補足の一行(Phase 21b、位置寸法)。例:
+   * 「距離指定へ: 原点/別の円/辺をクリック」「後にクリックした方(この円)が移動します」。
+   * 未指定なら表示しない。
+   */
+  hintLabel?: string;
   onApply: (value: number) => void;
   onCancel: () => void;
 }) {
@@ -68,6 +75,11 @@ export function DimensionToolPopup({
         minWidth: 160,
       }}
     >
+      {hintLabel && (
+        <p data-testid="dimension-tool-popup-hint" style={{ margin: 0, fontSize: 10, color: "#9aa5b1" }}>
+          {hintLabel}
+        </p>
+      )}
       <label style={{ display: "flex", flexDirection: "column", gap: 2 }}>
         {titleLabel}
         <input
