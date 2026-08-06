@@ -8,6 +8,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { setSketchConstraints, updateSketchEntity } from "../model/document";
 import type { PointRef, SketchEntity, SketchFeature, SketchSegment } from "../model/types";
 import { arcGeometryFromBulge } from "../sketch/bulge";
+import { resolveLineRefPoints } from "../sketch/entityEdges";
 import {
   computeConstraintDimensions,
   constraintDimensionKey,
@@ -92,7 +93,15 @@ function pointFromRef(segments: readonly SketchSegment[], ref: PointRef): Point2
  * 拘束寸法(ConstraintDimension、segments/constraints由来)1件分の引出線・寸法線・矢印を計算する。
  * 参照先セグメントが見つからない/円弧情報が無い場合はnull。
  */
-function constraintDimensionGraphics(dimension: ConstraintDimension, segments: SketchSegment[]): DimensionGraphics | null {
+function constraintDimensionGraphics(
+  dimension: ConstraintDimension,
+  segments: SketchSegment[],
+  entities: readonly SketchEntity[],
+): DimensionGraphics | null {
+  const circleCenter = (entityId: string): Point2 | null => {
+    const e = entities.find((en) => en.id === entityId);
+    return e && e.kind === "circle" ? e.center : null;
+  };
   if (dimension.kind === "seg-length") {
     const seg = segments.find((s) => s.id === dimension.segmentId);
     if (!seg) return null;
@@ -103,6 +112,31 @@ function constraintDimensionGraphics(dimension: ConstraintDimension, segments: S
     const pb = pointFromRef(segments, dimension.b);
     if (!pa || !pb) return null;
     return computeLinearDimensionGraphics(pa, pb);
+  }
+  if (dimension.kind === "entity-distance-origin") {
+    const c = circleCenter(dimension.entityId);
+    if (!c) return null;
+    return computeLinearDimensionGraphics(c, [0, 0]);
+  }
+  if (dimension.kind === "entity-distance-entity") {
+    const a = circleCenter(dimension.aEntityId);
+    const b = circleCenter(dimension.bEntityId);
+    if (!a || !b) return null;
+    return computeLinearDimensionGraphics(a, b);
+  }
+  if (dimension.kind === "entity-distance-line") {
+    const c = circleCenter(dimension.entityId);
+    const line = resolveLineRefPoints(dimension.line, entities);
+    if (!c || !line) return null;
+    // 中心から直線への垂線の足を寸法のもう一端にする(辺からの垂直距離の可視化)。
+    const [a, b] = line;
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq < 1e-12) return null;
+    const t = ((c[0] - a[0]) * dx + (c[1] - a[1]) * dy) / lenSq;
+    const foot: Point2 = [a[0] + t * dx, a[1] + t * dy];
+    return computeLinearDimensionGraphics(c, foot);
   }
   const seg = segments.find((s) => s.id === dimension.segmentId);
   if (!seg || seg.kind !== "arc" || !seg.bulge) return null;
@@ -193,7 +227,7 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
   const constraintGraphics = useMemo(() => {
     const map = new Map<string, DimensionGraphics>();
     for (const d of constraintDimensions) {
-      const g = constraintDimensionGraphics(d, sketch.segments ?? []);
+      const g = constraintDimensionGraphics(d, sketch.segments ?? [], sketch.entities);
       if (g) map.set(constraintDimensionKey(d), g);
     }
     return map;
