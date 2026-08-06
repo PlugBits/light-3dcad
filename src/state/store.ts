@@ -80,6 +80,17 @@ function createInitialDocument(): CadDocument {
   return doc;
 }
 
+/**
+ * undo/redo後、選択中フィーチャーが復元後のドキュメントにまだ存在するかを判定する
+ * (存在すれば選択を維持したまま返し、無ければnullでクリアする)。selectedFaceは
+ * トポロジカルネーミングのずれで復元後も有効か判定しづらいため、常にクリアする(呼び出し側)。
+ * Workerに依存しない純粋関数として切り出し、単体テストできるようにする。
+ */
+export function resolveSelectionAfterHistory(doc: CadDocument, selectedFeatureId: FeatureId | null): FeatureId | null {
+  if (selectedFeatureId === null) return null;
+  return findFeature(doc, selectedFeatureId) ? selectedFeatureId : null;
+}
+
 /** name が prefix+数字の形式である既存フィーチャーの最大番号+1を返す(例: "Sketch" -> 既存Sketch1,Sketch2があれば3)。 */
 function nextFeatureName(doc: CadDocument, prefix: string): string {
   let max = 0;
@@ -220,12 +231,15 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
     const result = undoHistory(get().history, structuredClone(get().doc));
     if (!result) return;
     const { requestId, promise } = postRequest({ kind: "evaluate", doc: result.doc });
+    // 復元後のドキュメントに選択中フィーチャーがまだ存在するなら選択状態を維持する
+    // (スケッチ編集中のCtrl+Zでスケッチから抜けてしまう問題の修正)。selectedFaceは
+    // トポロジカルネーミングのずれで復元後も有効か判定しづらいため、従来どおりクリアする。
     set({
       doc: result.doc,
       status: "evaluating",
       latestEvaluateRequestId: requestId,
       history: result.state,
-      selectedFeatureId: null,
+      selectedFeatureId: resolveSelectionAfterHistory(result.doc, get().selectedFeatureId),
       selectedFace: null,
     });
     promise.then((response) => applyEvaluated(set, get, requestId, response));
@@ -235,12 +249,13 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
     const result = redoHistory(get().history, structuredClone(get().doc));
     if (!result) return;
     const { requestId, promise } = postRequest({ kind: "evaluate", doc: result.doc });
+    // undo()と同じく、復元後のドキュメントに選択中フィーチャーがまだ存在するなら選択状態を維持する。
     set({
       doc: result.doc,
       status: "evaluating",
       latestEvaluateRequestId: requestId,
       history: result.state,
-      selectedFeatureId: null,
+      selectedFeatureId: resolveSelectionAfterHistory(result.doc, get().selectedFeatureId),
       selectedFace: null,
     });
     promise.then((response) => applyEvaluated(set, get, requestId, response));
