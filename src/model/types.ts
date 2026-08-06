@@ -98,10 +98,38 @@ export type SketchSegment = {
 };
 
 /**
+ * segments(Phase 19a)上の点を指す参照。segmentIdはSketchSegment.id、endはp1/p2のどちらか。
+ * Phase 20a: 拘束(SketchConstraint)がこの参照で端点を指し示す。
+ */
+export type PointRef = { segmentId: string; end: "p1" | "p2" };
+
+/**
+ * スケッチ拘束(Phase 20a、寸法ドリブン編集[Phase 20b]の土台)。座標系はSketchSegmentと同じく
+ * スケッチのローカル2D(mm)。src/sketch/solver.ts の solveSketch() がこの配列を解として満たす
+ * segments(端点座標)を求める(coincidentでの端点マージは行わず、各セグメントの端点は独立変数の
+ * まま残差として扱う。詳細はsolver.tsのコメント参照)。
+ */
+export type SketchConstraint =
+  | { id: string; kind: "coincident"; a: PointRef; b: PointRef }
+  | { id: string; kind: "horizontal"; segmentId: string }
+  | { id: string; kind: "vertical"; segmentId: string }
+  /** 線分(または円弧の弦長ではなく弧長方向の端点間距離。実体は端点間のユークリッド距離)の長さ(mm)。 */
+  | { id: string; kind: "length"; segmentId: string; value: number }
+  /** 2点間の距離(mm)。同一セグメント内・別セグメント間のどちらの点も指定できる。 */
+  | { id: string; kind: "distance"; a: PointRef; b: PointRef; value: number }
+  /** kind:"arc" のセグメントにのみ指定できる半径拘束(mm)。bulge(挟角)は維持したまま端点間距離を調整して解く。 */
+  | { id: string; kind: "radius"; segmentId: string; value: number }
+  /** 点を(拘束追加時点の)現在位置に固定する。値はsolveSketch呼び出し時の入力座標から都度求める(拘束自体には持たない)。 */
+  | { id: string; kind: "fix"; point: PointRef };
+
+/**
  * 2Dスケッチフィーチャー。
  * segments(Phase 19a)はentitiesと後方互換のため独立した追加フィールド(省略可)。
  * 押し出し時、segmentsが存在すればsrc/sketch/regions.tsで閉領域検出を行いDrawing化し、
  * entities由来のDrawingとfuseする(src/worker/evaluator.ts参照)。
+ * constraints(Phase 20a)はsegmentsに対する拘束(省略可、後方互換)。ドキュメント更新時に
+ * src/sketch/solver.ts の solveSketch() で解かれ、解けたsegmentsに置き換わってから評価に回る
+ * (src/state/store.ts参照)。
  */
 export interface SketchFeature {
   type: "sketch";
@@ -110,6 +138,7 @@ export interface SketchFeature {
   plane: PlaneRef;
   entities: SketchEntity[];
   segments?: SketchSegment[];
+  constraints?: SketchConstraint[];
 }
 
 /** 押し出しフィーチャー(新規ボディ作成 or 既存ボディからのカット)。 */

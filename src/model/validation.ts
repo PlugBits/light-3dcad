@@ -1,4 +1,4 @@
-import type { CadDocument, Feature, FeatureId, PolygonCorner, SketchEntity, SketchSegment } from "./types";
+import type { CadDocument, Feature, FeatureId, PointRef, PolygonCorner, SketchConstraint, SketchEntity, SketchSegment } from "./types";
 
 /** ドキュメント/フィーチャーのバリデーションエラー。featureId が特定できる場合のみ付与する。 */
 export interface ValidationError {
@@ -164,6 +164,96 @@ function validateSegment(segment: SketchSegment, featureId: FeatureId): Validati
   return errors;
 }
 
+function findSegmentById(segments: readonly SketchSegment[], id: string): SketchSegment | undefined {
+  return segments.find((s) => s.id === id);
+}
+
+/** 拘束が指す点参照(PointRef)のsegmentIdが存在するかを検証する。 */
+function validatePointRef(
+  ref: PointRef,
+  segments: readonly SketchSegment[],
+  constraintId: string,
+  label: string,
+  featureId: FeatureId,
+): ValidationError[] {
+  if (!findSegmentById(segments, ref.segmentId)) {
+    return [{ featureId, message: `拘束(${constraintId})の参照先セグメント(${ref.segmentId}、${label})が見つかりません` }];
+  }
+  return [];
+}
+
+/**
+ * スケッチ拘束(Phase 20a)のバリデーション。
+ * - coincident/distance/fix: 参照するPointRefのsegmentIdがsegments内に存在すること
+ * - horizontal/vertical/length/radius: segmentIdがsegments内に存在すること
+ * - length/distance/radius: valueが正の有限数であること
+ * - radius: 参照先セグメントがkind:"arc"であること(lineには指定できない)
+ */
+function validateConstraint(
+  constraint: SketchConstraint,
+  segments: readonly SketchSegment[],
+  featureId: FeatureId,
+): ValidationError[] {
+  const errors: ValidationError[] = [];
+  switch (constraint.kind) {
+    case "coincident": {
+      errors.push(...validatePointRef(constraint.a, segments, constraint.id, "a", featureId));
+      errors.push(...validatePointRef(constraint.b, segments, constraint.id, "b", featureId));
+      break;
+    }
+    case "horizontal":
+    case "vertical": {
+      if (!findSegmentById(segments, constraint.segmentId)) {
+        errors.push({
+          featureId,
+          message: `拘束(${constraint.id})の参照先セグメント(${constraint.segmentId})が見つかりません`,
+        });
+      }
+      break;
+    }
+    case "length": {
+      if (!findSegmentById(segments, constraint.segmentId)) {
+        errors.push({
+          featureId,
+          message: `拘束(${constraint.id})の参照先セグメント(${constraint.segmentId})が見つかりません`,
+        });
+      }
+      if (!isPositiveFiniteNumber(constraint.value)) {
+        errors.push({ featureId, message: `拘束(${constraint.id})の長さは正の数である必要があります` });
+      }
+      break;
+    }
+    case "distance": {
+      errors.push(...validatePointRef(constraint.a, segments, constraint.id, "a", featureId));
+      errors.push(...validatePointRef(constraint.b, segments, constraint.id, "b", featureId));
+      if (!isPositiveFiniteNumber(constraint.value)) {
+        errors.push({ featureId, message: `拘束(${constraint.id})の距離は正の数である必要があります` });
+      }
+      break;
+    }
+    case "radius": {
+      const segment = findSegmentById(segments, constraint.segmentId);
+      if (!segment) {
+        errors.push({
+          featureId,
+          message: `拘束(${constraint.id})の参照先セグメント(${constraint.segmentId})が見つかりません`,
+        });
+      } else if (segment.kind !== "arc") {
+        errors.push({ featureId, message: `拘束(${constraint.id})は円弧セグメントにのみ指定できます` });
+      }
+      if (!isPositiveFiniteNumber(constraint.value)) {
+        errors.push({ featureId, message: `拘束(${constraint.id})の半径は正の数である必要があります` });
+      }
+      break;
+    }
+    case "fix": {
+      errors.push(...validatePointRef(constraint.point, segments, constraint.id, "point", featureId));
+      break;
+    }
+  }
+  return errors;
+}
+
 /** 単一フィーチャーのバリデーション。extrudeの参照先チェックには doc.features 全体が必要。 */
 export function validateFeature(feature: Feature, allFeatures: readonly Feature[]): ValidationError[] {
   const errors: ValidationError[] = [];
@@ -183,6 +273,9 @@ export function validateFeature(feature: Feature, allFeatures: readonly Feature[
     });
     feature.segments?.forEach((segment) => {
       errors.push(...validateSegment(segment, feature.id));
+    });
+    feature.constraints?.forEach((constraint) => {
+      errors.push(...validateConstraint(constraint, feature.segments ?? [], feature.id));
     });
   } else if (feature.type === "extrude") {
     if (!isPositiveFiniteNumber(feature.distance)) {
