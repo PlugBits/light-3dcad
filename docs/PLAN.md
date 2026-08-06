@@ -372,3 +372,23 @@ B-Rep形状を一致させる。スロットの半円キャップはbulge=-1(半
 (`effectivePolygonBulges`)。containmentは頂点ベース近似のまま(slot/regularPolygonは代表点、
 bulgeの膨らみは無視、既知の制限)。Vitest167件(bulge幾何6件・スロット/正多角形頂点3件・
 polygon bulge輪郭2件・スロット/正多角形/bulge押し出し体積3件が新規)。
+
+## Phase 19a: セグメントベーススケッチの幾何コア完了
+
+`SketchFeature`に自由な線分・円弧の集まり`segments`(`SketchSegment[]`、既存`entities`とは
+独立・後方互換)を追加した。新設`src/sketch/intersections.ts`が線分/円弧の交点計算
+(`lineLineIntersection`/`lineArcIntersection`/`arcArcIntersection`、円弧は`bulge.ts`の
+`arcGeometryFromBulge`で中心・半径・角度範囲に変換、EPS=1e-6mm、平行/同一線上/同心円の
+重なり区間・接する場合の単一交点等の境界ケースに対応)と`splitSegmentAt`(円弧はbulge再計算)
+を提供する。新設`src/sketch/regions.ts`の`findClosedRegions()`が本フェーズの核心: 全セグメント
+対の交点でハーフエッジグラフを構築し、「twinの角度順で1つ前」を次辺とする標準的な面巡回規則
+(円弧は端点接線方向)ですべてのハーフエッジを閉ループへ分解、符号付き面積(円弧はGreen's
+theoremの扇形補正項)で有界面を判別し、隣接twin対のスタック除去でぶら下がり枝の往復を除去、
+包含深度の偶奇ルールで外枠(反時計回り)/穴(時計回り)を`Region[]`に分類する。
+`evaluator.ts`はsegments保有スケッチで`findClosedRegions`を実行し各Regionを
+`draw().lineTo/bulgeArcTo().close()`でDrawing化してentities由来のDrawingとfuseする
+(segments指定で閉領域0件なら「閉じた領域がありません」のフィーチャーエラー)。
+`CadViewer`のスケッチ線オーバーレイにsegments描画(開いたLine、円弧はbulgeArcPoints近似)を
+追加した(ツール変更なし、UI/トリムは19bで対応)。Vitest202件(交点計算21件・閉領域検出9件
+[矩形/穴あき/交差2矩形→3領域/開いた線分0件/半円+直線/ぶら下がり枝2種/円弧のみループ]・
+evaluator統合5件が新規)。

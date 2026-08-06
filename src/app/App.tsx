@@ -146,6 +146,7 @@ export default function App() {
       overlays.push({
         sketchId: feature.id,
         entities: feature.entities,
+        segments: feature.segments,
         origin: plane.origin,
         xDir: plane.xDir,
         yDir: plane.yDir,

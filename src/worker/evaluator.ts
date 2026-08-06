@@ -16,10 +16,11 @@
 //   - direction: -1 は逆向き押し出し(面参照の場合は面法線の逆方向)
 import { Plane, draw, drawCircle, drawRectangle, type Drawing, type Face, type Shape3D } from "replicad";
 
-import type { CadDocument, FeatureId, PolygonCorner, SketchEntity, SketchFeature } from "../model/types";
+import type { CadDocument, FeatureId, PolygonCorner, SketchEntity, SketchFeature, SketchSegment } from "../model/types";
 import { validatePolygonCorners } from "../model/validation";
 import { effectivePolygonBulges } from "../sketch/bulge";
 import { classifySketchEntities } from "../sketch/containment";
+import { findClosedRegions, type Region } from "../sketch/regions";
 import { regularPolygonVertices, slotAxisNormal, SLOT_CAP_BULGE } from "../sketch/shapeFromPoints";
 import type { SketchPlaneInfo } from "../protocol/messages";
 
@@ -224,11 +225,10 @@ function fuseEntities(entities: SketchEntity[]): Drawing {
  * 外枠(outers)同士をfuseしたのち、穴(holes)を外枠に含まれる他のいずれのエンティティにも
  * 完全に含まれるエンティティ)をまとめてfuseしてcutする。部分的に重なる(包含ではない)
  * エンティティは従来どおりfuse対象のまま(いずれもoutersに分類される)。
+ * entitiesが空の場合はnullを返す(呼び出し側のbuildDrawing()がsegments側と合流させる)。
  */
-function buildDrawing(entities: SketchEntity[]): Drawing {
-  if (entities.length === 0) {
-    throw new Error("スケッチに図形がありません");
-  }
+function buildEntitiesDrawing(entities: SketchEntity[]): Drawing | null {
+  if (entities.length === 0) return null;
 
   const { outers, holes } = classifySketchEntities(entities);
   // entitiesが非空である限り、包含関係に循環は起こり得ないため outers は必ず1件以上になる。
@@ -238,6 +238,64 @@ function buildDrawing(entities: SketchEntity[]): Drawing {
     drawing = drawing.cut(holeDrawing);
   }
   return drawing;
+}
+
+/**
+ * 1つの閉ループ(src/sketch/regions.tsのLoop)をDrawingに変換する(Phase 19a)。
+ * ループのセグメントは既に向き付け・連結済み(各セグメントのp2が次のセグメントのp1と一致し、
+ * 最後のセグメントのp2が最初のセグメントのp1に戻る)なので、そのままlineTo/bulgeArcToで辿り、
+ * 最後にclose()を呼ぶ(閉じる移動は既にpointerが始点にあるためno-opになる)。
+ */
+function loopDrawing(loop: SketchSegment[]): Drawing {
+  let pen = draw(loop[0].p1);
+  for (const segment of loop) {
+    pen = segment.kind === "arc" && segment.bulge ? pen.bulgeArcTo(segment.p2, segment.bulge) : pen.lineTo(segment.p2);
+  }
+  return pen.close();
+}
+
+/**
+ * src/sketch/regions.tsが検出した閉領域(Region[])を1つのDrawingに合成する(Phase 19a)。
+ * 各領域は外枠(outer)を穴(holes)でcutしたのち、領域同士をfuseする。regionsは非空を前提とする。
+ */
+function buildRegionsDrawing(regions: Region[]): Drawing {
+  let drawing: Drawing | null = null;
+  for (const region of regions) {
+    let regionDrawing = loopDrawing(region.outer);
+    for (const hole of region.holes) {
+      regionDrawing = regionDrawing.cut(loopDrawing(hole));
+    }
+    drawing = drawing ? drawing.fuse(regionDrawing) : regionDrawing;
+  }
+  // 呼び出し側で regions.length > 0 を保証しているため drawing は必ず非null。
+  return drawing as Drawing;
+}
+
+/**
+ * sketch内のentitiesとsegments(Phase 19a)を合成して1つのDrawingにする。
+ * entities由来のDrawing(buildEntitiesDrawing、従来どおりの外枠/穴分類)と、
+ * segments由来のDrawing(src/sketch/regions.tsの閉領域検出→buildRegionsDrawing)を、
+ * どちらも存在すればfuseで合流させる。
+ * どちらも図形/領域を持たない場合はエラー: segmentsが指定されているのに閉じた領域が
+ * 1つも検出できない場合は「閉じた領域がありません」、segments自体が無い(entitiesのみ運用)
+ * 場合は従来どおり「スケッチに図形がありません」。
+ */
+function buildDrawing(entities: SketchEntity[], segments: SketchSegment[] | undefined): Drawing {
+  const entitiesDrawing = buildEntitiesDrawing(entities);
+  const regions = segments && segments.length > 0 ? findClosedRegions(segments) : [];
+
+  if (!entitiesDrawing && regions.length === 0) {
+    if (segments && segments.length > 0) {
+      throw new Error("閉じた領域がありません");
+    }
+    throw new Error("スケッチに図形がありません");
+  }
+
+  if (regions.length === 0) {
+    return entitiesDrawing as Drawing;
+  }
+  const regionsDrawing = buildRegionsDrawing(regions);
+  return entitiesDrawing ? entitiesDrawing.fuse(regionsDrawing) : regionsDrawing;
 }
 
 /** faceの中心・法線をプレーンなタプルとして取り出す(Vectorラッパーは即delete)。 */
@@ -351,7 +409,7 @@ function extrudeSketchFeature(
   direction: 1 | -1,
   resolvedFacePlanes: Map<FeatureId, { center: Tuple3; normal: Tuple3 }>,
 ): Shape3D {
-  const drawing = buildDrawing(sketch.entities);
+  const drawing = buildDrawing(sketch.entities, sketch.segments);
 
   if (sketch.plane.kind === "world") {
     // replicadは"XY"/"XZ"/"YZ"を名前付き平面としてそのまま受け付ける(sketchOnPlane参照)。

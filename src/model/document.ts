@@ -9,6 +9,7 @@ import type {
   PolygonCorner,
   SketchEntity,
   SketchFeature,
+  SketchSegment,
 } from "./types";
 import { validateFeature, type ValidationError } from "./validation";
 
@@ -24,10 +25,13 @@ export function addFeature(doc: CadDocument, feature: Feature): CadDocument {
   return { ...doc, features: [...doc.features, feature] };
 }
 
-/** 新しいスケッチフィーチャーを作成して末尾に追加する。IDは自動生成される。 */
+/**
+ * 新しいスケッチフィーチャーを作成して末尾に追加する。IDは自動生成される。
+ * segments(Phase 19a)は省略可(後方互換。省略時は既存どおりentitiesのみのスケッチになる)。
+ */
 export function addSketchFeature(
   doc: CadDocument,
-  params: { name: string; plane: PlaneRef; entities: SketchEntity[] },
+  params: { name: string; plane: PlaneRef; entities: SketchEntity[]; segments?: SketchSegment[] },
 ): { doc: CadDocument; feature: SketchFeature } {
   const feature: SketchFeature = {
     type: "sketch",
@@ -35,6 +39,7 @@ export function addSketchFeature(
     name: params.name,
     plane: params.plane,
     entities: params.entities,
+    ...(params.segments ? { segments: params.segments } : {}),
   };
   return { doc: addFeature(doc, feature), feature };
 }

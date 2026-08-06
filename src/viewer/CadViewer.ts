@@ -1,9 +1,9 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
-import type { FeatureId, SketchEntity } from "../model/types";
+import type { FeatureId, SketchEntity, SketchSegment } from "../model/types";
 import type { FaceGroup, FaceInfo, MeshData } from "../protocol/messages";
-import { bulgeArcPoints, bulgeFromThreePoints } from "../sketch/bulge";
+import { bulgeArcPoints, bulgeFromThreePoints, DEFAULT_BULGE_SEGMENTS } from "../sketch/bulge";
 import { polygonOutlinePoints } from "../sketch/polygonOutline";
 import {
   circleRadiusFromPoints,
@@ -99,6 +99,8 @@ type Tuple3 = [number, number, number];
 export interface SketchOverlayEntry {
   sketchId: FeatureId;
   entities: SketchEntity[];
+  /** 自由な線分・円弧セグメント(Phase 19a)。省略可(既存のentitiesのみのスケッチとの後方互換)。 */
+  segments?: SketchSegment[];
   origin: Tuple3;
   xDir: Tuple3;
   yDir: Tuple3;
@@ -264,6 +266,19 @@ function entityLocalPoints(entity: SketchEntity): [number, number][] {
   // corners/bulges未指定時は points がそのまま返る(既存の直線LineLoopと同じ結果)。
   // LineLoopが最後→最初を自動的に結ぶため、閉じる辺は明示しない。
   return polygonOutlinePoints(entity.points, entity.corners, entity.bulges);
+}
+
+/**
+ * 1つのセグメント(直線/円弧、Phase 19a)のローカル2D頂点列(開いたポリライン、p1始点・p2終点)を返す。
+ * entityLocalPoints()と異なりLineLoopではなくLine(開いた線)として描画する対象なので、
+ * 閉じている保証は無い(自由なセグメント集合をそのまま線として見せるだけで、
+ * 閉領域判定・トリムUIは19bで扱う)。
+ */
+function segmentLocalPoints(segment: SketchSegment): [number, number][] {
+  if (segment.kind === "arc" && segment.bulge) {
+    return bulgeArcPoints(segment.p1, segment.p2, segment.bulge, DEFAULT_BULGE_SEGMENTS);
+  }
+  return [segment.p1, segment.p2];
 }
 
 /** 平面基底に沿った方眼(LineSegments)を構築する。origin中心にhalfExtentの範囲、GRID_SPACING間隔。 */
@@ -1200,6 +1215,27 @@ export class CadViewer {
         this.sketchOverlayGeometries.push(geometry);
 
         const line = new THREE.LineLoop(geometry, material);
+        if (isSelected) line.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
+        this.sketchOverlayGroup.add(line);
+        this.sketchLineCount += 1;
+      }
+
+      // 自由な線分・円弧セグメント(Phase 19a)。entitiesと異なり閉じている保証が無いため
+      // LineLoopではなく開いたLineとして描画する(トリムUIは19bで追加予定、ここでは可視化のみ)。
+      for (const segment of entry.segments ?? []) {
+        const localPoints = segmentLocalPoints(segment);
+        const positions = new Float32Array(localPoints.length * 3);
+        localPoints.forEach(([u, v], i) => {
+          const [x, y, z] = toWorldPoint(entry, u, v);
+          positions[i * 3] = x;
+          positions[i * 3 + 1] = y;
+          positions[i * 3 + 2] = z;
+        });
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+        this.sketchOverlayGeometries.push(geometry);
+
+        const line = new THREE.Line(geometry, material);
         if (isSelected) line.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
         this.sketchOverlayGroup.add(line);
         this.sketchLineCount += 1;

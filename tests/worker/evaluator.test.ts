@@ -12,14 +12,17 @@ import type { OpenCascadeInstance } from "replicad-opencascadejs/src/replicad_si
 import {
   addExtrudeFeature,
   addSketchFeature,
+  createArcSegment,
   createCircleEntity,
   createEmptyDocument,
+  createLineSegment,
   createPolygonEntity,
   createRectangleEntity,
   createRegularPolygonEntity,
   createSlotEntity,
   patchExtrudeFeature,
 } from "../../src/model";
+import type { SketchSegment } from "../../src/model/types";
 import { evaluateDocument } from "../../src/worker/evaluator";
 
 const initOpenCascade = initOpenCascadeUntyped as unknown as (moduleOverrides: {
@@ -79,6 +82,17 @@ function findTopFace(shape: Shape3D): { faceId: number; center: [number, number,
 }
 
 const SKIP_NOTE = "Node上でのOpenCascade WASM初期化に失敗したためスキップ";
+
+/** 頂点列(閉ループ、最後は最初に自動的に戻る)から直線セグメントの配列を作る(Phase 19a評価テスト用)。 */
+function rectSegments(points: [number, number][]): SketchSegment[] {
+  const segs: SketchSegment[] = [];
+  for (let i = 0; i < points.length; i += 1) {
+    const p1 = points[i];
+    const p2 = points[(i + 1) % points.length];
+    segs.push(createLineSegment({ p1, p2 }));
+  }
+  return segs;
+}
 
 describe("evaluateDocument (WASM統合)", () => {
   it("矩形スケッチを押し出すとメッシュとfaceGroupsが返る(直方体=6面)", (ctx) => {
@@ -1185,6 +1199,201 @@ describe("evaluateDocument (WASM統合): スケッチ・オン・フェイス", 
     const squareVolume = side * side * height;
     const volume = measureVolume(result.shape);
     expect(Math.abs(volume - squareVolume)).toBeCloseTo(semicircleArea * height, 0);
+
+    result.shape.delete();
+  });
+});
+
+describe("evaluateDocument (WASM統合): segmentsベースの閉領域検出→押し出し(Phase 19a)", () => {
+  it("4線分の矩形segmentsを押し出すと、entitiesの矩形と同じ体積になる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const width = 60;
+    const height = 40;
+    const extrudeHeight = 20;
+
+    const segEmpty = createEmptyDocument();
+    const segments = rectSegments([
+      [-width / 2, -height / 2],
+      [width / 2, -height / 2],
+      [width / 2, height / 2],
+      [-width / 2, height / 2],
+    ]);
+    const { doc: segDoc1, feature: segSketch } = addSketchFeature(segEmpty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [],
+      segments,
+    });
+    const { doc: segDoc } = addExtrudeFeature(segDoc1, {
+      name: "Extrude1",
+      sketchId: segSketch.id,
+      distance: extrudeHeight,
+      direction: 1,
+      operation: "newBody",
+    });
+    const segResult = evaluateDocument(segDoc);
+    expect(segResult.ok).toBe(true);
+    if (!segResult.ok) return;
+    const segVolume = measureVolume(segResult.shape);
+    segResult.shape.delete();
+
+    const entEmpty = createEmptyDocument();
+    const rect = createRectangleEntity({ width, height });
+    const { doc: entDoc1, feature: entSketch } = addSketchFeature(entEmpty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+    });
+    const { doc: entDoc } = addExtrudeFeature(entDoc1, {
+      name: "Extrude1",
+      sketchId: entSketch.id,
+      distance: extrudeHeight,
+      direction: 1,
+      operation: "newBody",
+    });
+    const entResult = evaluateDocument(entDoc);
+    expect(entResult.ok).toBe(true);
+    if (!entResult.ok) return;
+    const entVolume = measureVolume(entResult.shape);
+    entResult.shape.delete();
+
+    expect(segVolume).toBeCloseTo(entVolume, 3);
+    expect(segVolume).toBeCloseTo(width * height * extrudeHeight, 3);
+  });
+
+  it("矩形+内側矩形のsegmentsを押し出すと穴あき体積になる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const outer = rectSegments([
+      [0, 0],
+      [60, 0],
+      [60, 40],
+      [0, 40],
+    ]);
+    const inner = rectSegments([
+      [20, 10],
+      [40, 10],
+      [40, 30],
+      [20, 30],
+    ]);
+    const height = 5;
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [],
+      segments: [...outer, ...inner],
+    });
+    const { doc } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: height,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const expectedArea = 60 * 40 - 20 * 20;
+    const volume = measureVolume(result.shape);
+    expect(volume).toBeCloseTo(expectedArea * height, 3);
+
+    result.shape.delete();
+  });
+
+  it("円弧+直線のD字形segmentsを押し出すと半円+矩形部分の体積になる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const r = 10;
+    const height = 3;
+    const line = createLineSegment({ p1: [-r, 0], p2: [r, 0] });
+    const arc = createArcSegment({ p1: [r, 0], p2: [-r, 0], bulge: -1 });
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [],
+      segments: [line, arc],
+    });
+    const { doc } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: height,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const expectedArea = (Math.PI * r * r) / 2;
+    const volume = measureVolume(result.shape);
+    expect(volume).toBeCloseTo(expectedArea * height, 1);
+
+    result.shape.delete();
+  });
+
+  it("開いた線分のみのsegments(閉じた領域なし)を押し出そうとするとfeatureId付きエラーになる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const segments: SketchSegment[] = [
+      createLineSegment({ p1: [0, 0], p2: [10, 0] }),
+      createLineSegment({ p1: [10, 0], p2: [10, 10] }),
+    ];
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [],
+      segments,
+    });
+    const { doc, feature: extrude } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.featureId).toBe(extrude.id);
+    expect(result.message).toContain("閉じた領域がありません");
+  });
+
+  it("entitiesの矩形とsegmentsの離れた矩形を同じスケッチに置くと、両方がfuseされた体積になる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const entityRect = createRectangleEntity({ width: 10, height: 10, center: [0, 0] });
+    const segRect = rectSegments([
+      [100, 0],
+      [110, 0],
+      [110, 10],
+      [100, 10],
+    ]);
+    const height = 4;
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [entityRect],
+      segments: segRect,
+    });
+    const { doc } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: height,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const expectedVolume = (10 * 10 + 10 * 10) * height;
+    const volume = measureVolume(result.shape);
+    expect(volume).toBeCloseTo(expectedVolume, 3);
 
     result.shape.delete();
   });
