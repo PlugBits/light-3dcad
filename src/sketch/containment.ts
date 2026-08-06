@@ -1,4 +1,4 @@
-// スケッチ内エンティティ(rectangle/circle/polygon)の「包含」判定(Phase 15)。
+// スケッチ内エンティティ(rectangle/circle/polygon)の「包含」判定(Phase 15、Phase 21で境界接触バグ修正)。
 // ReactにもThree.jsにもReplicad(OCCT)にも依存しない純粋TypeScript
 // (src/sketch/snapping.ts, dimensions.ts, polygonOutline.ts と同じ方針)。
 //
@@ -11,16 +11,22 @@
 //   - circle: 中心点 + 半径
 //
 // 包含の意味: エンティティA(inner)がエンティティB(outer)に完全に含まれる、とは
-//   - outerが円の場合: innerの全代表点が outer の中心からouter.radius以内にある
-//     (innerが円の場合はさらに厳密に「中心間距離 + inner.radius <= outer.radius」で判定する。
+//   - outerが円の場合: innerの全代表点が outer の中心からouter.radius以内にある(境界接触=含まれる)
+//     (innerが円の場合はさらに「中心間距離 + inner.radius <= outer.radius」で判定する。
 //     代表点=中心点だけでは半径を考慮できないための特別扱い)。
 //   - outerが多角形(rectangle/polygon)の場合: innerの全代表点が outer の多角形の内部(境界含む)にある
 //     (innerが円の場合はさらに「円の中心から多角形の各辺までの最短距離 >= inner.radius」も満たす必要がある。
 //     中心点だけでは半径分のはみ出しを検出できないための特別扱い)。
+//   境界にちょうど接する(タンジェント)場合も「含まれる」とみなす(Phase 21で修正: 以前は微小マージンで
+//   除外していたため、たとえば「幅20の矩形の中心に半径10の円」のような、辺の中点にちょうど接する
+//   ごく普通の寸法の組み合わせがholeとして分類されず、押し出し結果から穴が消える不具合があった)。
 //
-// 同一形状・同一サイズの相互包含(A⊆B かつ B⊆A)を避けるため、判定には微小マージン(CONTAINMENT_EPS)を
-// 設けている。inner が outer よりわずかにでも小さくないと「含まれる」とは判定しない
-// (ちょうど同じ大きさ・同じ位置の2つの図形は互いにholeと判定されない=どちらもtop-levelのまま)。
+// 同一形状・同一サイズの相互包含(A⊆B かつ B⊆A)を避けるための処理: 2つの閉領域が互いを包含し合う
+// (A⊆B かつ B⊆A)のは、集合として完全に一致する場合に限られる(凸/非凸を問わない一般的な事実)。
+// そのため isContained(inner, outer) は「非厳密(境界接触を含む)包含テスト」を両方向で行い、
+// 両方向とも真になる(=同一形状の相互包含)場合にのみ「含まれない」と判定する(rawContains参照)。
+// これにより、境界に接するだけの真に異なるサイズの図形(上記の例)は正しくholeと判定されつつ、
+// ちょうど同じ大きさ・同じ位置の2つの図形は従来どおり互いにholeと判定されない(どちらもtop-levelのまま)。
 //
 // ネストの階層: このモジュールが提供する分類は「outer(外枠)」と「hole(穴)」の2階層のみ。
 // 「他のいずれかのエンティティに含まれる」エンティティは無条件でholeとして扱う。そのため、
@@ -32,8 +38,13 @@ import { regularPolygonVertices, slotAxisNormal } from "./shapeFromPoints";
 
 export type Point2 = [number, number];
 
-/** 包含判定の微小マージン(mm)。ほぼ同一サイズの図形同士を相互包含と誤判定しないためのバッファ。 */
-const CONTAINMENT_EPS = 1e-6;
+/**
+ * 浮動小数点誤差を吸収するための微小許容(mm)。境界接触(タンジェント)は「含まれる」側として扱うため、
+ * 各種の比較で許容側(緩める方向)にのみ加える(誤ってfalse negativeにしないため)。
+ * 設計上の「相互包含防止」の役割はもう持たない(rawContainsの両方向テストに置き換えた、モジュール
+ * 先頭のコメント参照)。
+ */
+const FLOAT_EPS = 1e-9;
 /** 点が多角形の辺上にあるとみなす距離許容(mm)。 */
 const BOUNDARY_EPS = 1e-7;
 
@@ -116,37 +127,24 @@ function minDistanceToPolygonEdges(point: Point2, polygon: Point2[]): number {
   return min;
 }
 
-/**
- * 点が多角形の内部に「余裕を持って(境界からCONTAINMENT_EPS以上離れて)」あるか。
- * polygon-in-polygonの包含判定に使う。単なる pointInPolygon(境界接触もtrue) だと
- * 同一サイズ・同一位置の図形同士(頂点が完全一致=距離0で境界上)を互いに含む/含まれると
- * 誤判定してしまうため、境界からの最短距離がマージン未満なら「含まれない」とする。
- */
-function isPointWellInsidePolygon(point: Point2, polygon: Point2[]): boolean {
-  if (minDistanceToPolygonEdges(point, polygon) < CONTAINMENT_EPS) return false;
-  return pointInPolygon(point, polygon);
-}
-
 function distance(a: Point2, b: Point2): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1]);
 }
 
 /**
- * inner が outer に完全に含まれるか(頂点ベース。境界接触は「含まれる」とみなす。
- * ただし inner と outer がほぼ同一サイズ・同一位置の場合は CONTAINMENT_EPS 分のマージンにより
- * 「含まれない」と判定される=相互包含を防ぐ)。
+ * inner が outer に「非厳密に(境界接触を含めて)」完全に含まれるか(頂点ベース)。
+ * isContained()の実装用ヘルパーで、単体では相互包含(同一形状同士)を区別しない
+ * (両方向とも true になりうる。呼び出し側のisContained()がその場合を後処理する)。
  */
-export function isContained(inner: SketchEntity, outer: SketchEntity): boolean {
-  if (inner === outer || inner.id === outer.id) return false;
-
+function rawContains(inner: SketchEntity, outer: SketchEntity): boolean {
   if (outer.kind === "circle") {
     if (inner.kind === "circle") {
-      return distance(inner.center, outer.center) + inner.radius <= outer.radius - CONTAINMENT_EPS;
+      return distance(inner.center, outer.center) + inner.radius <= outer.radius + FLOAT_EPS;
     }
     const [ocx, ocy] = outer.center;
     return entityVertices(inner).every((p) => {
       const d = Math.hypot(p[0] - ocx, p[1] - ocy);
-      return d <= outer.radius - CONTAINMENT_EPS;
+      return d <= outer.radius + FLOAT_EPS;
     });
   }
 
@@ -156,10 +154,23 @@ export function isContained(inner: SketchEntity, outer: SketchEntity): boolean {
 
   if (inner.kind === "circle") {
     if (!pointInPolygon(inner.center, outerPoly)) return false;
-    return minDistanceToPolygonEdges(inner.center, outerPoly) >= inner.radius + CONTAINMENT_EPS;
+    return minDistanceToPolygonEdges(inner.center, outerPoly) >= inner.radius - FLOAT_EPS;
   }
 
-  return entityVertices(inner).every((p) => isPointWellInsidePolygon(p, outerPoly));
+  return entityVertices(inner).every((p) => pointInPolygon(p, outerPoly));
+}
+
+/**
+ * inner が outer に完全に含まれるか(頂点ベース。境界接触=ちょうど内接・タンジェントも「含まれる」と
+ * みなす、Phase 21)。
+ * rawContains()を両方向で評価し、両方向とも真(=inner と outer が集合として一致する、同一形状・
+ * 同一サイズ・同一位置の場合に限られる)であれば「含まれない」とする(相互包含の防止。
+ * モジュール先頭のコメント参照)。
+ */
+export function isContained(inner: SketchEntity, outer: SketchEntity): boolean {
+  if (inner === outer || inner.id === outer.id) return false;
+  if (!rawContains(inner, outer)) return false;
+  return !rawContains(outer, inner);
 }
 
 export interface ContainmentClassification {

@@ -220,24 +220,32 @@ function fuseEntities(entities: SketchEntity[]): Drawing {
 }
 
 /**
- * sketch内のentities(rectangle/circle/polygon)を1つのDrawingに合成する(Phase 15: 入れ子穴対応)。
- * src/sketch/containment.ts の分類(2階層: 外枠/穴)に基づき、
- * 外枠(outers)同士をfuseしたのち、穴(holes)を外枠に含まれる他のいずれのエンティティにも
- * 完全に含まれるエンティティ)をまとめてfuseしてcutする。部分的に重なる(包含ではない)
- * エンティティは従来どおりfuse対象のまま(いずれもoutersに分類される)。
- * entitiesが空の場合はnullを返す(呼び出し側のbuildDrawing()がsegments側と合流させる)。
+ * 1スケッチ分のプロファイルを「穴を適用する前の外形(solid)」と「穴の輪郭の合成(holes)」に
+ * 分けて保持する(Phase 21: 2Dの Drawing#cut() ではなく3D側の Shape3D#cut() で穴を減算するための
+ * 中間表現。理由はbuildDrawingParts()のコメント参照)。
  */
-function buildEntitiesDrawing(entities: SketchEntity[]): Drawing | null {
+interface DrawingParts {
+  /** 外形(穴を考慮しない状態)。entities由来の外枠とsegments由来の領域外枠をすべてfuseしたもの。 */
+  solid: Drawing;
+  /** 穴の輪郭をすべてfuseしたもの。穴が1つも無ければnull。 */
+  holes: Drawing | null;
+}
+
+/**
+ * sketch内のentities(rectangle/circle/polygon)を「外形」と「穴」に分類する(Phase 15: 入れ子穴対応)。
+ * src/sketch/containment.ts の分類(2階層: 外枠/穴)に基づき、外枠(outers)同士をfuseして外形、
+ * 穴(holes、外枠に含まれる他のいずれのエンティティにも完全に含まれるエンティティ)同士をfuseして
+ * holesとする(ここではまだcutしない。呼び出し側のbuildDrawingParts()参照)。部分的に重なる
+ * (包含ではない)エンティティは従来どおりfuse対象のまま(いずれもoutersに分類される)。
+ * entitiesが空の場合はnullを返す(呼び出し側のbuildDrawingParts()がsegments側と合流させる)。
+ */
+function buildEntitiesParts(entities: SketchEntity[]): DrawingParts | null {
   if (entities.length === 0) return null;
 
   const { outers, holes } = classifySketchEntities(entities);
   // entitiesが非空である限り、包含関係に循環は起こり得ないため outers は必ず1件以上になる。
-  let drawing = fuseEntities(outers);
-  if (holes.length > 0) {
-    const holeDrawing = fuseEntities(holes);
-    drawing = drawing.cut(holeDrawing);
-  }
-  return drawing;
+  const solid = fuseEntities(outers);
+  return { solid, holes: holes.length > 0 ? fuseEntities(holes) : null };
 }
 
 /**
@@ -255,36 +263,48 @@ function loopDrawing(loop: SketchSegment[]): Drawing {
 }
 
 /**
- * src/sketch/regions.tsが検出した閉領域(Region[])を1つのDrawingに合成する(Phase 19a)。
- * 各領域は外枠(outer)を穴(holes)でcutしたのち、領域同士をfuseする。regionsは非空を前提とする。
+ * src/sketch/regions.tsが検出した閉領域(Region[])を「外形」と「穴」に分ける(Phase 19a、Phase 21で
+ * 2D cutをやめて3D側に穴減算を先送りするよう変更)。各領域の外枠(outer)同士・穴(holes)同士を
+ * それぞれ独立にfuseする(ここではまだcutしない)。regionsは非空を前提とする。
  */
-function buildRegionsDrawing(regions: Region[]): Drawing {
-  let drawing: Drawing | null = null;
+function buildRegionsParts(regions: Region[]): DrawingParts {
+  let solid: Drawing | null = null;
+  let holesAll: Drawing | null = null;
   for (const region of regions) {
-    let regionDrawing = loopDrawing(region.outer);
+    const regionOuter = loopDrawing(region.outer);
+    solid = solid ? solid.fuse(regionOuter) : regionOuter;
     for (const hole of region.holes) {
-      regionDrawing = regionDrawing.cut(loopDrawing(hole));
+      const holeDrawing = loopDrawing(hole);
+      holesAll = holesAll ? holesAll.fuse(holeDrawing) : holeDrawing;
     }
-    drawing = drawing ? drawing.fuse(regionDrawing) : regionDrawing;
   }
-  // 呼び出し側で regions.length > 0 を保証しているため drawing は必ず非null。
-  return drawing as Drawing;
+  // 呼び出し側で regions.length > 0 を保証しているため solid は必ず非null。
+  return { solid: solid as Drawing, holes: holesAll };
 }
 
 /**
- * sketch内のentitiesとsegments(Phase 19a)を合成して1つのDrawingにする。
- * entities由来のDrawing(buildEntitiesDrawing、従来どおりの外枠/穴分類)と、
- * segments由来のDrawing(src/sketch/regions.tsの閉領域検出→buildRegionsDrawing)を、
- * どちらも存在すればfuseで合流させる。
+ * sketch内のentitiesとsegments(Phase 19a)を合成して、「外形(solid)」と「穴(holes)」に分けて返す。
+ * entities由来の外形/穴(buildEntitiesParts、従来どおりの外枠/穴分類)と、
+ * segments由来の外形/穴(src/sketch/regions.tsの閉領域検出→buildRegionsParts)を、
+ * それぞれsolid同士・holes同士でfuseして合流させる。
+ *
+ * 穴の減算(cut)をここでは行わない理由(Phase 21): 外形と穴の輪郭がちょうど接する
+ * (タンジェント。例: 幅20の矩形の中心に半径10の円=辺の中点にちょうど接する)場合、OCCTの2D
+ * ブーリアン(Drawing#cut())は縮退した境界を正しく扱えず、穴が全く減算されないまま(=無変化)の
+ * 形状を返すことがある(実装検証で確認済み)。これは押し出し後の3D立体同士のcut()
+ * (Shape3D#cut())では発生しない(実装検証で確認済み: 同じ寸法の組み合わせで2Dは失敗し3Dは
+ * 成功する)。そのため呼び出し側のextrudeSketchFeature()で、外形と穴をそれぞれ独立に押し出してから
+ * 3D側でcutする方式に変更した。
+ *
  * どちらも図形/領域を持たない場合はエラー: segmentsが指定されているのに閉じた領域が
  * 1つも検出できない場合は「閉じた領域がありません」、segments自体が無い(entitiesのみ運用)
  * 場合は従来どおり「スケッチに図形がありません」。
  */
-function buildDrawing(entities: SketchEntity[], segments: SketchSegment[] | undefined): Drawing {
-  const entitiesDrawing = buildEntitiesDrawing(entities);
+function buildDrawingParts(entities: SketchEntity[], segments: SketchSegment[] | undefined): DrawingParts {
+  const entitiesParts = buildEntitiesParts(entities);
   const regions = segments && segments.length > 0 ? findClosedRegions(segments) : [];
 
-  if (!entitiesDrawing && regions.length === 0) {
+  if (!entitiesParts && regions.length === 0) {
     if (segments && segments.length > 0) {
       throw new Error("閉じた領域がありません");
     }
@@ -292,10 +312,17 @@ function buildDrawing(entities: SketchEntity[], segments: SketchSegment[] | unde
   }
 
   if (regions.length === 0) {
-    return entitiesDrawing as Drawing;
+    return entitiesParts as DrawingParts;
   }
-  const regionsDrawing = buildRegionsDrawing(regions);
-  return entitiesDrawing ? entitiesDrawing.fuse(regionsDrawing) : regionsDrawing;
+  const regionsParts = buildRegionsParts(regions);
+  if (!entitiesParts) return regionsParts;
+
+  const solid = entitiesParts.solid.fuse(regionsParts.solid);
+  let holes = entitiesParts.holes;
+  if (regionsParts.holes) {
+    holes = holes ? holes.fuse(regionsParts.holes) : regionsParts.holes;
+  }
+  return { solid, holes };
 }
 
 /** faceの中心・法線をプレーンなタプルとして取り出す(Vectorラッパーは即delete)。 */
@@ -394,14 +421,29 @@ function facePlaneBasis(center: Tuple3, normal: Tuple3): PlaneBasis {
 }
 
 /**
- * sketchFeatureをDrawingに変換し、指定距離・方向で押し出す。
- * plane.kind === "world" の場合はXY平面上に、"face" の場合は resolvedFacePlanes に
- * 事前計算しておいた面情報からスケッチ平面を組み立てて押し出す。
+ * 1つのDrawingを指定平面(名前付き平面文字列 または Plane インスタンス)・距離・方向で押し出す。
+ * replicadの Sketch#extrude() / Sketches#extrude() は内部で押し出し元の sketch(wire)を
+ * 自動的に delete() する実装になっている(CompoundSketchを除く)ため、呼び出し側で
+ * sketchOnPlane() の戻り値を重ねて delete() する必要は無い(むしろ二重解放エラーになる)。
+ */
+function extrudeDrawing(drawing: Drawing, plane: "XY" | "XZ" | "YZ" | Plane, distance: number, direction: 1 | -1): Shape3D {
+  const sketched = drawing.sketchOnPlane(plane as never);
+  // sketchOnPlane() の戻り値は型上 SketchInterface | Sketches に分かれ、
+  // extrude() の戻り値もそれぞれ Shape3D / AnyShape に広がるため明示キャストする。
+  // 実際には押し出しは常に立体(Shape3D)を生む。
+  return sketched.extrude(distance * direction) as Shape3D;
+}
+
+/**
+ * sketchFeatureを押し出す。plane.kind === "world" の場合はXY平面上に、"face" の場合は
+ * resolvedFacePlanes に事前計算しておいた面情報からスケッチ平面を組み立てて押し出す。
  *
- * 注意: replicadの Sketch#extrude() / Sketches#extrude() は内部で押し出し元の
- * sketch(wire)を自動的に delete() する実装になっている(CompoundSketchを除く)。
- * そのため呼び出し側でsketchOnPlane()の戻り値を重ねて delete() すると
- * 「This object has been deleted」の二重解放エラーになる。ここでは呼ばない。
+ * 外形(solid)と穴(holes)は別々に押し出し、穴があれば3D側の Shape3D#cut() で減算する
+ * (Phase 21: 2Dの Drawing#cut() は外形と穴の輪郭がちょうど接する場合にOCCTが正しく減算できず
+ * 無変化の形状を返すことがあるため。buildDrawingParts()のコメント参照)。
+ * 同じPlaneインスタンス(face参照の場合)を2回のsketchOnPlane()に使い回して問題ないのは、
+ * sketchOnPlane()/extrude()が自動delete()するのは押し出し元のsketch(wire)のみで、
+ * 渡したPlane自体は消費されないため(このあとの plane.delete() まで有効なまま)。
  */
 function extrudeSketchFeature(
   sketch: SketchFeature,
@@ -409,29 +451,36 @@ function extrudeSketchFeature(
   direction: 1 | -1,
   resolvedFacePlanes: Map<FeatureId, { center: Tuple3; normal: Tuple3 }>,
 ): Shape3D {
-  const drawing = buildDrawing(sketch.entities, sketch.segments);
+  const { solid, holes } = buildDrawingParts(sketch.entities, sketch.segments);
 
-  if (sketch.plane.kind === "world") {
-    // replicadは"XY"/"XZ"/"YZ"を名前付き平面としてそのまま受け付ける(sketchOnPlane参照)。
-    const sketched = drawing.sketchOnPlane(sketch.plane.plane);
-    // sketchOnPlane() の戻り値は型上 SketchInterface | Sketches に分かれ、
-    // extrude() の戻り値もそれぞれ Shape3D / AnyShape に広がるため明示キャストする。
-    // 実際には押し出しは常に立体(Shape3D)を生む。
-    return sketched.extrude(distance * direction) as Shape3D;
-  }
+  const plane: "XY" | "XZ" | "YZ" | Plane =
+    sketch.plane.kind === "world"
+      ? sketch.plane.plane
+      : (() => {
+          const resolved = resolvedFacePlanes.get(sketch.id);
+          if (!resolved) {
+            // sketch評価時(ループ内でtype==="sketch"を処理するタイミング)に必ず解決しているため
+            // 通常はここに到達しない。
+            throw new Error("内部エラー: 面参照スケッチの平面が解決されていません");
+          }
+          return buildFacePlane(resolved.center, resolved.normal);
+        })();
 
-  const resolved = resolvedFacePlanes.get(sketch.id);
-  if (!resolved) {
-    // sketch評価時(ループ内でtype==="sketch"を処理するタイミング)に必ず解決しているため
-    // 通常はここに到達しない。
-    throw new Error("内部エラー: 面参照スケッチの平面が解決されていません");
-  }
-  const plane = buildFacePlane(resolved.center, resolved.normal);
   try {
-    const sketched = drawing.sketchOnPlane(plane);
-    return sketched.extrude(distance * direction) as Shape3D;
+    let shape = extrudeDrawing(solid, plane, distance, direction);
+    if (holes) {
+      const holeShape = extrudeDrawing(holes, plane, distance, direction);
+      try {
+        const cutResult = shape.cut(holeShape);
+        shape.delete();
+        shape = cutResult;
+      } finally {
+        holeShape.delete();
+      }
+    }
+    return shape;
   } finally {
-    plane.delete();
+    if (sketch.plane.kind !== "world") (plane as Plane).delete();
   }
 }
 

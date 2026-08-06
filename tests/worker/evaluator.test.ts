@@ -59,6 +59,14 @@ function countFaces(shape: Shape3D): number {
   return count;
 }
 
+/** 円柱面(geomType === "CYLINDRE")の数を数える。ドーナツ形状は内外2面、単純な円柱は1面になる。 */
+function countCylindricalFaces(shape: Shape3D): number {
+  const faces = shape.faces;
+  const count = faces.filter((f) => f.geomType === "CYLINDRE").length;
+  faces.forEach((f) => f.delete());
+  return count;
+}
+
 /** テスト用: 形状の中からXY平面に平行(法線がほぼ+Z)な面を探し、faceId/center/normalを取り出す。 */
 function findTopFace(shape: Shape3D): { faceId: number; center: [number, number, number]; normal: [number, number, number] } {
   const faces = shape.faces;
@@ -720,26 +728,6 @@ describe("evaluateDocument (WASM統合)", () => {
     ctx.skip(!wasmLoaded, SKIP_NOTE);
     const empty = createEmptyDocument();
 
-    // 比較基準: 穴なしの単純な円柱(半径20)。
-    const plainDoc0 = createEmptyDocument();
-    const { doc: plainDoc1, feature: plainSketch } = addSketchFeature(plainDoc0, {
-      name: "Sketch1",
-      plane: { kind: "world", plane: "XY" },
-      entities: [createCircleEntity({ radius: 20 })],
-    });
-    const { doc: plainDoc } = addExtrudeFeature(plainDoc1, {
-      name: "Extrude1",
-      sketchId: plainSketch.id,
-      distance: 5,
-      direction: 1,
-      operation: "newBody",
-    });
-    const plainResult = evaluateDocument(plainDoc);
-    expect(plainResult.ok).toBe(true);
-    if (!plainResult.ok) return;
-    const plainFaces = countFaces(plainResult.shape);
-    plainResult.shape.delete();
-
     const outer = createCircleEntity({ radius: 20 });
     const inner = createCircleEntity({ radius: 8 });
     const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
@@ -759,11 +747,52 @@ describe("evaluateDocument (WASM統合)", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
 
-    // ドーナツ形状は中心を貫通する穴があるため、単純な円柱(穴なし)より面数が多い。
-    expect(countFaces(result.shape)).toBeGreaterThan(plainFaces);
+    // ドーナツ形状は内側(半径8)・外側(半径20)の2つの円柱面を持つ(単純な円柱は1つだけ)。
+    // Phase 21: 面数の単純比較(旧: 単純な円柱よりtoBeGreaterThan)は、2D Drawing#cut()→3D
+    // Shape3D#cut()への変更(タンジェント境界のバグ修正、containment.ts参照)でOCCTが返す
+    // 面の内訳が変わり(旧実装はシーム由来と見られる余剰面を含んでいた)、意味のある比較で
+    // なくなったため、より直接的な「円柱面が2つある」検証に置き換えた。
+    expect(countCylindricalFaces(result.shape)).toBe(2);
 
     const expectedVolume = (Math.PI * 20 * 20 - Math.PI * 8 * 8) * 5;
     const volume = measureVolume(result.shape);
+    expect(volume).toBeCloseTo(expectedVolume, 0);
+
+    result.shape.delete();
+  });
+
+  it("矩形20x20(既定寸法)の中心に円r=10(既定寸法)がちょうど内接(辺の中点に接する)しても穴として扱われる(Phase 21回帰)", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    // SketchEditorの「矩形を数値で追加」「円を数値で追加」ボタン(src/components/SketchEditor.tsx)の
+    // 既定値そのもの(createRectangleEntity({width:20,height:20})・createCircleEntity({radius:10})、
+    // どちらも中心は既定の[0,0])を使う。この組み合わせは円の半径(10)が矩形の半幅(20/2=10)と
+    // ちょうど一致し、円が矩形の各辺の中点にタンジェント(接する)状態になる。修正前は境界接触が
+    // 微小マージンで「含まれない」と判定され、円がholeに分類されずouterどうしのfuseになり
+    // (fuse結果は矩形と等しいため見た目に変化がなく)穴が消えて見える不具合があった。
+    const empty = createEmptyDocument();
+    const rect = createRectangleEntity({ width: 20, height: 20 });
+    const hole = createCircleEntity({ radius: 10 });
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect, hole],
+    });
+    const { doc } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    // 穴が正しく開いていれば、単純な20x20x10の直方体(体積4000mm^3)より小さい体積になる。
+    const expectedVolume = (20 * 20 - Math.PI * 10 * 10) * 10;
+    const volume = measureVolume(result.shape);
+    expect(volume).toBeLessThan(20 * 20 * 10);
     expect(volume).toBeCloseTo(expectedVolume, 0);
 
     result.shape.delete();
