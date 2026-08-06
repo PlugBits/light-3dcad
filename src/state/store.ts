@@ -12,6 +12,7 @@ import {
 import { createRectangleEntity } from "../model/entity";
 import type { CadDocument, ExtrudeFeature, FeatureId, WorldPlaneName } from "../model/types";
 import type { FaceInfo, MeshData, MeshQuality, SketchPlaneInfo, WorkerResponse } from "../protocol/messages";
+import { createHistoryState, pushHistory, redoHistory, undoHistory, type HistoryState } from "./history";
 
 export type EvalStatus = "initializing" | "evaluating" | "ready" | "error";
 
@@ -114,9 +115,20 @@ interface CadStoreState {
   exporting: boolean;
   exportError: string | null;
 
+  /**
+   * 簡易アンドゥ/リドゥ履歴(Phase 14)。updateDocument()で変更する度に変更前のドキュメントの
+   * スナップショット(JSON構造のコピー)がpastへ積まれる(上限50件)。選択状態は履歴に含めない
+   * (アンドゥ/リドゥ時は選択解除するのみ)。
+   */
+  history: HistoryState<CadDocument>;
+  /** 1つ前のドキュメント状態に戻し、再評価を要求する。履歴が無ければ何もしない。 */
+  undo: () => void;
+  /** undo()を取り消し、やり直す。やり直せる履歴が無ければ何もしない。 */
+  redo: () => void;
+
   /** Workerを起動し、ready後に初期ドキュメントを評価する。複数回呼んでも安全(冪等)。 */
   initialize: () => void;
-  /** ドキュメントを更新し、直ちに(デバウンスなしで)再評価を要求する。 */
+  /** ドキュメントを更新し、直ちに(デバウンスなしで)再評価を要求する。変更前の状態を履歴に積む。 */
   updateDocument: (updater: (doc: CadDocument) => CadDocument) => void;
   /** フィーチャーツリーの選択を変更する。 */
   selectFeature: (featureId: FeatureId | null) => void;
@@ -186,6 +198,38 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   exporting: false,
   exportError: null,
 
+  history: createHistoryState<CadDocument>(),
+
+  undo: () => {
+    const result = undoHistory(get().history, structuredClone(get().doc));
+    if (!result) return;
+    const { requestId, promise } = postRequest({ kind: "evaluate", doc: result.doc });
+    set({
+      doc: result.doc,
+      status: "evaluating",
+      latestEvaluateRequestId: requestId,
+      history: result.state,
+      selectedFeatureId: null,
+      selectedFace: null,
+    });
+    promise.then((response) => applyEvaluated(set, get, requestId, response));
+  },
+
+  redo: () => {
+    const result = redoHistory(get().history, structuredClone(get().doc));
+    if (!result) return;
+    const { requestId, promise } = postRequest({ kind: "evaluate", doc: result.doc });
+    set({
+      doc: result.doc,
+      status: "evaluating",
+      latestEvaluateRequestId: requestId,
+      history: result.state,
+      selectedFeatureId: null,
+      selectedFace: null,
+    });
+    promise.then((response) => applyEvaluated(set, get, requestId, response));
+  },
+
   initialize: () => {
     // "evaluate" は Worker側で ensureOC() を経由するため、別途 "init" 往復は不要。
     const { requestId, promise } = postRequest({ kind: "evaluate", doc: get().doc });
@@ -194,9 +238,12 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   },
 
   updateDocument: (updater) => {
-    const nextDoc = updater(get().doc);
+    const prevDoc = get().doc;
+    const nextDoc = updater(prevDoc);
+    if (nextDoc === prevDoc) return;
     const { requestId, promise } = postRequest({ kind: "evaluate", doc: nextDoc });
-    set({ doc: nextDoc, status: "evaluating", latestEvaluateRequestId: requestId });
+    const nextHistory = pushHistory(get().history, structuredClone(prevDoc));
+    set({ doc: nextDoc, status: "evaluating", latestEvaluateRequestId: requestId, history: nextHistory });
     promise.then((response) => applyEvaluated(set, get, requestId, response));
   },
 

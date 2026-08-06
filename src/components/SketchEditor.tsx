@@ -80,18 +80,24 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
               .join(", ")})`}
       </p>
 
+      <p style={{ fontSize: 11, opacity: 0.7, margin: 0 }}>
+        ビューア上部のツールバーの「矩形」「円」ボタンでクリック作図するのがおすすめです。
+        下のボタンは既定サイズの図形を数値で追加します(後から数値編集できます)。
+      </p>
       <div style={{ display: "flex", gap: 8 }}>
-        <button type="button" data-testid="btn-add-rectangle" onClick={handleAddRectangle}>
-          矩形追加
+        <button type="button" data-testid="btn-add-rectangle" onClick={handleAddRectangle} title="20x20mmの矩形を原点に追加します">
+          矩形を数値で追加
         </button>
-        <button type="button" data-testid="btn-add-circle" onClick={handleAddCircle}>
-          円追加
+        <button type="button" data-testid="btn-add-circle" onClick={handleAddCircle} title="半径10mmの円を原点に追加します">
+          円を数値で追加
         </button>
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {sketch.entities.length === 0 && (
-          <p style={{ fontSize: 12, opacity: 0.7 }}>図形がありません。「矩形追加」「円追加」で作成してください。</p>
+          <p style={{ fontSize: 12, opacity: 0.7 }}>
+            図形がありません。ツールバーの「矩形」「円」「線描画」ボタンで作図するか、上の「数値で追加」を使ってください。
+          </p>
         )}
         {sketch.entities.map((entity, index) => (
           <div

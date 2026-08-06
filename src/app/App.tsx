@@ -6,9 +6,13 @@ import { FeatureTree } from "../components/FeatureTree";
 import { SketchEditor } from "../components/SketchEditor";
 import { downloadStl } from "../export/downloadStl";
 import { addSketchEntity, findFeature, getDependentFeatureIds } from "../model/document";
-import { createPolygonEntity } from "../model/entity";
+import { createCircleEntity, createPolygonEntity, createRectangleEntity } from "../model/entity";
+import { rectangleFromCorners } from "../sketch/shapeFromPoints";
 import { useCadStore } from "../state/store";
 import { CadViewer, type SketchOverlayEntry } from "../viewer/CadViewer";
+
+/** ツールバーで選択中の作図ツール(未選択はnull)。line=既存の複数頂点線描画、rect/circleはPhase 14の2クリック作図。 */
+type DrawingTool = "line" | "rect" | "circle" | null;
 
 export default function App() {
   const viewerContainerRef = useRef<HTMLDivElement | null>(null);
@@ -36,9 +40,13 @@ export default function App() {
   const exportStl = useCadStore((s) => s.exportStl);
   const setShowSketches = useCadStore((s) => s.setShowSketches);
   const updateDocument = useCadStore((s) => s.updateDocument);
+  const undo = useCadStore((s) => s.undo);
+  const redo = useCadStore((s) => s.redo);
+  const canUndo = useCadStore((s) => s.history.past.length > 0);
+  const canRedo = useCadStore((s) => s.history.future.length > 0);
 
-  // 線描画モード中かどうか(UI側の表示状態。実体はCadViewerが持つ)。
-  const [drawingMode, setDrawingMode] = useState(false);
+  // 現在アクティブな作図ツール(line/rect/circle、未選択はnull)。実体(頂点列・プレビュー)はCadViewerが持つ。
+  const [activeTool, setActiveTool] = useState<DrawingTool>(null);
   // 描画モード開始時点で対象だったスケッチID。選択が他に移ったら自動キャンセルするために使う。
   const [drawingSketchId, setDrawingSketchId] = useState<string | null>(null);
   // 1mmグリッドスナップ(デフォルトON)。
@@ -125,12 +133,33 @@ export default function App() {
 
   // 描画モード中にフィーチャーツリーの選択が別のフィーチャーに移った場合は、描画モードを
   // 自動的にキャンセルする(ビューア側のcancelPolygonDrawing()がonCancelを呼び、
-  // drawingModeのReact stateもそこで false に戻る)。
+  // activeToolのReact stateもそこで null に戻る)。
   useEffect(() => {
-    if (drawingMode && selectedFeatureId !== drawingSketchId) {
+    if (activeTool && selectedFeatureId !== drawingSketchId) {
       viewerRef.current?.cancelPolygonDrawing();
     }
-  }, [drawingMode, selectedFeatureId, drawingSketchId]);
+  }, [activeTool, selectedFeatureId, drawingSketchId]);
+
+  // Ctrl+Z(Mac: Cmd+Z)でアンドゥ、Ctrl+Shift+Z(Mac: Cmd+Shift+Z)でリドゥ(Phase 14)。
+  // テキスト入力欄にフォーカスがある間はブラウザ標準のテキスト編集アンドゥを優先し、何もしない。
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      const isEditable =
+        !!target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+      if (isEditable) return;
+      const meta = event.ctrlKey || event.metaKey;
+      if (!meta || event.key.toLowerCase() !== "z") return;
+      event.preventDefault();
+      if (event.shiftKey) {
+        useCadStore.getState().redo();
+      } else {
+        useCadStore.getState().undo();
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   const sketches = doc.features.filter((f) => f.type === "sketch");
   const selectedFeature = selectedFeatureId ? findFeature(doc, selectedFeatureId) : undefined;
@@ -183,23 +212,62 @@ export default function App() {
     viewerRef.current?.lookAtPlane(selectedSketchPlane);
   }
 
-  function handleStartDrawing() {
+  function handleStartLineDrawing() {
     if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
     const sketchId = selectedFeature.id;
     viewerRef.current.startPolygonDrawing(selectedSketchPlane, gridSnap, selectedFeature.entities, {
       onComplete: (points: [number, number][]) => {
         const entity = createPolygonEntity({ points });
         updateDocument((d) => addSketchEntity(d, sketchId, entity));
-        setDrawingMode(false);
+        setActiveTool(null);
         setDrawingSketchId(null);
       },
       onCancel: () => {
-        setDrawingMode(false);
+        setActiveTool(null);
         setDrawingSketchId(null);
       },
     });
     setDrawingSketchId(sketchId);
-    setDrawingMode(true);
+    setActiveTool("line");
+  }
+
+  function handleStartRectDrawing() {
+    if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
+    const sketchId = selectedFeature.id;
+    viewerRef.current.startRectDrawing(selectedSketchPlane, gridSnap, selectedFeature.entities, {
+      onComplete: (corner1, corner2) => {
+        const { center, width, height } = rectangleFromCorners(corner1, corner2);
+        const entity = createRectangleEntity({ center, width, height });
+        updateDocument((d) => addSketchEntity(d, sketchId, entity));
+        setActiveTool(null);
+        setDrawingSketchId(null);
+      },
+      onCancel: () => {
+        setActiveTool(null);
+        setDrawingSketchId(null);
+      },
+    });
+    setDrawingSketchId(sketchId);
+    setActiveTool("rect");
+  }
+
+  function handleStartCircleDrawing() {
+    if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
+    const sketchId = selectedFeature.id;
+    viewerRef.current.startCircleDrawing(selectedSketchPlane, gridSnap, selectedFeature.entities, {
+      onComplete: (center, radius) => {
+        const entity = createCircleEntity({ center, radius });
+        updateDocument((d) => addSketchEntity(d, sketchId, entity));
+        setActiveTool(null);
+        setDrawingSketchId(null);
+      },
+      onCancel: () => {
+        setActiveTool(null);
+        setDrawingSketchId(null);
+      },
+    });
+    setDrawingSketchId(sketchId);
+    setActiveTool("circle");
   }
 
   function handleCancelDrawing() {
@@ -209,6 +277,12 @@ export default function App() {
   function handleGridSnapChange(checked: boolean) {
     setGridSnap(checked);
     viewerRef.current?.setPolygonDrawingSnap(checked);
+  }
+
+  /** 指定ツールのボタンをdisabledにすべきか(他のツールが実行中、または対象スケッチ平面が未確定)。 */
+  function isToolDisabled(tool: Exclude<DrawingTool, null>): boolean {
+    if (activeTool) return activeTool !== tool;
+    return !selectedSketchPlane;
   }
 
   return (
@@ -277,11 +351,47 @@ export default function App() {
         <button
           type="button"
           data-testid="btn-draw-polygon"
-          onClick={drawingMode ? handleCancelDrawing : handleStartDrawing}
-          disabled={!drawingMode && !selectedSketchPlane}
+          onClick={activeTool === "line" ? handleCancelDrawing : handleStartLineDrawing}
+          disabled={isToolDisabled("line")}
           title="クリックで頂点を追加して閉じた多角形を描きます(始点付近クリックまたはEnterで確定、Escでキャンセル)"
         >
-          {drawingMode ? "線描画キャンセル(Esc)" : "線描画"}
+          {activeTool === "line" ? "線描画キャンセル(Esc)" : "線描画"}
+        </button>
+        <button
+          type="button"
+          data-testid="btn-draw-rect"
+          onClick={activeTool === "rect" ? handleCancelDrawing : handleStartRectDrawing}
+          disabled={isToolDisabled("rect")}
+          title="2クリックで矩形を描きます(1点目=コーナー、2点目=対角コーナー。Escでキャンセル)"
+        >
+          {activeTool === "rect" ? "矩形キャンセル(Esc)" : "矩形"}
+        </button>
+        <button
+          type="button"
+          data-testid="btn-draw-circle"
+          onClick={activeTool === "circle" ? handleCancelDrawing : handleStartCircleDrawing}
+          disabled={isToolDisabled("circle")}
+          title="2クリックで円を描きます(1点目=中心、2点目=円周上の点。Escでキャンセル)"
+        >
+          {activeTool === "circle" ? "円キャンセル(Esc)" : "円"}
+        </button>
+        <button
+          type="button"
+          data-testid="btn-undo"
+          onClick={undo}
+          disabled={!canUndo}
+          title="元に戻す (Ctrl+Z)"
+        >
+          ↶ 元に戻す
+        </button>
+        <button
+          type="button"
+          data-testid="btn-redo"
+          onClick={redo}
+          disabled={!canRedo}
+          title="やり直す (Ctrl+Shift+Z)"
+        >
+          ↷ やり直す
         </button>
         <label
           style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}
@@ -304,7 +414,7 @@ export default function App() {
           />
           スケッチ表示
         </label>
-        {drawingMode && (
+        {activeTool && (
           <span data-testid="drawing-shift-hint" style={{ fontSize: 11, opacity: 0.7 }}>
             Shift押下中はスナップ・軸ロックを一時無効化(フリー入力)
           </span>
@@ -404,7 +514,7 @@ export default function App() {
               sketch={selectedFeature}
               basis={selectedSketchPlane}
               viewerRef={viewerRef}
-              visible={showSketches && !drawingMode}
+              visible={showSketches && !activeTool}
             />
           )}
           {showInitOverlay && (
