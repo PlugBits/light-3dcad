@@ -12,8 +12,12 @@ import type { SketchEntity } from "../model/types";
 
 export type Point2 = [number, number];
 
-/** entityヒット時のターゲット種別。circleは半径、rectangleは辺の向きに応じて幅/高さ。 */
-export type EntityDimensionTargetKind = "entity-radius" | "entity-width" | "entity-height";
+/**
+ * entityヒット時のターゲット種別。circleは半径、rectangleは辺の向きに応じて幅/高さ、
+ * polygonは辺そのもの("entity-edge"、UI改善: circle-distance-edgeの2点目候補として
+ * ホバー/ピックできるようにするための追加。includePolygon:trueのときのみ返る)。
+ */
+export type EntityDimensionTargetKind = "entity-radius" | "entity-width" | "entity-height" | "entity-edge";
 
 export interface EntityDimensionHit {
   entityId: string;
@@ -96,11 +100,43 @@ function nearestRectangleEdgeHit(
 }
 
 /**
- * entities(rectangle/circle。他の種別は対象外)の中から、点に最も近いヒット対象を1つ返す
- * (許容距離の判定は呼び出し側でdistを見て行う。距離が最小のものを常に1件返す。entitiesが
- * 空、またはrectangle/circleが1つも無ければnull)。
+ * polygonの辺のうち点に最も近いものを求める(nearestRectangleEdgeHitのpolygon版)。
+ * kind は常に"entity-edge"(rectangleのwidth/height区別と違い、polygonは辺ごとの向きが
+ * 一定でないため)。
  */
-export function findEntityDimensionHit(point: Point2, entities: SketchEntity[]): EntityDimensionHit | null {
+function nearestPolygonEdgeHit(point: Point2, entity: Extract<SketchEntity, { kind: "polygon" }>): EntityDimensionHit {
+  const pts = entity.points;
+  const n = pts.length;
+  let best = { dist: Infinity, a: pts[0], b: pts[n > 1 ? 1 : 0], edgeIndex: 0 };
+  for (let i = 0; i < n; i += 1) {
+    const a = pts[i];
+    const b = pts[(i + 1) % n];
+    const d = distPointToSegment(point, a, b);
+    if (d < best.dist) best = { dist: d, a, b, edgeIndex: i };
+  }
+  return {
+    entityId: entity.id,
+    kind: "entity-edge",
+    dist: best.dist,
+    highlightPoints: [best.a, best.b],
+    edgeIndex: best.edgeIndex,
+  };
+}
+
+/**
+ * entities(rectangle/circle、includePolygon指定時はpolygonの辺も。他の種別は対象外)の中から、
+ * 点に最も近いヒット対象を1つ返す(許容距離の判定は呼び出し側でdistを見て行う。距離が最小の
+ * ものを常に1件返す。対象が1つも無ければnull)。
+ * includePolygon(既定false、UI改善対応): circle-distance-edgeの2点目候補としてpolygonの辺も
+ * ヒット対象にしたいのは「circleを1点目としてクリック済み」の間だけなので、呼び出し側
+ * (CadViewer)がdimensionPendingCircleIdの有無で切り替える。falseのままだと従来通りpolygonは
+ * 対象外(単独クリックでpolygonの辺を拾って未定義のターゲット種別を発行しないための安全策)。
+ */
+export function findEntityDimensionHit(
+  point: Point2,
+  entities: SketchEntity[],
+  includePolygon = false,
+): EntityDimensionHit | null {
   let best: EntityDimensionHit | null = null;
   for (const entity of entities) {
     let hit: EntityDimensionHit;
@@ -114,6 +150,8 @@ export function findEntityDimensionHit(point: Point2, entities: SketchEntity[]):
       };
     } else if (entity.kind === "rectangle") {
       hit = nearestRectangleEdgeHit(point, entity);
+    } else if (entity.kind === "polygon" && includePolygon && entity.points.length >= 2) {
+      hit = nearestPolygonEdgeHit(point, entity);
     } else {
       continue;
     }

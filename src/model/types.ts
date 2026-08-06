@@ -139,8 +139,12 @@ export type SketchConstraint =
   | { id: string; kind: "fix"; point: PointRef }
   /** circleエンティティの中心↔スケッチ原点([0,0])の距離(mm、Phase 22)。 */
   | { id: string; kind: "distanceEntityOrigin"; entity: EntityRef; value: number }
-  /** circleエンティティの中心↔中心の距離(mm、Phase 22)。 */
-  | { id: string; kind: "distanceEntityEntity"; a: EntityRef; b: EntityRef; value: number }
+  /**
+   * circleエンティティの中心↔中心の距離(mm、Phase 22)。axis(UI改善対応、省略=direct・後方互換)は
+   * "x"/"y"のときそれぞれ|cx_b-cx_a|/|cy_b-cy_a|のみを距離として扱う(中心間の直線距離ではなく、
+   * 片方の軸成分のみを拘束する)。
+   */
+  | { id: string; kind: "distanceEntityEntity"; a: EntityRef; b: EntityRef; value: number; axis?: "direct" | "x" | "y" }
   /** circleエンティティの中心↔辺(直線、動かない)の垂直距離(mm、Phase 22)。 */
   | { id: string; kind: "distanceEntityLine"; entity: EntityRef; line: LineRef; value: number }
   /** circleエンティティの中心を(拘束追加時点の)現在位置に固定する(Phase 22、固定トグル)。 */

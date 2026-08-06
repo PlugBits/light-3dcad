@@ -106,6 +106,28 @@ export function computeLinearDimensionGraphics(
 }
 
 /**
+ * 円↔円の距離のうちX/Y軸成分のみを指定した寸法(UI改善対応)の描画データを計算する。
+ * axis:"x"は水平の寸法線(両中心のY中間の高さ)、axis:"y"は垂直の寸法線(両中心のX中間の位置)を
+ * 描く。各中心から寸法線までは直交する引出線(オーバーシュート無しで直接つなぐ)を引く。
+ */
+export function computeAxisDimensionGraphics(a: Point2, b: Point2, axis: "x" | "y"): DimensionGraphics {
+  const p1: Point2 = axis === "x" ? [a[0], (a[1] + b[1]) / 2] : [(a[0] + b[0]) / 2, a[1]];
+  const p2: Point2 = axis === "x" ? [b[0], (a[1] + b[1]) / 2] : [(a[0] + b[0]) / 2, b[1]];
+  const dir = normalize(sub(p2, p1));
+  if (dir[0] === 0 && dir[1] === 0) {
+    return { lines: [], labelPos: p1 };
+  }
+  const lines: Segment[] = [
+    seg(a, p1), // 中心aから寸法線への引出線
+    seg(b, p2), // 中心bから寸法線への引出線
+    seg(p1, p2), // 寸法線本体
+    ...arrowHeadLines(p1, dir),
+    ...arrowHeadLines(p2, scale(dir, -1)),
+  ];
+  return { lines, labelPos: scale(add(p1, p2), 0.5) };
+}
+
+/**
  * 半径寸法の描画データを計算する。中心から角度angleDeg方向へ、円周を超えてラベル位置まで
  * 伸びる引出線(1本)+円周位置に矢印(先端は円周上、中心方向へ開く)を返す。
  */

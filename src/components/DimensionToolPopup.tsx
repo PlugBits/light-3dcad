@@ -8,6 +8,8 @@ export function DimensionToolPopup({
   initialValue,
   screen,
   hintLabel,
+  axisOptions,
+  initialAxis,
   onApply,
   onCancel,
 }: {
@@ -21,10 +23,15 @@ export function DimensionToolPopup({
    * 未指定なら表示しない。
    */
   hintLabel?: string;
-  onApply: (value: number) => void;
+  /** 円↔円の距離のときだけtrue: 「距離/X距離/Y距離」の3択を表示する(UI改善対応)。 */
+  axisOptions?: boolean;
+  /** axisOptions表示時の初期選択(既存拘束の編集時、未指定は"direct")。 */
+  initialAxis?: "direct" | "x" | "y";
+  onApply: (value: number, axis?: "direct" | "x" | "y") => void;
   onCancel: () => void;
 }) {
   const [value, setValue] = useState(initialValue.toFixed(2));
+  const [axis, setAxis] = useState<"direct" | "x" | "y">(initialAxis ?? "direct");
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
@@ -40,7 +47,7 @@ export function DimensionToolPopup({
       setError("正の数を入力してください");
       return;
     }
-    onApply(num);
+    onApply(num, axisOptions ? axis : undefined);
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
@@ -79,6 +86,22 @@ export function DimensionToolPopup({
         <p data-testid="dimension-tool-popup-hint" style={{ margin: 0, fontSize: 10, color: "#9aa5b1" }}>
           {hintLabel}
         </p>
+      )}
+      {axisOptions && (
+        <div data-testid="dimension-tool-popup-axis" style={{ display: "flex", gap: 8, fontSize: 11 }}>
+          {(["direct", "x", "y"] as const).map((a) => (
+            <label key={a} style={{ display: "flex", alignItems: "center", gap: 2 }}>
+              <input
+                type="radio"
+                name="dimension-tool-axis"
+                data-testid={`dimension-tool-popup-axis-${a}`}
+                checked={axis === a}
+                onChange={() => setAxis(a)}
+              />
+              {a === "direct" ? "距離" : a === "x" ? "X距離" : "Y距離"}
+            </label>
+          ))}
+        </div>
       )}
       <label style={{ display: "flex", flexDirection: "column", gap: 2 }}>
         {titleLabel}

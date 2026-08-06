@@ -432,8 +432,10 @@ function describeConstraint(
       return pointRefLabel(segments, constraint.point);
     case "distanceEntityOrigin":
       return `${entityLabel(entities, constraint.entity.entityId)} - 原点 = ${constraint.value.toFixed(2)}mm`;
-    case "distanceEntityEntity":
-      return `${entityLabel(entities, constraint.a.entityId)} - ${entityLabel(entities, constraint.b.entityId)} = ${constraint.value.toFixed(2)}mm`;
+    case "distanceEntityEntity": {
+      const axisPrefix = constraint.axis === "x" ? "X:" : constraint.axis === "y" ? "Y:" : "";
+      return `${entityLabel(entities, constraint.a.entityId)} - ${entityLabel(entities, constraint.b.entityId)} = ${axisPrefix}${constraint.value.toFixed(2)}mm`;
+    }
     case "distanceEntityLine":
       return `${entityLabel(entities, constraint.entity.entityId)} - 辺 = ${constraint.value.toFixed(2)}mm`;
     case "fixEntity":

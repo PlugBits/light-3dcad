@@ -33,6 +33,7 @@ import { updateDocumentWithConflictRollback } from "../state/constraintUpdate";
 import { useCadStore } from "../state/store";
 import type { CadViewer, PlaneBasis } from "../viewer/CadViewer";
 import {
+  computeAxisDimensionGraphics,
   computeLinearDimensionGraphics,
   computeRadiusDimensionGraphics,
   DEFAULT_RADIUS_LABEL_OFFSET,
@@ -122,6 +123,7 @@ function constraintDimensionGraphics(
     const a = circleCenter(dimension.aEntityId);
     const b = circleCenter(dimension.bEntityId);
     if (!a || !b) return null;
+    if (dimension.axis === "x" || dimension.axis === "y") return computeAxisDimensionGraphics(a, b, dimension.axis);
     return computeLinearDimensionGraphics(a, b);
   }
   if (dimension.kind === "entity-distance-line") {
@@ -319,7 +321,7 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
   }
 
   /** 拘束寸法ラベルの編集(既存拘束の値の差し替え)。矛盾したら自動的に巻き戻す(Phase 20b)。 */
-  function applyConstraintDimension(dimension: ConstraintDimension, value: number) {
+  function applyConstraintDimension(dimension: ConstraintDimension, value: number, axis?: "direct" | "x" | "y") {
     updateDocumentWithConflictRollback(
       sketch.id,
       (doc) => {
@@ -336,7 +338,7 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
                 : dimension.kind === "entity-distance-origin"
                   ? upsertDistanceEntityOriginConstraint(constraints, dimension.entityId, value)
                   : dimension.kind === "entity-distance-entity"
-                    ? upsertDistanceEntityEntityConstraint(constraints, dimension.aEntityId, dimension.bEntityId, value)
+                    ? upsertDistanceEntityEntityConstraint(constraints, dimension.aEntityId, dimension.bEntityId, value, axis)
                     : upsertDistanceEntityLineConstraint(constraints, dimension.entityId, dimension.line, value);
         return setSketchConstraints(doc, sketch.id, next);
       },
@@ -428,8 +430,14 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
           titleLabel={CONSTRAINT_DIMENSION_LABELS[editingConstraint.dimension.kind]}
           initialValue={editingConstraint.dimension.value}
           screen={editingConstraint.screen}
+          axisOptions={editingConstraint.dimension.kind === "entity-distance-entity"}
+          initialAxis={
+            editingConstraint.dimension.kind === "entity-distance-entity"
+              ? (editingConstraint.dimension.axis ?? "direct")
+              : undefined
+          }
           onCancel={() => setEditingConstraint(null)}
-          onApply={(value) => applyConstraintDimension(editingConstraint.dimension, value)}
+          onApply={(value, axis) => applyConstraintDimension(editingConstraint.dimension, value, axis)}
         />
       )}
     </div>

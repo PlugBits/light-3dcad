@@ -284,6 +284,13 @@ export type DimensionToolTarget =
   /** ボディ端面参照エッジ(Phase 22)への距離。lineは常に"refEdge"(ピック時点のスナップショット)。 */
   | { kind: "circle-distance-refedge"; entityId: string; edgeA: [number, number]; edgeB: [number, number]; line: LineRef };
 
+/**
+ * 位置寸法(circle-distance-*)の1点目待ち状態(UI改善: ユーザー実機フィードバック対応)。
+ * "circle"はcircleエンティティをクリックして2点目(原点/円/辺/端面)待ち、"point"はdistance拘束の
+ * 端点1点目クリック後で2点目の端点待ち。未保留はnull。
+ */
+export type DimensionPendingState = { kind: "circle" | "point" } | null;
+
 /** 寸法ツール(Phase 20b)の開始/終了時に呼ばれるコールバック。 */
 export interface DimensionToolCallbacks {
   /**
@@ -294,6 +301,8 @@ export interface DimensionToolCallbacks {
   onTargetPicked: (target: DimensionToolTarget, screenX: number, screenY: number) => void;
   /** Escapeキーまたはcancel呼び出しで終了したときに呼ばれる。 */
   onCancel: () => void;
+  /** 1点目待ち状態が変わるたびに呼ばれる(ツールバー付近のステータス表示用、UI改善対応)。 */
+  onPendingChange?: (state: DimensionPendingState) => void;
 }
 
 /** 寸法ツールの端点ヒット判定の許容スクリーン距離(px)。セグメント本体より優先してヒットさせる。 */
@@ -360,6 +369,18 @@ function distPointToRawSegment(p: [number, number], a: [number, number], b: [num
   const cx = a[0] + t * dx;
   const cy = a[1] + t * dy;
   return Math.hypot(p[0] - cx, p[1] - cy);
+}
+
+/** 寸法ツールで原点マーカーをホバー中に強調表示する境界ポリライン(ローカル2D、原点周りの小さな四角)。 */
+function originMarkerHighlightPolyline(): [number, number][] {
+  const r = ORIGIN_MARKER_RADIUS;
+  return [
+    [-r, -r],
+    [r, -r],
+    [r, r],
+    [-r, r],
+    [-r, -r],
+  ];
 }
 
 /**
@@ -679,6 +700,14 @@ export class CadViewer {
   private drawingGroup: THREE.Group;
   private drawingPreviewGeometries: THREE.BufferGeometry[] = [];
   private drawingPreviewMaterials: THREE.Material[] = [];
+  /**
+   * 寸法ツールで1点目(circle等)を選択済みの間、選択色で強調表示し続けるための専用グループ
+   * (UI改善: ユーザー実機フィードバック対応)。drawingGroupはホバープレビューでフレームごとに
+   * clearDrawingPreview()されるため、それとは独立させて「2点目待ち」の間ずっと残す。
+   */
+  private dimensionSelectGroup: THREE.Group;
+  private dimensionSelectGeometries: THREE.BufferGeometry[] = [];
+  private dimensionSelectMaterials: THREE.Material[] = [];
   /** 描画モード中、カーソル付近に現在のローカル座標・長さ・角度を表示するHTMLオーバーレイ。 */
   private coordOverlayEl: HTMLDivElement;
   /**
@@ -793,6 +822,8 @@ export class CadViewer {
 
     this.drawingGroup = new THREE.Group();
     this.scene.add(this.drawingGroup);
+    this.dimensionSelectGroup = new THREE.Group();
+    this.scene.add(this.dimensionSelectGroup);
 
     this.referencePlaneGroup = new THREE.Group();
     this.referencePlaneGroup.visible = false;
@@ -1920,9 +1951,9 @@ export class CadViewer {
     this.dimensionToolSegments = segments;
     this.dimensionToolEntities = entities;
     this.dimensionToolCallbacks = callbacks;
-    this.dimensionPendingPoint = null;
+    this.setDimensionPendingPoint(null);
     this.dimensionHoverEntityHit = null;
-    this.dimensionPendingCircleId = null;
+    this.setDimensionPendingCircle(null);
     this.renderer.domElement.style.cursor = "crosshair";
   }
 
@@ -1936,9 +1967,9 @@ export class CadViewer {
     this.dimensionToolSegments = segments;
     this.dimensionToolEntities = entities;
     this.clearDrawingPreview();
-    this.dimensionPendingPoint = null;
+    this.setDimensionPendingPoint(null);
     this.dimensionHoverEntityHit = null;
-    this.dimensionPendingCircleId = null;
+    this.setDimensionPendingCircle(null);
   }
 
   isDimensionToolActive(): boolean {
@@ -1990,9 +2021,9 @@ export class CadViewer {
     this.dimensionToolSegments = [];
     this.dimensionToolEntities = [];
     this.dimensionToolCallbacks = null;
-    this.dimensionPendingPoint = null;
+    this.setDimensionPendingPoint(null);
     this.dimensionHoverEntityHit = null;
-    this.dimensionPendingCircleId = null;
+    this.setDimensionPendingCircle(null);
     this.renderer.domElement.style.cursor = "";
     this.clearDrawingPreview();
     callbacks?.onCancel();
@@ -2041,8 +2072,8 @@ export class CadViewer {
         const dy = originScreen.y - py;
         if (dx * dx + dy * dy <= DIMENSION_ENDPOINT_TOLERANCE_PX * DIMENSION_ENDPOINT_TOLERANCE_PX) {
           const entityId = this.dimensionPendingCircleId;
-          this.dimensionPendingCircleId = null;
-          this.dimensionPendingPoint = null;
+          this.setDimensionPendingCircle(null);
+          this.setDimensionPendingPoint(null);
           this.clearDrawingPreview();
           this.dimensionToolCallbacks?.onTargetPicked({ kind: "circle-distance-origin", entityId }, px, py);
           return;
@@ -2069,15 +2100,15 @@ export class CadViewer {
     }
 
     if (bestPoint) {
-      this.dimensionPendingCircleId = null;
+      this.setDimensionPendingCircle(null);
       const pending = this.dimensionPendingPoint;
       if (pending && !(pending.segmentId === bestPoint.ref.segmentId && pending.end === bestPoint.ref.end)) {
-        this.dimensionPendingPoint = null;
+        this.setDimensionPendingPoint(null);
         this.clearDrawingPreview();
         this.dimensionToolCallbacks?.onTargetPicked({ kind: "distance", a: pending, b: bestPoint.ref }, px, py);
         return;
       }
-      this.dimensionPendingPoint = bestPoint.ref;
+      this.setDimensionPendingPoint(bestPoint.ref);
       this.drawDimensionPendingMarker(basis, bestPoint.local);
       return;
     }
@@ -2095,7 +2126,7 @@ export class CadViewer {
         nearestId = seg.id;
       }
     }
-    const entityHit = findEntityDimensionHit(local, this.dimensionToolEntities);
+    const entityHit = findEntityDimensionHit(local, this.dimensionToolEntities, !!this.dimensionPendingCircleId);
 
     // 位置寸法(Phase 21b): circleクリック済み(dimensionPendingCircleId)の状態で別のcircleを
     // クリックした場合はcircle-distance-circleターゲットとして扱う(1点目=fromEntityIdは動かず、
@@ -2109,8 +2140,8 @@ export class CadViewer {
       (nearestId === null || entityHit.dist < nearestDist)
     ) {
       const fromEntityId = this.dimensionPendingCircleId;
-      this.dimensionPendingCircleId = null;
-      this.dimensionPendingPoint = null;
+      this.setDimensionPendingCircle(null);
+      this.setDimensionPendingPoint(null);
       this.clearDrawingPreview();
       this.dimensionToolCallbacks?.onTargetPicked(
         { kind: "circle-distance-circle", fromEntityId, toEntityId: entityHit.entityId },
@@ -2138,8 +2169,8 @@ export class CadViewer {
       (!entityHit || refEdgeHit.dist < entityHit.dist)
     ) {
       const entityId = this.dimensionPendingCircleId as string;
-      this.dimensionPendingCircleId = null;
-      this.dimensionPendingPoint = null;
+      this.setDimensionPendingCircle(null);
+      this.setDimensionPendingPoint(null);
       this.clearDrawingPreview();
       this.dimensionToolCallbacks?.onTargetPicked(
         {
@@ -2157,18 +2188,18 @@ export class CadViewer {
 
     // セグメントとentityの両方が許容距離内にヒットしうる場合は、より近い方を優先する。
     if (entityHit && entityHit.dist <= toleranceMm && (nearestId === null || entityHit.dist < nearestDist)) {
-      this.dimensionPendingPoint = null;
+      this.setDimensionPendingPoint(null);
       this.clearDrawingPreview();
       if (entityHit.kind === "entity-radius") {
         // circle単独クリック: 従来通りentity-radius(半径編集)。以降の1クリックで距離モードへ
         // 切り替えられるよう、このcircleをdimensionPendingCircleIdとして保持する。
-        this.dimensionPendingCircleId = entityHit.entityId;
+        this.setDimensionPendingCircle(entityHit.entityId, basis, entityHit.highlightPoints);
       } else if (this.dimensionPendingCircleId) {
         // circleクリック済みでrectangleの辺をクリック => circle-distance-edge(辺は動かない)。
         // edgeIndexが取れる(rectangleの辺)場合はentityEdge(エンティティが動けば辺も追従)、
         // 取れない場合はrefEdge(ピック時点の座標を凍結)にフォールバックする。
         const entityId = this.dimensionPendingCircleId;
-        this.dimensionPendingCircleId = null;
+        this.setDimensionPendingCircle(null);
         const edgeA = entityHit.highlightPoints[0];
         const edgeB = entityHit.highlightPoints[1];
         const line: LineRef =
@@ -2182,24 +2213,29 @@ export class CadViewer {
         );
         return;
       }
+      // entity-edge(polygonの辺)はcircle選択済み(circle-distance-edge)のときのみ意味を持つ対象で
+      // あり、上のdimensionPendingCircleId分岐で処理済みのはず。ここに来るのは理論上は起きない
+      // (includePolygonはdimensionPendingCircleId truthy時のみtrueで渡すため)が、型の網羅性のため
+      // 安全側で無視する。
+      if (entityHit.kind === "entity-edge") return;
       this.dimensionToolCallbacks?.onTargetPicked({ kind: entityHit.kind, entityId: entityHit.entityId }, px, py);
       return;
     }
 
     if (nearestId === null || nearestDist > toleranceMm) return;
 
-    this.dimensionPendingPoint = null;
+    this.setDimensionPendingPoint(null);
     this.clearDrawingPreview();
     const seg = this.dimensionToolSegments.find((s) => s.id === nearestId);
     if (!seg) return;
     if (seg.kind === "arc" && seg.bulge) {
-      this.dimensionPendingCircleId = null;
+      this.setDimensionPendingCircle(null);
       this.dimensionToolCallbacks?.onTargetPicked({ kind: "radius", segmentId: nearestId }, px, py);
     } else if (this.dimensionPendingCircleId) {
       // circleクリック済みで自由線分(セグメント本体)をクリック => circle-distance-edge
       // (自由なsegmentsはEntityRefで指せないためrefEdgeとして座標を凍結する、v1の簡易対応)。
       const entityId = this.dimensionPendingCircleId;
-      this.dimensionPendingCircleId = null;
+      this.setDimensionPendingCircle(null);
       this.dimensionToolCallbacks?.onTargetPicked(
         { kind: "circle-distance-edge", entityId, edgeA: seg.p1, edgeB: seg.p2, line: { kind: "refEdge", p1: seg.p1, p2: seg.p2 } },
         px,
@@ -2226,11 +2262,14 @@ export class CadViewer {
   }
 
   /**
-   * 寸法ツール中のマウス移動処理(Phase 21)。カーソル位置に最も近いヒット候補
-   * (セグメント本体・entitiesの境界。端点は対象外、クリック時のdistance用の特別扱いのため)を
-   * DIMENSION_SEGMENT_TOLERANCE_PX以内で求め、ヒットがあればホバー色でハイライト表示する
-   * (「選べるものが分かる」ようにするための視覚フィードバック)。distance入力の1点目待ち中
-   * (dimensionPendingPoint)はそのマーカー表示を優先し、ホバープレビューは描かない。
+   * 寸法ツール中のマウス移動処理(Phase 21、UI改善で参照エッジ・原点マーカーのホバー強調を追加)。
+   * カーソル位置に最も近いヒット候補(セグメント本体・entitiesの境界・原点マーカー・参照エッジ。
+   * 端点は対象外、クリック時のdistance用の特別扱いのため)をDIMENSION_SEGMENT_TOLERANCE_PX
+   * (原点マーカーのみDIMENSION_ENDPOINT_TOLERANCE_PX、スクリーン距離)以内で求め、ヒットがあれば
+   * ホバー色でハイライト表示する(「選べるものが分かる」ようにするための視覚フィードバック)。
+   * distance入力の1点目待ち中(dimensionPendingPoint)はそのマーカー表示を優先し、ホバープレビュー
+   * は描かない。原点マーカー・参照エッジは、circleクリック済み(dimensionPendingCircleId)の間の
+   * みピック対象になる(handleDimensionToolClickと同じ条件)ため、ホバーもそれに合わせる。
    */
   private handleDimensionToolMouseMove(event: MouseEvent) {
     if (!this.dimensionToolBasis || this.dimensionPendingPoint) return;
@@ -2238,6 +2277,23 @@ export class CadViewer {
     const rect = this.renderer.domElement.getBoundingClientRect();
     const px = event.clientX - rect.left;
     const py = event.clientY - rect.top;
+
+    // 位置寸法(circle選択済み)の間は原点マーカーのホバーも判定する(handleDimensionToolClickと同じ
+    // スクリーン距離ベースの判定・優先度)。
+    if (this.dimensionPendingCircleId) {
+      const originScreen = this.projectPoint(basis.origin);
+      if (originScreen) {
+        const dx = originScreen.x - px;
+        const dy = originScreen.y - py;
+        if (dx * dx + dy * dy <= DIMENSION_ENDPOINT_TOLERANCE_PX * DIMENSION_ENDPOINT_TOLERANCE_PX) {
+          this.clearDrawingPreview();
+          this.dimensionHoverEntityHit = null;
+          this.drawDimensionHoverPreview(basis, originMarkerHighlightPolyline());
+          return;
+        }
+      }
+    }
+
     const hit = this.raycastDrawingPlane(basis, px, py, rect);
     if (!hit) {
       this.clearDrawingPreview();
@@ -2256,15 +2312,33 @@ export class CadViewer {
         nearestSeg = seg;
       }
     }
-    const entityHit = findEntityDimensionHit(local, this.dimensionToolEntities);
+    const entityHit = findEntityDimensionHit(local, this.dimensionToolEntities, !!this.dimensionPendingCircleId);
+
+    // circle選択済みの間はボディ端面参照エッジもホバー候補にする(handleDimensionToolClickと同じ)。
+    let refEdgeHit: { edge: ReferenceEdgeLine; dist: number } | null = null;
+    if (this.dimensionPendingCircleId) {
+      for (const edge of this.dimensionToolReferenceEdges) {
+        const d = distPointToRawSegment(local, edge.p1, edge.p2);
+        if (!refEdgeHit || d < refEdgeHit.dist) refEdgeHit = { edge, dist: d };
+      }
+    }
 
     this.clearDrawingPreview();
-    if (entityHit && entityHit.dist <= toleranceMm && (!nearestSeg || entityHit.dist < nearestSegDist)) {
+    if (
+      entityHit &&
+      entityHit.dist <= toleranceMm &&
+      (!nearestSeg || entityHit.dist < nearestSegDist) &&
+      (!refEdgeHit || entityHit.dist < refEdgeHit.dist)
+    ) {
       this.dimensionHoverEntityHit = entityHit;
       this.drawDimensionHoverPreview(basis, entityHit.highlightPoints);
       return;
     }
     this.dimensionHoverEntityHit = null;
+    if (refEdgeHit && refEdgeHit.dist <= toleranceMm && (!nearestSeg || refEdgeHit.dist < nearestSegDist)) {
+      this.drawDimensionHoverPreview(basis, [refEdgeHit.edge.p1, refEdgeHit.edge.p2]);
+      return;
+    }
     if (nearestSeg && nearestSegDist <= toleranceMm) {
       this.drawDimensionHoverPreview(basis, segmentLocalPoints(nearestSeg));
     }
@@ -2943,6 +3017,62 @@ export class CadViewer {
     this.drawingPreviewMaterials = [];
   }
 
+  /** 寸法ツールの1点目選択強調(選択色)をsceneから取り除き、リソースを解放する。 */
+  private clearDimensionSelectHighlight() {
+    while (this.dimensionSelectGroup.children.length > 0) {
+      this.dimensionSelectGroup.remove(this.dimensionSelectGroup.children[0]);
+    }
+    this.dimensionSelectGeometries.forEach((g) => g.dispose());
+    this.dimensionSelectMaterials.forEach((m) => m.dispose());
+    this.dimensionSelectGeometries = [];
+    this.dimensionSelectMaterials = [];
+  }
+
+  /** 寸法ツールの1点目選択強調(選択色の境界ポリライン)を描画する(既存の強調は差し替える)。 */
+  private drawDimensionSelectHighlight(basis: PlaneBasis, localPoints: [number, number][]) {
+    this.clearDimensionSelectHighlight();
+    const worldPts = localPoints.map(([u, v]) => planeLocalToWorld(basis, u, v));
+    const positions = new Float32Array(worldPts.length * 3);
+    worldPts.forEach((p, i) => positions.set(p, i * 3));
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    const material = new THREE.LineBasicMaterial({ color: SKETCH_SELECTED_COLOR, linewidth: 3, depthTest: false });
+    const line = new THREE.Line(geometry, material);
+    line.renderOrder = DRAWING_FEEDBACK_RENDER_ORDER + 3;
+    this.dimensionSelectGroup.add(line);
+    this.dimensionSelectGeometries.push(geometry);
+    this.dimensionSelectMaterials.push(material);
+  }
+
+  /**
+   * 寸法ツールの1点目待ち状態が変わるたびに呼ぶ通知(ステータス表示用、UI改善対応)。
+   * dimensionPendingCircleId/dimensionPendingPointの現在値から状態を判定してコールバックへ渡す。
+   */
+  private notifyDimensionPendingState() {
+    const callback = this.dimensionToolCallbacks?.onPendingChange;
+    if (!callback) return;
+    if (this.dimensionPendingCircleId) callback({ kind: "circle" });
+    else if (this.dimensionPendingPoint) callback({ kind: "point" });
+    else callback(null);
+  }
+
+  /** dimensionPendingCircleIdの更新+選択強調の描画/消去+ステータス通知をまとめて行う。 */
+  private setDimensionPendingCircle(id: string | null, basis?: PlaneBasis, highlightPoints?: [number, number][]) {
+    this.dimensionPendingCircleId = id;
+    if (id && basis && highlightPoints) {
+      this.drawDimensionSelectHighlight(basis, highlightPoints);
+    } else {
+      this.clearDimensionSelectHighlight();
+    }
+    this.notifyDimensionPendingState();
+  }
+
+  /** dimensionPendingPointの更新+ステータス通知をまとめて行う。 */
+  private setDimensionPendingPoint(ref: PointRef | null) {
+    this.dimensionPendingPoint = ref;
+    this.notifyDimensionPendingState();
+  }
+
   /**
    * 現在のカメラでワールド座標をcanvas内ピクセル座標(左上が原点)に投影する。
    * E2Eの`window.__cadViewerDebug.projectPoint`と、描画モードの始点近傍判定の両方から使う。
@@ -2985,6 +3115,7 @@ export class CadViewer {
     this.clearSketchOverlay();
     this.clearDimensionOverlay();
     this.clearDrawingPreview();
+    this.clearDimensionSelectHighlight();
     this.referenceEdgeGeometries.forEach((g) => g.dispose());
     this.referenceEdgeMaterials.forEach((m) => m.dispose());
     this.referencePlaneEntries.forEach((entry) => {

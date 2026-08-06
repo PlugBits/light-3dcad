@@ -297,6 +297,54 @@ describe("solveSketch circleエンティティの位置拘束(Phase 22)", () => 
     expect(dist(outA.center, outB.center)).toBeCloseTo(40, 4);
   });
 
+  it("②a distanceEntityEntity(axis:x): 2円のX距離のみが指定値に解け、Y座標は変わらない", () => {
+    const a = circle("a", [0, 0]);
+    const b = circle("b", [5, 8]);
+    const constraints: SketchConstraint[] = [
+      { id: "d1", kind: "distanceEntityEntity", a: { entityId: "a" }, b: { entityId: "b" }, value: 30, axis: "x" },
+    ];
+    const result = solveSketch([], constraints, [a, b]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outA = result.entities.find((e) => e.id === "a")!;
+    const outB = result.entities.find((e) => e.id === "b")!;
+    if (outA.kind !== "circle" || outB.kind !== "circle") throw new Error("not circle");
+    expect(Math.abs(outB.center[0] - outA.center[0])).toBeCloseTo(30, 3);
+    // Y方向は拘束されていないため、入力の相対Y差(8)付近を維持する(正則化により入力形状に近い解を選ぶ)。
+    expect(outB.center[1] - outA.center[1]).toBeCloseTo(8, 2);
+  });
+
+  it("②b distanceEntityEntity(axis:y): 2円のY距離のみが指定値に解け、X座標は変わらない", () => {
+    const a = circle("a", [0, 0]);
+    const b = circle("b", [8, 5]);
+    const constraints: SketchConstraint[] = [
+      { id: "d1", kind: "distanceEntityEntity", a: { entityId: "a" }, b: { entityId: "b" }, value: 20, axis: "y" },
+    ];
+    const result = solveSketch([], constraints, [a, b]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outA = result.entities.find((e) => e.id === "a")!;
+    const outB = result.entities.find((e) => e.id === "b")!;
+    if (outA.kind !== "circle" || outB.kind !== "circle") throw new Error("not circle");
+    expect(Math.abs(outB.center[1] - outA.center[1])).toBeCloseTo(20, 3);
+    expect(outB.center[0] - outA.center[0]).toBeCloseTo(8, 2);
+  });
+
+  it("②c distanceEntityEntity(axis省略): 従来通り中心間の直線距離として解ける(後方互換)", () => {
+    const a = circle("a", [0, 0]);
+    const b = circle("b", [3, 4]);
+    const constraints: SketchConstraint[] = [
+      { id: "d1", kind: "distanceEntityEntity", a: { entityId: "a" }, b: { entityId: "b" }, value: 25 },
+    ];
+    const result = solveSketch([], constraints, [a, b]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outA = result.entities.find((e) => e.id === "a")!;
+    const outB = result.entities.find((e) => e.id === "b")!;
+    if (outA.kind !== "circle" || outB.kind !== "circle") throw new Error("not circle");
+    expect(dist(outA.center, outB.center)).toBeCloseTo(25, 4);
+  });
+
   it("③ distanceEntityLine(entityEdge): 円の中心↔rectangle辺の垂直距離が指定値に解ける(辺は動かない)", () => {
     const c = circle("c1", [5, 5]);
     const rect: SketchEntity = { kind: "rectangle", id: "r1", center: [0, 0], width: 20, height: 20 };

@@ -110,6 +110,33 @@ function lengthLikeResidual(
 }
 
 /**
+ * 2点間の距離のうち、片方の軸成分のみを対象にした残差式(distanceEntityEntityのaxis:"x"/"y"、
+ * UI改善対応)。絶対値の符号は残差評価のたび現在のx(引数)から都度決め直す(2点とも可変なので
+ * pointToFixedLineResidualのような固定sign化はできないが、通常は拘束値が正でありb側がa側より
+ * 大きい/小さいの向きが反復中に反転することは稀なため、この単純な実装で十分収束する)。
+ * axisIndex 0=x, 1=y。
+ */
+function axisDistanceResidual(
+  x: number[],
+  aIdx: [number, number],
+  bIdx: [number, number],
+  value: number,
+  axisIndex: 0 | 1,
+): ResidualEq {
+  const ai = aIdx[axisIndex];
+  const bi = bIdx[axisIndex];
+  const d = x[bi] - x[ai];
+  const sign = d >= 0 ? 1 : -1;
+  return {
+    value: sign * d - value,
+    terms: [
+      { index: ai, coef: -sign },
+      { index: bi, coef: sign },
+    ],
+  };
+}
+
+/**
  * radius拘束の残差式を作る。円弧のbulge(=tan(挟角/4))は固定値として扱い(端点移動では変えない)、
  * 挟角θ=4*atan(bulge)から半弦-半径比を求め、半径 = 弦長 / (2*sin(θ/2)) をvalueと比較する。
  * sin(θ/2)が0近傍(=ほぼ直線)の場合は数値的に不安定なため、符号を保った下限でクランプする。
@@ -281,7 +308,9 @@ function buildConstraintResiduals(
         const a = entityVarIndex(entityVarIdx, c.a);
         const b = entityVarIndex(entityVarIdx, c.b);
         if (!a || !b) break;
-        eqs.push(lengthLikeResidual(x, a, b, c.value));
+        if (c.axis === "x") eqs.push(axisDistanceResidual(x, a, b, c.value, 0));
+        else if (c.axis === "y") eqs.push(axisDistanceResidual(x, a, b, c.value, 1));
+        else eqs.push(lengthLikeResidual(x, a, b, c.value));
         break;
       }
       case "distanceEntityLine": {

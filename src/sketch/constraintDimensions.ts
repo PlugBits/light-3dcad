@@ -124,22 +124,26 @@ function sameEntityPair(constraint: SketchConstraint, a: EntityRef, b: EntityRef
   );
 }
 
-/** 2つのcircleエンティティの中心間のdistanceEntityEntity拘束を追加/更新する(a/bの順序は問わず一致を判定)。 */
+/**
+ * 2つのcircleエンティティの中心間のdistanceEntityEntity拘束を追加/更新する(a/bの順序は問わず一致を判定)。
+ * axis(UI改善対応、省略=direct・後方互換)は"x"/"y"のとき片方の軸成分のみを距離として扱う。
+ */
 export function upsertDistanceEntityEntityConstraint(
   constraints: readonly SketchConstraint[],
   fromEntityId: string,
   toEntityId: string,
   value: number,
+  axis?: "direct" | "x" | "y",
 ): SketchConstraint[] {
   const a: EntityRef = { entityId: fromEntityId };
   const b: EntityRef = { entityId: toEntityId };
   const idx = constraints.findIndex((c) => sameEntityPair(c, a, b));
   if (idx >= 0) {
     const next = constraints.slice();
-    next[idx] = { ...next[idx], value } as SketchConstraint;
+    next[idx] = { ...next[idx], value, axis } as SketchConstraint;
     return next;
   }
-  return [...constraints, { id: generateId("constraint"), kind: "distanceEntityEntity", a, b, value }];
+  return [...constraints, { id: generateId("constraint"), kind: "distanceEntityEntity", a, b, value, axis }];
 }
 
 /** circleエンティティの中心↔辺(LineRef)のdistanceEntityLine拘束を追加/更新する(entityId+同一のlineが既にあれば値だけ差し替え)。 */
@@ -215,6 +219,8 @@ export interface EntityEntityDimension {
   constraintId: string;
   aEntityId: string;
   bEntityId: string;
+  /** 省略/"direct"は中心間の直線距離、"x"/"y"は片方の軸成分のみ(UI改善対応)。 */
+  axis?: "direct" | "x" | "y";
   value: number;
   anchor: Point2;
 }
@@ -269,6 +275,7 @@ export function computeConstraintDimensions(
         constraintId: c.id,
         aEntityId: c.a.entityId,
         bEntityId: c.b.entityId,
+        axis: c.axis,
         value: c.value,
         anchor,
       });
@@ -315,9 +322,16 @@ export function computeConstraintDimensions(
   return dims;
 }
 
-/** 拘束寸法ラベルの表示テキストを返す(小数第1位まで)。半径はR接頭辞。 */
+/**
+ * 拘束寸法ラベルの表示テキストを返す(小数第1位まで)。半径はR接頭辞、円↔円のX/Y距離
+ * (UI改善対応)はX/Y接頭辞(例: "X30.0" "Y15.0")で通常の直線距離と区別する。
+ */
 export function formatConstraintDimensionLabel(dimension: ConstraintDimension): string {
   if (dimension.kind === "seg-radius") return `R${dimension.value.toFixed(1)}`;
+  if (dimension.kind === "entity-distance-entity") {
+    if (dimension.axis === "x") return `X${dimension.value.toFixed(1)}`;
+    if (dimension.axis === "y") return `Y${dimension.value.toFixed(1)}`;
+  }
   return dimension.value.toFixed(1);
 }
 

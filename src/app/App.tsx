@@ -124,7 +124,11 @@ export default function App() {
     screen: { x: number; y: number };
     /** ポップアップ下に一行表示する補足(Phase 21b、位置寸法)。未指定は非表示。 */
     hintLabel?: string;
+    /** 円↔円の距離のときだけtrue: 距離/X距離/Y距離の3択を表示する(UI改善対応)。 */
+    axisOptions?: boolean;
   } | null>(null);
+  // 寸法ツールの1点目待ち状態のステータス表示(ツールバー付近に1行、UI改善対応)。未保留はnull。
+  const [dimensionPendingLabel, setDimensionPendingLabel] = useState<string | null>(null);
   // 拘束の矛盾で自動巻き戻しが起きたときの一時メッセージ(Phase 20b)。数秒後に自動で消える。
   const [transientMessage, setTransientMessage] = useState<string | null>(null);
   const transientMessageTimer = useRef<number | null>(null);
@@ -618,6 +622,7 @@ export default function App() {
         let titleLabel = "距離 (mm)";
         let initialValue = 0;
         let hintLabel: string | undefined;
+        let axisOptions = false;
         if (target.kind === "length") {
           titleLabel = "長さ (mm)";
           const seg = segments.find((s) => s.id === target.segmentId);
@@ -649,18 +654,30 @@ export default function App() {
           initialValue =
             from?.kind === "circle" && to?.kind === "circle" ? distanceBetweenPoints(from.center, to.center) : 0;
           hintLabel = "後にクリックした円(この円)が移動します";
+          axisOptions = true;
         } else if (target.kind === "circle-distance-edge" || target.kind === "circle-distance-refedge") {
           titleLabel = target.kind === "circle-distance-refedge" ? "中心↔参照エッジの距離 (mm)" : "中心↔辺の距離 (mm)";
           const entity = entities.find((e) => e.id === target.entityId);
           initialValue = entity?.kind === "circle" ? distancePointToLine(entity.center, target.edgeA, target.edgeB) : 0;
           hintLabel = "辺は動かず、円の中心だけが移動します";
         }
-        setDimensionPopup({ target, titleLabel, initialValue, screen: { x: screenX, y: screenY }, hintLabel });
+        setDimensionPopup({ target, titleLabel, initialValue, screen: { x: screenX, y: screenY }, hintLabel, axisOptions });
       },
       onCancel: () => {
         setDimensionTool(false);
         setDrawingSketchId(null);
         setDimensionPopup(null);
+        setDimensionPendingLabel(null);
+      },
+      // 1点目待ち状態のステータス表示(UI改善対応)。
+      onPendingChange: (state) => {
+        if (!state) {
+          setDimensionPendingLabel(null);
+        } else if (state.kind === "circle") {
+          setDimensionPendingLabel("1つ目: 円 → 2つ目を選択(原点/円/辺/端面)");
+        } else {
+          setDimensionPendingLabel("1つ目: 端点 → 2つ目の端点を選択(距離)");
+        }
       },
     });
     setDrawingSketchId(sketchId);
@@ -689,7 +706,7 @@ export default function App() {
    * 他の拘束[矩形のサイズ変更等]と共存できるようにするため)。他のsegments系と同じく
    * updateDocumentWithConflictRollbackを通すため、矛盾すれば自動的に取り消される。
    */
-  function handleApplyDimensionTarget(value: number) {
+  function handleApplyDimensionTarget(value: number, axis?: "direct" | "x" | "y") {
     if (!dimensionPopup || !selectedFeature || selectedFeature.type !== "sketch") return;
     const sketchId = selectedFeature.id;
     const target = dimensionPopup.target;
@@ -722,7 +739,7 @@ export default function App() {
                 : target.kind === "circle-distance-origin"
                   ? upsertDistanceEntityOriginConstraint(constraints, target.entityId, value)
                   : target.kind === "circle-distance-circle"
-                    ? upsertDistanceEntityEntityConstraint(constraints, target.fromEntityId, target.toEntityId, value)
+                    ? upsertDistanceEntityEntityConstraint(constraints, target.fromEntityId, target.toEntityId, value, axis)
                     : upsertDistanceEntityLineConstraint(constraints, target.entityId, target.line, value);
         return setSketchConstraints(doc, sketchId, next);
       },
@@ -1000,7 +1017,15 @@ export default function App() {
         )}
         {dimensionTool && (
           <span data-testid="dimension-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
-            線分・円弧をクリックで長さ/半径、端点を2つ順にクリックで距離を指定(連続使用可、Escで終了)
+            クリックで長さ/半径/距離を指定(Escで終了)
+          </span>
+        )}
+        {dimensionTool && dimensionPendingLabel && (
+          <span
+            data-testid="dimension-pending-status"
+            style={{ fontSize: 11, fontWeight: "bold", color: "#ffb74d" }}
+          >
+            {dimensionPendingLabel}
           </span>
         )}
         <span data-testid="status-text" style={{ fontSize: 12, opacity: 0.8, marginLeft: "auto" }}>
@@ -1098,7 +1123,9 @@ export default function App() {
               sketch={selectedFeature}
               basis={selectedSketchPlane}
               viewerRef={viewerRef}
-              visible={showSketches && !activeTool && !cornerTool && !trimTool && !dimensionTool}
+              // 寸法ツール中(dimensionTool)は既存の寸法線・ラベルを隠さない(むしろ見えているべき、
+              // UI改善対応)。線分/矩形/円等の作図ツール・フィレット/面取り・トリムの間は従来通り隠す。
+              visible={showSketches && !activeTool && !cornerTool && !trimTool}
               onConflictRollback={showTransientMessage}
             />
           )}
@@ -1109,6 +1136,7 @@ export default function App() {
               initialValue={dimensionPopup.initialValue}
               screen={dimensionPopup.screen}
               hintLabel={dimensionPopup.hintLabel}
+              axisOptions={dimensionPopup.axisOptions}
               onCancel={() => setDimensionPopup(null)}
               onApply={handleApplyDimensionTarget}
             />
