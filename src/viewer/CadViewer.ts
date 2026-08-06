@@ -316,6 +316,24 @@ const DIMENSION_ENDPOINT_TOLERANCE_PX = 10;
 /** 寸法ツールのセグメント本体ヒット判定の許容スクリーン距離(px、ローカルmmへ概算換算して使う)。 */
 const DIMENSION_SEGMENT_TOLERANCE_PX = 14;
 
+/**
+ * 拘束ツール(Phase 23、垂直・同心・接線)のピック対象。直線セグメント(kind:"line"のみ)、
+ * またはcircleエンティティのいずれか。ホバー強調・1点目強調は寸法ツールの既存機構
+ * (drawDimensionHoverPreview/drawDimensionSelectHighlight/clearDimensionSelectHighlight)を
+ * そのまま流用する(いずれもbasis+ローカル2D点列のみに依存する汎用実装のため)。
+ */
+export type ConstraintPickTarget = { kind: "segment"; segmentId: string } | { kind: "circle"; entityId: string };
+
+/** 拘束ツールの開始/終了時に呼ばれるコールバック。 */
+export interface ConstraintToolCallbacks {
+  /** 2つ目の対象が確定したときに呼ばれる(screenX/screenYは選択ポップアップの位置決めに使うcanvas内px座標)。 */
+  onPairPicked: (a: ConstraintPickTarget, b: ConstraintPickTarget, screenX: number, screenY: number) => void;
+  /** Escapeキーまたはcancel呼び出しで終了したときに呼ばれる。 */
+  onCancel: () => void;
+  /** 1つ目待ち状態が変わるたびに呼ばれる(ツールバー付近のステータス表示用)。 */
+  onPendingChange?: (pending: ConstraintPickTarget | null) => void;
+}
+
 declare global {
   interface Window {
     __cadViewerDebug?: {
@@ -775,6 +793,15 @@ export class CadViewer {
    */
   private dimensionPendingCircleId: string | null = null;
 
+  /** 拘束ツール(Phase 23)がアクティブかどうか。trueの間はクリックを面選択でなく拘束対象クリックとして扱う。 */
+  private constraintToolActive = false;
+  private constraintToolBasis: PlaneBasis | null = null;
+  private constraintToolSegments: SketchSegment[] = [];
+  private constraintToolEntities: SketchEntity[] = [];
+  private constraintToolCallbacks: ConstraintToolCallbacks | null = null;
+  /** 1つ目としてクリック済みの対象(未選択はnull)。2つ目のクリックでonPairPickedを呼ぶ。 */
+  private constraintPendingTarget: ConstraintPickTarget | null = null;
+
   constructor(
     container: HTMLElement,
     onFaceSelect?: (face: FaceInfo | null) => void,
@@ -961,6 +988,12 @@ export class CadViewer {
       }
       return;
     }
+    if (this.constraintToolActive) {
+      if (event.key === "Escape") {
+        this.cancelConstraintTool();
+      }
+      return;
+    }
     if (this.drawingActive) {
       const isChainShape = this.drawingShape === "polygon" || this.drawingShape === "segment";
       if (event.key === "Escape") {
@@ -1059,6 +1092,10 @@ export class CadViewer {
     }
     if (this.dimensionToolActive) {
       this.handleDimensionToolClick(event);
+      return;
+    }
+    if (this.constraintToolActive) {
+      this.handleConstraintToolClick(event);
       return;
     }
     if (this.drawingActive) {
@@ -1182,6 +1219,9 @@ export class CadViewer {
     if (this.dimensionToolActive && !this.dimensionPendingPoint) {
       this.clearDrawingPreview();
       this.dimensionHoverEntityHit = null;
+    }
+    if (this.constraintToolActive) {
+      this.clearDrawingPreview();
     }
   };
 
@@ -1621,6 +1661,7 @@ export class CadViewer {
     this.cancelTrimTool();
     this.cancelCornerTool();
     this.cancelDimensionTool();
+    this.cancelConstraintTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.drawingActive = true;
@@ -1744,6 +1785,7 @@ export class CadViewer {
     this.cancelPolygonDrawing();
     this.cancelTrimTool();
     this.cancelDimensionTool();
+    this.cancelConstraintTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.cornerToolActive = true;
@@ -1824,6 +1866,7 @@ export class CadViewer {
     this.cancelPolygonDrawing();
     this.cancelCornerTool();
     this.cancelDimensionTool();
+    this.cancelConstraintTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.trimActive = true;
@@ -1952,6 +1995,7 @@ export class CadViewer {
    */
   startDimensionTool(basis: PlaneBasis, segments: SketchSegment[], entities: SketchEntity[], callbacks: DimensionToolCallbacks) {
     this.cancelDimensionTool();
+    this.cancelConstraintTool();
     this.cancelPolygonDrawing();
     this.cancelCornerTool();
     this.cancelTrimTool();
@@ -2698,6 +2742,10 @@ export class CadViewer {
       this.handleDimensionToolMouseMove(event);
       return;
     }
+    if (this.constraintToolActive) {
+      this.handleConstraintToolMouseMove(event);
+      return;
+    }
     // フィレット/面取りツール中は面ホバーハイライトも描画プレビューも不要(クリックのみで完結する)。
     if (this.cornerToolActive) return;
     if (!this.drawingActive || !this.drawingBasis) {
@@ -3083,6 +3131,143 @@ export class CadViewer {
   private setDimensionPendingPoint(ref: PointRef | null) {
     this.dimensionPendingPoint = ref;
     this.notifyDimensionPendingState();
+  }
+
+  // ---- 拘束ツール(Phase 23、垂直・同心・接線) ----
+  // ピック対象は直線セグメント(kind:"line")本体・circleエンティティ境界の2種のみ(自由な線分・
+  // 円のみが対象の拘束のため、rectangle/polygon/arc・参照エッジ・端点は対象外というシンプルな
+  // v1)。ホバー強調・1つ目強調の描画は寸法ツールの汎用メソッド(drawDimensionHoverPreview等)を
+  // そのまま流用する。
+
+  /**
+   * 拘束ツールを開始する。以後、直線セグメント本体またはcircleエンティティ境界を2つ順にクリック
+   * すると`callbacks.onPairPicked`が呼ばれる(実際の拘束種別の選択・作成はApp側の責務)。
+   */
+  startConstraintTool(basis: PlaneBasis, segments: SketchSegment[], entities: SketchEntity[], callbacks: ConstraintToolCallbacks) {
+    this.cancelConstraintTool();
+    this.cancelPolygonDrawing();
+    this.cancelTrimTool();
+    this.cancelCornerTool();
+    this.cancelDimensionTool();
+    this.clearSelection();
+    this.setHoverGroup(null);
+    this.constraintToolActive = true;
+    this.constraintToolBasis = basis;
+    this.constraintToolSegments = segments;
+    this.constraintToolEntities = entities;
+    this.constraintToolCallbacks = callbacks;
+    this.setConstraintPendingTarget(null);
+  }
+
+  /** 拘束ツール中、対象スケッチのsegments/entitiesが変わった場合(拘束適用・アンドゥ等)にピック対象を更新する。 */
+  updateConstraintToolTargets(segments: SketchSegment[], entities: SketchEntity[]) {
+    if (!this.constraintToolActive) return;
+    this.constraintToolSegments = segments;
+    this.constraintToolEntities = entities;
+    this.setConstraintPendingTarget(null);
+  }
+
+  isConstraintToolActive(): boolean {
+    return this.constraintToolActive;
+  }
+
+  /** 拘束ツールを終了する(onCancelが呼ばれる)。非アクティブなら何もしない。 */
+  cancelConstraintTool() {
+    if (!this.constraintToolActive) return;
+    const callbacks = this.constraintToolCallbacks;
+    this.constraintToolActive = false;
+    this.constraintToolBasis = null;
+    this.constraintToolSegments = [];
+    this.constraintToolEntities = [];
+    this.constraintToolCallbacks = null;
+    this.setConstraintPendingTarget(null);
+    this.clearDrawingPreview();
+    callbacks?.onCancel();
+  }
+
+  /** constraintPendingTargetの更新+1つ目強調の描画/消去+ステータス通知をまとめて行う。 */
+  private setConstraintPendingTarget(target: ConstraintPickTarget | null, highlightPoints?: [number, number][]) {
+    this.constraintPendingTarget = target;
+    if (target && this.constraintToolBasis && highlightPoints) {
+      this.drawDimensionSelectHighlight(this.constraintToolBasis, highlightPoints);
+    } else {
+      this.clearDimensionSelectHighlight();
+    }
+    this.constraintToolCallbacks?.onPendingChange?.(target);
+  }
+
+  /**
+   * ローカル2D座標に最も近い拘束ピック対象(直線セグメント本体・circleエンティティ境界)を求める。
+   * 許容距離内に何も無ければnull。
+   */
+  private findConstraintPickHit(
+    local: [number, number],
+  ): { target: ConstraintPickTarget; dist: number; highlightPoints: [number, number][] } | null {
+    let best: { target: ConstraintPickTarget; dist: number; highlightPoints: [number, number][] } | null = null;
+    for (const seg of this.constraintToolSegments) {
+      if (seg.kind !== "line") continue;
+      const d = distPointToSegmentShape(local, seg);
+      if (!best || d < best.dist) {
+        best = { target: { kind: "segment", segmentId: seg.id }, dist: d, highlightPoints: [seg.p1, seg.p2] };
+      }
+    }
+    const circles = this.constraintToolEntities.filter((e) => e.kind === "circle");
+    const entityHit = findEntityDimensionHit(local, circles);
+    if (entityHit && (!best || entityHit.dist < best.dist)) {
+      best = { target: { kind: "circle", entityId: entityHit.entityId }, dist: entityHit.dist, highlightPoints: entityHit.highlightPoints };
+    }
+    return best;
+  }
+
+  /** 拘束ツール中のクリック処理。許容距離内の最近傍(直線セグメント/circle)を1つ目→2つ目の順で確定する。 */
+  private handleConstraintToolClick(event: MouseEvent) {
+    if (!this.constraintToolBasis) return;
+    const basis = this.constraintToolBasis;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+    const hit = this.raycastDrawingPlane(basis, px, py, rect);
+    if (!hit) return;
+    const local = planeWorldToLocal(basis, hit);
+    const toleranceMm = this.pxToMm(DIMENSION_SEGMENT_TOLERANCE_PX, hit);
+    const pickHit = this.findConstraintPickHit(local);
+    if (!pickHit || pickHit.dist > toleranceMm) return;
+
+    const pending = this.constraintPendingTarget;
+    if (!pending) {
+      this.setConstraintPendingTarget(pickHit.target, pickHit.highlightPoints);
+      return;
+    }
+    const isSameAsPending =
+      (pending.kind === "segment" && pickHit.target.kind === "segment" && pending.segmentId === pickHit.target.segmentId) ||
+      (pending.kind === "circle" && pickHit.target.kind === "circle" && pending.entityId === pickHit.target.entityId);
+    if (isSameAsPending) return;
+
+    this.setConstraintPendingTarget(null);
+    this.clearDrawingPreview();
+    this.constraintToolCallbacks?.onPairPicked(pending, pickHit.target, px, py);
+  }
+
+  /** 拘束ツール中のマウス移動処理。カーソルに最も近いヒット候補をホバー色でプレビュー表示する。 */
+  private handleConstraintToolMouseMove(event: MouseEvent) {
+    if (!this.constraintToolBasis) return;
+    const basis = this.constraintToolBasis;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+    const hit = this.raycastDrawingPlane(basis, px, py, rect);
+    if (!hit) {
+      this.clearDrawingPreview();
+      return;
+    }
+    const local = planeWorldToLocal(basis, hit);
+    const toleranceMm = this.pxToMm(DIMENSION_SEGMENT_TOLERANCE_PX, hit);
+    const pickHit = this.findConstraintPickHit(local);
+    if (!pickHit || pickHit.dist > toleranceMm) {
+      this.clearDrawingPreview();
+      return;
+    }
+    this.drawDimensionHoverPreview(basis, pickHit.highlightPoints);
   }
 
   /**

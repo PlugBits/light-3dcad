@@ -27,6 +27,10 @@ import {
 } from "../model/entity";
 import type { PolygonCorner } from "../model/types";
 import {
+  addConcentricConstraint,
+  addPerpendicularConstraint,
+  addTangentEntityConstraint,
+  addTangentSegmentConstraint,
   distanceBetweenRefs,
   segmentLength,
   segmentRadius,
@@ -42,7 +46,7 @@ import { rectangleFromCorners, regularPolygonVertices } from "../sketch/shapeFro
 import { trimSegmentAtPoint } from "../sketch/trim";
 import { updateDocumentWithConflictRollback } from "../state/constraintUpdate";
 import { useCadStore } from "../state/store";
-import { CadViewer, type DimensionToolTarget, type SketchOverlayEntry } from "../viewer/CadViewer";
+import { CadViewer, type ConstraintPickTarget, type DimensionToolTarget, type SketchOverlayEntry } from "../viewer/CadViewer";
 import type { StandardView } from "../viewer/standardViews";
 
 /**
@@ -135,6 +139,16 @@ export default function App() {
   } | null>(null);
   // 寸法ツールの1点目待ち状態のステータス表示(ツールバー付近に1行、UI改善対応)。未保留はnull。
   const [dimensionPendingLabel, setDimensionPendingLabel] = useState<string | null>(null);
+  // 拘束ツール(未選択はfalse、Phase 23)。線分/円を2つ順にクリックして垂直・同心・接線拘束を作成する。
+  const [constraintTool, setConstraintTool] = useState(false);
+  // 拘束ツールの1つ目待ち状態のステータス表示(寸法ツールのdimensionPendingLabelと同じ位置に表示)。未保留はnull。
+  const [constraintPendingLabel, setConstraintPendingLabel] = useState<string | null>(null);
+  // 拘束ツールが2つの対象を確定した後に表示する、適用可能な拘束種別を選ぶ小さなポップアップ(Phase 23)。
+  const [constraintPopup, setConstraintPopup] = useState<{
+    a: ConstraintPickTarget;
+    b: ConstraintPickTarget;
+    screen: { x: number; y: number };
+  } | null>(null);
   // 拘束の矛盾で自動巻き戻しが起きたときの一時メッセージ(Phase 20b)。数秒後に自動で消える。
   const [transientMessage, setTransientMessage] = useState<string | null>(null);
   const transientMessageTimer = useRef<number | null>(null);
@@ -254,7 +268,10 @@ export default function App() {
     if (dimensionTool && selectedFeatureId !== drawingSketchId) {
       viewerRef.current?.cancelDimensionTool();
     }
-  }, [activeTool, cornerTool, trimTool, dimensionTool, selectedFeatureId, drawingSketchId]);
+    if (constraintTool && selectedFeatureId !== drawingSketchId) {
+      viewerRef.current?.cancelConstraintTool();
+    }
+  }, [activeTool, cornerTool, trimTool, dimensionTool, constraintTool, selectedFeatureId, drawingSketchId]);
 
   // フィレット/面取りツール中、対象スケッチのentitiesが変わった場合はヒット判定対象を更新する
   // (フィレット/面取りは頂点座標自体は変えないため必須ではないが、将来の変更に備えて同期しておく)。
@@ -285,6 +302,16 @@ export default function App() {
       viewerRef.current?.updateDimensionToolTargets(feature.segments ?? [], feature.entities);
     }
   }, [dimensionTool, doc, selectedFeatureId]);
+
+  // 拘束ツール中、対象スケッチのsegments/entitiesが変わった場合(拘束適用・アンドゥ等)は
+  // ヒット判定対象を最新化する(Phase 23)。
+  useEffect(() => {
+    if (!constraintTool) return;
+    const feature = selectedFeatureId ? findFeature(doc, selectedFeatureId) : undefined;
+    if (feature?.type === "sketch") {
+      viewerRef.current?.updateConstraintToolTargets(feature.segments ?? [], feature.entities);
+    }
+  }, [constraintTool, doc, selectedFeatureId]);
 
   // ボディ端面参照エッジ(Phase 22)のオーバーレイ+寸法ツールのピック対象を、選択中スケッチの
   // referenceEdges(Worker評価応答)が変わるたびに同期する。選択中フィーチャーがスケッチでない、
@@ -521,7 +548,7 @@ export default function App() {
 
   /** 指定ツールのボタンをdisabledにすべきか(他のツールが実行中、または対象スケッチ平面が未確定)。 */
   function isToolDisabled(tool: Exclude<DrawingTool, null>): boolean {
-    if (cornerTool || trimTool || dimensionTool) return true;
+    if (cornerTool || trimTool || dimensionTool || constraintTool) return true;
     if (activeTool) return activeTool !== tool;
     return !selectedSketchPlane;
   }
@@ -562,7 +589,7 @@ export default function App() {
 
   /** フィレット/面取りボタンをdisabledにすべきか(他の作図ツール実行中、または対象スケッチ平面が未確定)。 */
   function isCornerToolDisabled(kind: "fillet" | "chamfer"): boolean {
-    if (activeTool || trimTool || dimensionTool) return true;
+    if (activeTool || trimTool || dimensionTool || constraintTool) return true;
     if (cornerTool) return cornerTool !== kind;
     return !selectedSketchPlane;
   }
@@ -603,7 +630,7 @@ export default function App() {
 
   /** トリムボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isTrimToolDisabled(): boolean {
-    if (activeTool || cornerTool || dimensionTool) return true;
+    if (activeTool || cornerTool || dimensionTool || constraintTool) return true;
     if (trimTool) return false;
     return !selectedSketchPlane;
   }
@@ -701,7 +728,7 @@ export default function App() {
 
   /** 寸法ツールボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isDimensionToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool) return true;
+    if (activeTool || cornerTool || trimTool || constraintTool) return true;
     if (dimensionTool) return false;
     return !selectedSketchPlane;
   }
@@ -757,6 +784,98 @@ export default function App() {
       showTransientMessage,
     );
     setDimensionPopup(null);
+  }
+
+  /**
+   * 拘束ツール(Phase 23)を開始する。ビューア上で直線セグメント本体またはcircleエンティティの
+   * 境界を2つ順にクリックすると`onPairPicked`が呼ばれ、対象の組み合わせ(線+線/円+円/円+線)に
+   * 応じて適用可能な拘束の選択ポップアップ(constraintPopup)を開く。実際の拘束作成は
+   * handleApplyConstraintKindが行う。
+   */
+  function handleStartConstraintTool() {
+    if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
+    const sketchId = selectedFeature.id;
+    viewerRef.current.startConstraintTool(selectedSketchPlane, selectedFeature.segments ?? [], selectedFeature.entities, {
+      onPairPicked: (a, b, screenX, screenY) => {
+        setConstraintPopup({ a, b, screen: { x: screenX, y: screenY } });
+      },
+      onCancel: () => {
+        setConstraintTool(false);
+        setDrawingSketchId(null);
+        setConstraintPopup(null);
+        setConstraintPendingLabel(null);
+      },
+      onPendingChange: (pending) => {
+        if (!pending) {
+          setConstraintPendingLabel(null);
+        } else if (pending.kind === "segment") {
+          setConstraintPendingLabel("1つ目: 線分 → 2つ目を選択(線分/円)");
+        } else {
+          setConstraintPendingLabel("1つ目: 円 → 2つ目を選択(円/線分)");
+        }
+      },
+    });
+    setDrawingSketchId(sketchId);
+    setConstraintTool(true);
+  }
+
+  function handleCancelConstraintTool() {
+    viewerRef.current?.cancelConstraintTool();
+  }
+
+  /** 拘束ツールボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
+  function isConstraintToolDisabled(): boolean {
+    if (activeTool || cornerTool || trimTool || dimensionTool) return true;
+    if (constraintTool) return false;
+    return !selectedSketchPlane;
+  }
+
+  /**
+   * ピックした2対象の組み合わせから適用可能な拘束の選択肢を返す(表示ラベル+kind)。
+   * 線分+線分=垂直のみ、円+円=同心/接線(外接or内接は自動判定)、円+線分=接線のみ。
+   */
+  function constraintOptionsFor(a: ConstraintPickTarget, b: ConstraintPickTarget): { label: string; kind: "perpendicular" | "concentric" | "tangent" }[] {
+    if (a.kind === "segment" && b.kind === "segment") return [{ label: "垂直", kind: "perpendicular" }];
+    if (a.kind === "circle" && b.kind === "circle") {
+      return [
+        { label: "同心", kind: "concentric" },
+        { label: "接線", kind: "tangent" },
+      ];
+    }
+    return [{ label: "接線", kind: "tangent" }];
+  }
+
+  /** 拘束選択ポップアップで種別が選ばれたときの拘束作成。矛盾したら自動的に取り消す(既存パターンに合わせる)。 */
+  function handleApplyConstraintKind(kind: "perpendicular" | "concentric" | "tangent") {
+    if (!constraintPopup || !selectedFeature || selectedFeature.type !== "sketch") return;
+    const sketchId = selectedFeature.id;
+    const { a, b } = constraintPopup;
+
+    updateDocumentWithConflictRollback(
+      sketchId,
+      (doc) => {
+        const feature = doc.features.find((f) => f.id === sketchId);
+        if (feature?.type !== "sketch") return doc;
+        const constraints = feature.constraints ?? [];
+        let next = constraints;
+        if (kind === "perpendicular" && a.kind === "segment" && b.kind === "segment") {
+          next = addPerpendicularConstraint(constraints, a.segmentId, b.segmentId);
+        } else if (kind === "concentric" && a.kind === "circle" && b.kind === "circle") {
+          next = addConcentricConstraint(constraints, a.entityId, b.entityId);
+        } else if (kind === "tangent") {
+          if (a.kind === "circle" && b.kind === "circle") {
+            next = addTangentEntityConstraint(constraints, feature.entities, a.entityId, b.entityId);
+          } else if (a.kind === "circle" && b.kind === "segment") {
+            next = addTangentSegmentConstraint(constraints, a.entityId, b.segmentId);
+          } else if (a.kind === "segment" && b.kind === "circle") {
+            next = addTangentSegmentConstraint(constraints, b.entityId, a.segmentId);
+          }
+        }
+        return setSketchConstraints(doc, sketchId, next);
+      },
+      showTransientMessage,
+    );
+    setConstraintPopup(null);
   }
 
   return (
@@ -1010,6 +1129,16 @@ export default function App() {
             >
               {dimensionTool ? "寸法キャンセル(Esc)" : "寸法"}
             </button>
+            <button
+              type="button"
+              data-testid="btn-constraint"
+              className={constraintTool ? "toolbar-btn-active" : undefined}
+              onClick={constraintTool ? handleCancelConstraintTool : handleStartConstraintTool}
+              disabled={isConstraintToolDisabled()}
+              title="線分/円を2つ順にクリックして垂直・同心・接線の拘束を作成します(Escで終了)"
+            >
+              {constraintTool ? "拘束キャンセル(Esc)" : "拘束"}
+            </button>
           </div>
 
           <div className="toolbar-group" style={{ marginLeft: "auto" }}>
@@ -1078,6 +1207,19 @@ export default function App() {
               style={{ fontSize: 11, fontWeight: "bold", color: "#ffb74d" }}
             >
               {dimensionPendingLabel}
+            </span>
+          )}
+          {constraintTool && (
+            <span data-testid="constraint-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
+              線分/円をクリックして垂直・同心・接線を指定
+            </span>
+          )}
+          {constraintTool && constraintPendingLabel && (
+            <span
+              data-testid="constraint-pending-status"
+              style={{ fontSize: 11, fontWeight: "bold", color: "#ffb74d" }}
+            >
+              {constraintPendingLabel}
             </span>
           )}
           <span data-testid="status-text" style={{ fontSize: 12, opacity: 0.8, marginLeft: "auto" }}>
@@ -1178,7 +1320,7 @@ export default function App() {
               viewerRef={viewerRef}
               // 寸法ツール中(dimensionTool)は既存の寸法線・ラベルを隠さない(むしろ見えているべき、
               // UI改善対応)。線分/矩形/円等の作図ツール・フィレット/面取り・トリムの間は従来通り隠す。
-              visible={showSketches && !activeTool && !cornerTool && !trimTool}
+              visible={showSketches && !activeTool && !cornerTool && !trimTool && !constraintTool}
               onConflictRollback={showTransientMessage}
             />
           )}
@@ -1193,6 +1335,50 @@ export default function App() {
               onCancel={() => setDimensionPopup(null)}
               onApply={handleApplyDimensionTarget}
             />
+          )}
+          {constraintPopup && (
+            <div
+              data-testid="constraint-tool-popup"
+              style={{
+                position: "absolute",
+                left: constraintPopup.screen.x,
+                top: constraintPopup.screen.y,
+                transform: "translate(-50%, 10px)",
+                pointerEvents: "auto",
+                background: "#2a2f3a",
+                border: "1px solid #555",
+                borderRadius: 6,
+                padding: 8,
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+                fontSize: 12,
+                zIndex: 20,
+                boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
+                minWidth: 140,
+              }}
+            >
+              <p style={{ margin: 0, fontSize: 10, color: "#9aa5b1" }}>適用する拘束を選択</p>
+              {constraintOptionsFor(constraintPopup.a, constraintPopup.b).map((opt) => (
+                <button
+                  key={opt.kind}
+                  type="button"
+                  data-testid={`constraint-tool-popup-${opt.kind}`}
+                  onClick={() => handleApplyConstraintKind(opt.kind)}
+                  style={{ fontSize: 12 }}
+                >
+                  {opt.label}
+                </button>
+              ))}
+              <button
+                type="button"
+                data-testid="constraint-tool-popup-cancel"
+                onClick={() => setConstraintPopup(null)}
+                style={{ fontSize: 11 }}
+              >
+                キャンセル
+              </button>
+            </div>
           )}
           {transientMessage && (
             <div
