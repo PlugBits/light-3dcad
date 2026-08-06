@@ -8,7 +8,7 @@ import { setOC, type Shape3D } from "replicad";
 import type { OpenCascadeInstance } from "replicad-opencascadejs/src/replicad_single.js";
 
 import type { CadDocument, FeatureId } from "../model/types";
-import type { FaceGroup, FaceInfo, MeshData, MeshQuality, UiRequest, WorkerResponse } from "../protocol/messages";
+import type { EdgeInfo, FaceGroup, FaceInfo, MeshData, MeshQuality, UiRequest, WorkerResponse } from "../protocol/messages";
 import { evaluateDocument } from "./evaluator";
 
 // replicad-opencascadejsのd.tsは引数なしの署名しか宣言していないが、実装(emscripten生成の
@@ -49,7 +49,35 @@ function toMeshData(shape: Shape3D, quality: MeshQuality): MeshData {
     indices: Uint32Array.from(shapeMesh.triangles),
     faceGroups,
     edges: Float32Array.from(edgeMesh.lines),
+    edgeGroups: edgeMesh.edgeGroups,
   };
+}
+
+/**
+ * shapeの各B-Repエッジについて中点・両端点を集めた配列を作る(Phase 25a、3Dエッジ選択・
+ * フィレット/面取りフィーチャーのスナップショット用)。
+ * edgeId は edge.hashCode(= meshEdges()のedgeGroups.edgeIdと同じ値)。
+ * 使用したreplicad API: Shape.edges / Edge.hashCode / Edge.startPoint / Edge.endPoint /
+ * Edge.pointAt(0.5)(_1DShape.pointAt()のデフォルト値。曲線に沿った弧長中点)。
+ */
+function computeEdgeInfo(shape: Shape3D): EdgeInfo[] {
+  const infos: EdgeInfo[] = [];
+  for (const edge of shape.edges) {
+    const startVec = edge.startPoint;
+    const endVec = edge.endPoint;
+    const midVec = edge.pointAt(0.5);
+    infos.push({
+      edgeId: edge.hashCode,
+      p1: startVec.toTuple(),
+      p2: endVec.toTuple(),
+      midpoint: midVec.toTuple(),
+    });
+    startVec.delete();
+    endVec.delete();
+    midVec.delete();
+    edge.delete();
+  }
+  return infos;
 }
 
 /**
@@ -87,6 +115,7 @@ function emptyMeshData(): MeshData {
     indices: new Uint32Array(0),
     faceGroups: [],
     edges: new Float32Array(0),
+    edgeGroups: [],
   };
 }
 
@@ -104,16 +133,25 @@ function evaluateAndRespond(requestId: string, doc: CadDocument, quality: MeshQu
 
   const { shape, sketchPlanes, referenceEdges } = result;
   if (!shape) {
-    // ボディなし(Phase 13): 正常ケースとして空メッシュ+空faceInfoを返す。
+    // ボディなし(Phase 13): 正常ケースとして空メッシュ+空faceInfo/edgeInfoを返す。
     // sketchPlanesは解決済みのため、スケッチだけの状態でもスケッチ線表示は継続する。
-    postResponse({ kind: "evaluated", requestId, mesh: emptyMeshData(), faceInfo: [], sketchPlanes, referenceEdges });
+    postResponse({
+      kind: "evaluated",
+      requestId,
+      mesh: emptyMeshData(),
+      faceInfo: [],
+      edgeInfo: [],
+      sketchPlanes,
+      referenceEdges,
+    });
     return;
   }
   try {
     const mesh = toMeshData(shape, quality);
     const faceInfo = computeFaceInfo(shape);
+    const edgeInfo = computeEdgeInfo(shape);
     postResponse(
-      { kind: "evaluated", requestId, mesh, faceInfo, sketchPlanes, referenceEdges },
+      { kind: "evaluated", requestId, mesh, faceInfo, edgeInfo, sketchPlanes, referenceEdges },
       [mesh.positions.buffer, mesh.normals.buffer, mesh.indices.buffer, mesh.edges.buffer],
     );
   } finally {

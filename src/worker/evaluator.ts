@@ -14,9 +14,18 @@
 //     弾く粗い事前バリデーションを行う)
 //   - extrude: operation "newBody"(最初の1回のみ) / "cut"(既存ボディが必要) / "add"(既存ボディが必要。fuseで結合)
 //   - direction: -1 は逆向き押し出し(面参照の場合は面法線の逆方向)
-import { Plane, draw, drawCircle, drawRectangle, type Drawing, type Face, type Shape3D } from "replicad";
+import { Plane, draw, drawCircle, drawRectangle, type Drawing, type Edge, type Face, type Shape3D } from "replicad";
 
-import type { CadDocument, FeatureId, PolygonCorner, SketchEntity, SketchFeature, SketchSegment } from "../model/types";
+import type {
+  CadDocument,
+  FeatureId,
+  Fillet3DFeature,
+  FilletEdgeRef,
+  PolygonCorner,
+  SketchEntity,
+  SketchFeature,
+  SketchSegment,
+} from "../model/types";
 import { validatePolygonCorners } from "../model/validation";
 import { effectivePolygonBulges } from "../sketch/bulge";
 import { classifySketchEntities } from "../sketch/containment";
@@ -64,6 +73,14 @@ const FACE_NORMAL_COS_TOLERANCE = 0.999;
 const FACE_DISTANCE_TOLERANCE_RATIO = 0.5;
 /** ボディ端面参照エッジ(Phase 22): 端点がスケッチ平面上に載っているとみなす平面距離許容(mm)。 */
 const REFERENCE_EDGE_PLANE_TOLERANCE = 1e-4;
+/**
+ * 3Dフィレット/面取り(Phase 25a)のエッジ幾何マッチング(resolveFilletEdges)で使う許容値。
+ * 中点距離はバウンディングボックス対角長に対する比率(面マッチングより厳しめ。エッジは面より
+ * 密集しているため誤マッチを避ける)、方向は始点→終点ベクトルのなす角のcos(符号は無視するため
+ * abs()を取って比較する。0.999 ≈ 約2.6度以内)。
+ */
+const EDGE_DISTANCE_TOLERANCE_RATIO = 0.1;
+const EDGE_DIRECTION_COS_TOLERANCE = 0.999;
 
 function subtract(a: Tuple3, b: Tuple3): Tuple3 {
   return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -418,6 +435,104 @@ function resolveFaceGeometry(
 }
 
 /**
+ * bodyの現在のエッジ群から、fillet3dフィーチャーが選択時に記録したエッジスナップショット
+ * (targets)を再解決する(Phase 25a)。
+ * 1. 第一候補: edge.hashCode(選択時点のedgeId)が完全一致する、未使用のエッジ。
+ * 2. フォールバック: 中点距離が最も近く(バウンディングボックス対角長の
+ *    EDGE_DISTANCE_TOLERANCE_RATIO以内)、始点→終点方向がほぼ一致(cos>EDGE_DIRECTION_COS_TOLERANCE、
+ *    符号は無視)する、未使用のエッジ。
+ * 3. どちらも失敗した場合はエラーを投げる(呼び出し側でallEdgesを解放してから投げる)。
+ *
+ * 戻り値のmatched(targetsと同じ順序・長さ)とallEdges(bodyの全エッジ、delete()の責務は
+ * 呼び出し側)は同じEdgeインスタンスを共有する(matchedはallEdgesの部分集合の参照)。
+ * 使用replicad API: Shape.edges / Edge.hashCode / Edge.startPoint / Edge.endPoint /
+ * Edge.pointAt(0.5) / Shape.boundingBox。
+ */
+function resolveFilletEdges(
+  body: Shape3D,
+  targets: FilletEdgeRef[],
+): { matched: Edge[]; allEdges: Edge[] } {
+  const allEdges = body.edges;
+  const used = new Set<number>();
+
+  const bbox = body.boundingBox;
+  const diag = Math.sqrt(bbox.width ** 2 + bbox.height ** 2 + bbox.depth ** 2);
+  bbox.delete();
+  const maxDist = diag * EDGE_DISTANCE_TOLERANCE_RATIO;
+
+  const matched: Edge[] = [];
+  for (const target of targets) {
+    let matchIndex = -1;
+
+    for (let i = 0; i < allEdges.length; i += 1) {
+      if (used.has(i)) continue;
+      if (allEdges[i].hashCode === target.edgeId) {
+        matchIndex = i;
+        break;
+      }
+    }
+
+    if (matchIndex === -1) {
+      const targetDir = normalize(subtract(target.p2, target.p1));
+      let bestDist = Infinity;
+      for (let i = 0; i < allEdges.length; i += 1) {
+        if (used.has(i)) continue;
+        const edge = allEdges[i];
+        const midVec = edge.pointAt(0.5);
+        const mid = midVec.toTuple();
+        midVec.delete();
+        const dist = distance(mid, target.midpoint);
+        if (dist > maxDist || dist >= bestDist) continue;
+        const startVec = edge.startPoint;
+        const endVec = edge.endPoint;
+        const start = startVec.toTuple();
+        const end = endVec.toTuple();
+        startVec.delete();
+        endVec.delete();
+        const dir = normalize(subtract(end, start));
+        const cosAngle = Math.abs(dot(dir, targetDir));
+        if (cosAngle < EDGE_DIRECTION_COS_TOLERANCE) continue;
+        bestDist = dist;
+        matchIndex = i;
+      }
+    }
+
+    if (matchIndex === -1) {
+      allEdges.forEach((e) => e.delete());
+      throw new Error("フィレット/面取りの対象エッジを特定できませんでした。フィーチャーを作り直してください");
+    }
+    used.add(matchIndex);
+    matched.push(allEdges[matchIndex]);
+  }
+
+  return { matched, allEdges };
+}
+
+/**
+ * fillet3dフィーチャーを現在のボディに適用し、新しいボディを返す(古いボディはこの関数内でdelete()する)。
+ * replicadの Shape3D#fillet()/#chamfer() は第2引数に「EdgeFinderを受け取り、絞り込んだ
+ * EdgeFinderを返す関数」を渡すことで対象エッジを絞り込める。ここでは EdgeFinder#inList()
+ * (「渡したEdge配列とisSame()なエッジのみを残す」フィルタ)にresolveFilletEdges()で
+ * 幾何マッチングしたエッジをそのまま渡す(カスタム述語が要るケースではないため、汎用の
+ * EdgeFinder#when()は使わずinList()で十分)。半径過大等でOCCTが構築に失敗した場合はfillet()/
+ * chamfer()がそのままErrorをthrowし、呼び出し元のevaluateDocument()のtry/catchで
+ * featureId付きエラーに変換される。
+ */
+function applyFillet3D(body: Shape3D, feature: Fillet3DFeature): Shape3D {
+  const { matched, allEdges } = resolveFilletEdges(body, feature.edges);
+  try {
+    const newBody =
+      feature.kind === "fillet"
+        ? body.fillet(feature.size, (finder) => finder.inList(matched))
+        : body.chamfer(feature.size, (finder) => finder.inList(matched));
+    body.delete();
+    return newBody;
+  } finally {
+    allEdges.forEach((e) => e.delete());
+  }
+}
+
+/**
  * 面の法線から、決定的なxDir(未正規化)を求める。
  * xDir は 法線とグローバルZの外積(normal × Z)。ほぼ平行(Z軸自体を向く面)な場合はグローバルXにフォールバックする。
  * buildFacePlane() と facePlaneBasis() の両方がこの関数を使うことで、
@@ -599,6 +714,15 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
         }
         validateSketchPolygonCorners(feature);
         sketches.set(feature.id, feature);
+        continue;
+      }
+
+      if (feature.type === "fillet3d") {
+        if (!body) {
+          throw new Error("フィレット/面取りの対象となるボディがありません");
+        }
+        body = applyFillet3D(body, feature);
+        snapshots.set(feature.id, body.clone());
         continue;
       }
 

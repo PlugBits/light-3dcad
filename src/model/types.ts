@@ -228,8 +228,37 @@ export interface ExtrudeFeature {
   operation: "newBody" | "cut" | "add";
 }
 
+/**
+ * 3Dエッジ選択で選んだ1本のエッジのスナップショット(Phase 25a)。edgeIdは選択時点の
+ * B-Rep面ID同様の一時ID(replicadのedge.hashCode)で、再評価のたびに変わりうるため
+ * 第一候補としてのみ使う。midpoint/p1/p2(いずれもワールド座標、mm)は幾何マッチングの
+ * フォールバック(中点距離最近傍+方向一致)に使う(src/worker/evaluator.tsのresolveFilletEdges参照)。
+ */
+export interface FilletEdgeRef {
+  edgeId: number;
+  midpoint: [number, number, number];
+  p1: [number, number, number];
+  p2: [number, number, number];
+}
+
+/**
+ * 3Dフィレット/面取りフィーチャー(Phase 25a)。直前までのボディの指定エッジ群に
+ * replicadのShape3D#fillet()/#chamfer()を適用する。edgesは選択時点のスナップショット配列
+ * (1つ以上必須)。再評価のたびにsrc/worker/evaluator.tsのresolveFilletEdges()が現在ボディの
+ * エッジから幾何マッチングして解決し直す(マッチできなければfeatureId付きエラーになる。
+ * v1ではエッジ再選択UIを持たないため、作り直しが必要)。
+ */
+export interface Fillet3DFeature {
+  type: "fillet3d";
+  id: FeatureId;
+  name: string;
+  kind: "fillet" | "chamfer";
+  size: number;
+  edges: FilletEdgeRef[];
+}
+
 /** フィーチャー(履歴列の1要素)。 */
-export type Feature = SketchFeature | ExtrudeFeature;
+export type Feature = SketchFeature | ExtrudeFeature | Fillet3DFeature;
 
 /**
  * CADドキュメント全体。features は順序付き(=編集履歴)。

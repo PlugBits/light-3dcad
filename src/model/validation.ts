@@ -375,6 +375,13 @@ export function validateFeature(feature: Feature, allFeatures: readonly Feature[
     } else if (referenced.type !== "sketch") {
       errors.push({ featureId: feature.id, message: `参照先(${feature.sketchId})はスケッチではありません` });
     }
+  } else if (feature.type === "fillet3d") {
+    if (!isPositiveFiniteNumber(feature.size)) {
+      errors.push({ featureId: feature.id, message: "フィレット/面取りのサイズは正の数である必要があります" });
+    }
+    if (feature.edges.length === 0) {
+      errors.push({ featureId: feature.id, message: "フィレット/面取りの対象エッジが選択されていません" });
+    }
   }
 
   return errors;

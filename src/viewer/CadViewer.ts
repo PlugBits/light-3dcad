@@ -1,8 +1,8 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
-import type { FeatureId, LineRef, PointRef, SketchEntity, SketchSegment } from "../model/types";
-import type { FaceGroup, FaceInfo, MeshData, ReferenceEdgeLine } from "../protocol/messages";
+import type { FeatureId, FilletEdgeRef, LineRef, PointRef, SketchEntity, SketchSegment } from "../model/types";
+import type { EdgeGroup, EdgeInfo, FaceGroup, FaceInfo, MeshData, ReferenceEdgeLine } from "../protocol/messages";
 import { bulgeArcPoints, bulgeFromThreePoints, DEFAULT_BULGE_SEGMENTS } from "../sketch/bulge";
 import { findEntityDimensionHit, type EntityDimensionHit } from "../sketch/entityDimensionPick";
 import type { Segment as DimensionLineSegment } from "./dimensionGraphics";
@@ -44,6 +44,12 @@ const HIGHLIGHT_COLOR = 0xffd54f;
 const HOVER_COLOR = 0x9fd8ff;
 /** エッジ線の色(濃いグレー〜黒)。 */
 const EDGE_COLOR = 0x0a0a0a;
+/** 3Dエッジ選択(Phase 25a)のホバー強調色(水色)。 */
+const EDGE_HOVER_COLOR = 0x40c4ff;
+/** 3Dエッジ選択(Phase 25a)の選択済み強調色(オレンジ、SKETCH_SELECTED_COLORと同系)。 */
+const EDGE_SELECTED_COLOR = 0xff9800;
+/** 3Dエッジ選択(Phase 25a)ヒット判定のスクリーン距離許容(px)。 */
+const EDGE_PICK_TOLERANCE_PX = 8;
 
 /** 基準平面(Phase 13)の一辺(mm)。ボディが存在しない空ドキュメント状態で表示する。 */
 const REFERENCE_PLANE_SIZE = 60;
@@ -89,6 +95,8 @@ const SELECTED_SKETCH_RENDER_ORDER = 999;
  * 寸法線が図形線に隠れないようにする(描画モードのフィードバックよりは奥でよい)。
  */
 const DIMENSION_LINE_RENDER_ORDER = SELECTED_SKETCH_RENDER_ORDER + 1;
+/** 3Dエッジ選択(Phase 25a)のホバー/選択ハイライト線のrenderOrder。ソリッド・通常エッジ線より常に手前。 */
+const EDGE_HIGHLIGHT_RENDER_ORDER = SELECTED_SKETCH_RENDER_ORDER + 1;
 /** 実測寸法(entities由来)の線色(グレー系)。 */
 const DIMENSION_MEASURED_COLOR = 0x9e9e9e;
 /** 拘束由来の寸法の線色(白系)。 */
@@ -230,6 +238,22 @@ export interface TrimToolCallbacks {
    * 正本は持たないため)。
    */
   onTrimClick: (targetId: string, clickPoint: [number, number], isEntity: boolean) => void;
+  /** Escapeキーまたはcancel呼び出しで終了したときに呼ばれる。 */
+  onCancel: () => void;
+}
+
+/**
+ * 3Dエッジ選択ツール(Phase 25a、フィレット/面取りフィーチャーのエッジ選択)の開始/終了時、
+ * および選択エッジ集合が変わるたびに呼ばれるコールバック。スケッチ平面に依存しない
+ * (ボディ自体のB-Repエッジを対象にするため、他のツールと違いbasisを取らない)。
+ */
+export interface EdgeSelectToolCallbacks {
+  /**
+   * クリックでエッジがトグル(選択/解除)されるたびに呼ばれる。edgesは現在の選択集合全体
+   * (トグル後、順序は選択した順)。CadViewerはドキュメントの正本を持たないため、
+   * フィーチャー追加自体はApp側の責務とする(「適用」ボタン押下時にこの配列をそのまま使う想定)。
+   */
+  onSelectionChange: (edges: FilletEdgeRef[]) => void;
   /** Escapeキーまたはcancel呼び出しで終了したときに呼ばれる。 */
   onCancel: () => void;
 }
@@ -663,6 +687,10 @@ export class CadViewer {
   private edgesMesh: THREE.LineSegments | null = null;
   private faceGroups: FaceGroup[] = [];
   private faceInfo: FaceInfo[] = [];
+  /** 3Dエッジ選択(Phase 25a)のヒット判定用データ。setMesh()のたびに更新する。 */
+  private edgeGroups: EdgeGroup[] = [];
+  private edgePositions: Float32Array = new Float32Array(0);
+  private edgeInfoList: EdgeInfo[] = [];
   private materials: THREE.MeshStandardMaterial[] = [];
   private selectedGroupIndex: number | null = null;
   /** マウスオーバー中の面のmaterialIndex(選択面とは独立、選択時は選択色を優先)。 */
@@ -867,6 +895,19 @@ export class CadViewer {
   /** 1つ目としてクリック済みの対象(未選択はnull)。2つ目のクリックでonPairPickedを呼ぶ。 */
   private constraintPendingTarget: ConstraintPickTarget | null = null;
 
+  /**
+   * 3Dエッジ選択ツール(Phase 25a、フィレット/面取りフィーチャーのエッジ選択)。他のツールと違い
+   * スケッチ平面(basis)を取らず、現在表示中のボディ(edgeGroups/edgePositions/edgeInfoList)を
+   * 直接対象にする。
+   */
+  private edgeSelectActive = false;
+  private edgeSelectCallbacks: EdgeSelectToolCallbacks | null = null;
+  private hoveredEdgeId: number | null = null;
+  /** 選択順を保つため配列で持つ(Setだと挿入順は保証されるがedgeIdだけになるため、表示ハイライトはSet併用)。 */
+  private selectedEdgeIds: number[] = [];
+  private edgeHoverMesh: THREE.LineSegments | null = null;
+  private edgeSelectMesh: THREE.LineSegments | null = null;
+
   constructor(
     container: HTMLElement,
     onFaceSelect?: (face: FaceInfo | null) => void,
@@ -1062,6 +1103,12 @@ export class CadViewer {
       }
       return;
     }
+    if (this.edgeSelectActive) {
+      if (event.key === "Escape") {
+        this.cancelEdgeSelectTool();
+      }
+      return;
+    }
     if (this.drawingActive) {
       const isChainShape = this.drawingShape === "polygon" || this.drawingShape === "segment";
       if (event.key === "Escape") {
@@ -1164,6 +1211,10 @@ export class CadViewer {
     }
     if (this.constraintToolActive) {
       this.handleConstraintToolClick(event);
+      return;
+    }
+    if (this.edgeSelectActive) {
+      this.handleEdgeSelectClick(event);
       return;
     }
     if (this.drawingActive) {
@@ -1291,6 +1342,10 @@ export class CadViewer {
     if (this.constraintToolActive) {
       this.clearDrawingPreview();
     }
+    if (this.edgeSelectActive) {
+      this.hoveredEdgeId = null;
+      this.rebuildEdgeHoverHighlight();
+    }
   };
 
   /** 基準平面(XY/XZ/YZ)を60x60mmの半透明四角として構築する(Phase 13)。色分け: XY=青系/XZ=緑系/YZ=赤系。 */
@@ -1397,7 +1452,18 @@ export class CadViewer {
     });
   }
 
-  setMesh(data: MeshData, faceInfo: FaceInfo[] = []) {
+  setMesh(data: MeshData, faceInfo: FaceInfo[] = [], edgeInfo: EdgeInfo[] = []) {
+    // ボディの再構築でB-RepエッジID(edgeId)の対応が変わりうるため、3Dエッジ選択の
+    // ヒット判定データ・ホバー/選択ハイライトは常にここでリセットする(選択中フィーチャーの
+    // 再評価はApp側でツールをキャンセルしてから行う運用のため、実際にアクティブなまま
+    // 到達することは通常無いが、念のため状態を破棄する)。
+    this.edgeGroups = data.edgeGroups ?? [];
+    this.edgePositions = data.edges;
+    this.edgeInfoList = edgeInfo;
+    this.selectedEdgeIds = [];
+    this.hoveredEdgeId = null;
+    this.clearEdgeHighlights();
+
     if (this.mesh) {
       this.scene.remove(this.mesh);
       this.mesh.geometry.dispose();
@@ -1730,6 +1796,7 @@ export class CadViewer {
     this.cancelCornerTool();
     this.cancelDimensionTool();
     this.cancelConstraintTool();
+    this.cancelEdgeSelectTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.drawingActive = true;
@@ -1856,6 +1923,7 @@ export class CadViewer {
     this.cancelTrimTool();
     this.cancelDimensionTool();
     this.cancelConstraintTool();
+    this.cancelEdgeSelectTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.cornerToolActive = true;
@@ -1977,6 +2045,7 @@ export class CadViewer {
     this.cancelCornerTool();
     this.cancelDimensionTool();
     this.cancelConstraintTool();
+    this.cancelEdgeSelectTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.trimActive = true;
@@ -2125,6 +2194,7 @@ export class CadViewer {
     this.cancelPolygonDrawing();
     this.cancelCornerTool();
     this.cancelTrimTool();
+    this.cancelEdgeSelectTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.dimensionToolActive = true;
@@ -3008,6 +3078,10 @@ export class CadViewer {
       this.handleConstraintToolMouseMove(event);
       return;
     }
+    if (this.edgeSelectActive) {
+      this.handleEdgeSelectMouseMove(event);
+      return;
+    }
     // フィレット/面取りツール中は面ホバーハイライトも描画プレビューも不要(クリックのみで完結する)。
     if (this.cornerToolActive) return;
     if (!this.drawingActive || !this.drawingBasis) {
@@ -3459,6 +3533,7 @@ export class CadViewer {
     this.cancelTrimTool();
     this.cancelCornerTool();
     this.cancelDimensionTool();
+    this.cancelEdgeSelectTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.constraintToolActive = true;
@@ -3580,6 +3655,182 @@ export class CadViewer {
     this.drawDimensionHoverPreview(basis, pickHit.highlightPoints);
   }
 
+  // ---- 3Dエッジ選択ツール(Phase 25a、フィレット/面取りフィーチャー) ----
+  // スケッチ平面を使わず、setMesh()で受け取ったボディのB-Repエッジ(edgeGroups/edgePositions:
+  // 三角形メッシュと同時にreplicadのmeshEdges()から転送されるポリライン近似、edgeInfoList:
+  // B-Repから直接算出した中点・両端点)を対象にする。ヒット判定はスクリーン空間での
+  // 点↔線分距離(EDGE_PICK_TOLERANCE_PX以内)で行う(3Dレイキャストではなく、細い線を
+  // クリックしやすくするため)。
+
+  /**
+   * 3Dエッジ選択ツールを開始する。以後、ボディのエッジ付近でのマウス移動はホバー強調
+   * (水色・太め)、クリックは選択トグル(複数選択可、選択色はオレンジ)として扱われ、
+   * 選択集合が変わるたびに`callbacks.onSelectionChange`が呼ばれる。Escapeまたは
+   * cancelEdgeSelectTool()で終了する(callbacks.onCancelが呼ばれる)。
+   */
+  startEdgeSelectTool(callbacks: EdgeSelectToolCallbacks) {
+    this.cancelEdgeSelectTool();
+    this.cancelPolygonDrawing();
+    this.cancelTrimTool();
+    this.cancelCornerTool();
+    this.cancelDimensionTool();
+    this.cancelConstraintTool();
+    this.clearSelection();
+    this.setHoverGroup(null);
+    this.edgeSelectActive = true;
+    this.edgeSelectCallbacks = callbacks;
+    this.selectedEdgeIds = [];
+    this.hoveredEdgeId = null;
+    this.clearEdgeHighlights();
+  }
+
+  isEdgeSelectToolActive(): boolean {
+    return this.edgeSelectActive;
+  }
+
+  /** 現在の選択エッジ集合を、選択した順のFilletEdgeRef配列として返す(edgeInfoListに無いIDは無視)。 */
+  getSelectedEdgeRefs(): FilletEdgeRef[] {
+    const byId = new Map(this.edgeInfoList.map((info) => [info.edgeId, info]));
+    const refs: FilletEdgeRef[] = [];
+    for (const id of this.selectedEdgeIds) {
+      const info = byId.get(id);
+      if (info) refs.push({ edgeId: info.edgeId, midpoint: info.midpoint, p1: info.p1, p2: info.p2 });
+    }
+    return refs;
+  }
+
+  /** 3Dエッジ選択ツールを終了する(onCancelが呼ばれる)。非アクティブなら何もしない。 */
+  cancelEdgeSelectTool() {
+    if (!this.edgeSelectActive) return;
+    const callbacks = this.edgeSelectCallbacks;
+    this.edgeSelectActive = false;
+    this.edgeSelectCallbacks = null;
+    this.selectedEdgeIds = [];
+    this.hoveredEdgeId = null;
+    this.clearEdgeHighlights();
+    callbacks?.onCancel();
+  }
+
+  /** キャンバス内スクリーン座標(px、左上原点)から最も近いB-Repエッジを探す。許容距離超は null。 */
+  private pickEdgeAt(event: MouseEvent): number | null {
+    if (this.edgeGroups.length === 0 || this.edgePositions.length === 0) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const mx = event.clientX - rect.left;
+    const my = event.clientY - rect.top;
+
+    let bestEdgeId: number | null = null;
+    let bestDist = EDGE_PICK_TOLERANCE_PX;
+    for (const group of this.edgeGroups) {
+      for (let i = group.start; i + 1 < group.start + group.count; i += 2) {
+        const a = this.projectEdgePoint(i);
+        const b = this.projectEdgePoint(i + 1);
+        if (!a || !b) continue;
+        const dist = distPointToRawSegment([mx, my], [a.x, a.y], [b.x, b.y]);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestEdgeId = group.edgeId;
+        }
+      }
+    }
+    return bestEdgeId;
+  }
+
+  /** edgePositions中の点インデックス(3成分/点)をスクリーン座標(px)へ投影する。 */
+  private projectEdgePoint(pointIndex: number): { x: number; y: number } | null {
+    const offset = pointIndex * 3;
+    if (offset + 2 >= this.edgePositions.length) return null;
+    return this.projectPoint([this.edgePositions[offset], this.edgePositions[offset + 1], this.edgePositions[offset + 2]]);
+  }
+
+  private handleEdgeSelectMouseMove(event: MouseEvent) {
+    const edgeId = this.pickEdgeAt(event);
+    this.renderer.domElement.style.cursor = edgeId != null ? "pointer" : "";
+    if (edgeId === this.hoveredEdgeId) return;
+    this.hoveredEdgeId = edgeId;
+    this.rebuildEdgeHoverHighlight();
+  }
+
+  private handleEdgeSelectClick(event: MouseEvent) {
+    const edgeId = this.pickEdgeAt(event);
+    if (edgeId == null) return;
+    const index = this.selectedEdgeIds.indexOf(edgeId);
+    if (index === -1) {
+      this.selectedEdgeIds = [...this.selectedEdgeIds, edgeId];
+    } else {
+      this.selectedEdgeIds = this.selectedEdgeIds.filter((id) => id !== edgeId);
+    }
+    this.rebuildEdgeSelectHighlight();
+    this.rebuildEdgeHoverHighlight();
+    this.edgeSelectCallbacks?.onSelectionChange(this.getSelectedEdgeRefs());
+  }
+
+  /** edgeGroups/edgePositionsから、指定エッジID集合すべての折れ線頂点を集めたBufferGeometryを作る(空ならnull)。 */
+  private buildEdgeLineGeometry(edgeIds: ReadonlySet<number>): THREE.BufferGeometry | null {
+    if (edgeIds.size === 0) return null;
+    const points: number[] = [];
+    for (const group of this.edgeGroups) {
+      if (!edgeIds.has(group.edgeId)) continue;
+      for (let i = 0; i < group.count; i += 1) {
+        const offset = (group.start + i) * 3;
+        points.push(this.edgePositions[offset], this.edgePositions[offset + 1], this.edgePositions[offset + 2]);
+      }
+    }
+    if (points.length === 0) return null;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(points), 3));
+    return geometry;
+  }
+
+  private rebuildEdgeHoverHighlight() {
+    if (this.edgeHoverMesh) {
+      this.scene.remove(this.edgeHoverMesh);
+      this.edgeHoverMesh.geometry.dispose();
+      (this.edgeHoverMesh.material as THREE.Material).dispose();
+      this.edgeHoverMesh = null;
+    }
+    // 選択済みのエッジは選択色を優先し、ホバー色は重ねない。
+    if (this.hoveredEdgeId == null || this.selectedEdgeIds.includes(this.hoveredEdgeId)) return;
+    const geometry = this.buildEdgeLineGeometry(new Set([this.hoveredEdgeId]));
+    if (!geometry) return;
+    const material = new THREE.LineBasicMaterial({ color: EDGE_HOVER_COLOR, linewidth: 3, depthTest: false });
+    const line = new THREE.LineSegments(geometry, material);
+    line.renderOrder = EDGE_HIGHLIGHT_RENDER_ORDER;
+    this.edgeHoverMesh = line;
+    this.scene.add(line);
+  }
+
+  private rebuildEdgeSelectHighlight() {
+    if (this.edgeSelectMesh) {
+      this.scene.remove(this.edgeSelectMesh);
+      this.edgeSelectMesh.geometry.dispose();
+      (this.edgeSelectMesh.material as THREE.Material).dispose();
+      this.edgeSelectMesh = null;
+    }
+    const geometry = this.buildEdgeLineGeometry(new Set(this.selectedEdgeIds));
+    if (!geometry) return;
+    const material = new THREE.LineBasicMaterial({ color: EDGE_SELECTED_COLOR, linewidth: 3, depthTest: false });
+    const line = new THREE.LineSegments(geometry, material);
+    line.renderOrder = EDGE_HIGHLIGHT_RENDER_ORDER;
+    this.edgeSelectMesh = line;
+    this.scene.add(line);
+  }
+
+  private clearEdgeHighlights() {
+    this.renderer.domElement.style.cursor = "";
+    if (this.edgeHoverMesh) {
+      this.scene.remove(this.edgeHoverMesh);
+      this.edgeHoverMesh.geometry.dispose();
+      (this.edgeHoverMesh.material as THREE.Material).dispose();
+      this.edgeHoverMesh = null;
+    }
+    if (this.edgeSelectMesh) {
+      this.scene.remove(this.edgeSelectMesh);
+      this.edgeSelectMesh.geometry.dispose();
+      (this.edgeSelectMesh.material as THREE.Material).dispose();
+      this.edgeSelectMesh = null;
+    }
+  }
+
   /**
    * 現在のカメラでワールド座標をcanvas内ピクセル座標(左上が原点)に投影する。
    * E2Eの`window.__cadViewerDebug.projectPoint`と、描画モードの始点近傍判定の両方から使う。
@@ -3619,6 +3870,7 @@ export class CadViewer {
       this.edgesMesh.geometry.dispose();
       (this.edgesMesh.material as THREE.Material).dispose();
     }
+    this.clearEdgeHighlights();
     this.clearSketchOverlay();
     this.clearDimensionOverlay();
     this.clearDrawingPreview();

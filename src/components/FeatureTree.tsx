@@ -9,17 +9,25 @@ import { effectiveFeatureCount } from "../model/document";
 const ICONS: Record<Feature["type"], string> = {
   sketch: "▢", // □
   extrude: "⬆", // ⬆
+  fillet3d: "◠", // 3Dフィレット/面取り(Phase 25a)
 };
 
 const TYPE_LABEL: Record<Feature["type"], string> = {
   sketch: "スケッチ",
   extrude: "押し出し",
+  fillet3d: "フィレット/面取り",
 };
 
-/** フィーチャーツリーに表示する種別ラベル。face参照スケッチは「面上スケッチ」と表示する。 */
+/**
+ * フィーチャーツリーに表示する種別ラベル。face参照スケッチは「面上スケッチ」、
+ * fillet3dはkindに応じて「フィレット」/「面取り」と表示する(Phase 25a)。
+ */
 function typeLabel(feature: Feature): string {
   if (feature.type === "sketch" && feature.plane.kind === "face") {
     return "面上スケッチ";
+  }
+  if (feature.type === "fillet3d") {
+    return feature.kind === "fillet" ? "フィレット" : "面取り";
   }
   return TYPE_LABEL[feature.type];
 }

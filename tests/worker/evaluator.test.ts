@@ -11,6 +11,7 @@ import type { OpenCascadeInstance } from "replicad-opencascadejs/src/replicad_si
 
 import {
   addExtrudeFeature,
+  addFillet3DFeature,
   addSketchFeature,
   createArcSegment,
   createCircleEntity,
@@ -24,7 +25,7 @@ import {
   resolveEvaluationDocument,
   setRollbackIndex,
 } from "../../src/model";
-import type { SketchSegment } from "../../src/model/types";
+import type { FilletEdgeRef, SketchSegment } from "../../src/model/types";
 import { evaluateDocument } from "../../src/worker/evaluator";
 
 const initOpenCascade = initOpenCascadeUntyped as unknown as (moduleOverrides: {
@@ -89,6 +90,34 @@ function findTopFace(shape: Shape3D): { faceId: number; center: [number, number,
   }
   if (!found) throw new Error("テストセットアップ失敗: 上面が見つかりません");
   return found;
+}
+
+/**
+ * テスト用(Phase 25a): 3Dフィレット/面取りフィーチャーのedges用スナップショットを作る。
+ * shapeの直線エッジ(geomType==="LINE")のうち、両端点のZ座標がtopZにほぼ一致するもの
+ * (=箱の上面を構成する4辺)をすべて集めてFilletEdgeRef配列として返す。
+ */
+function topFaceEdgeSnapshots(shape: Shape3D, topZ: number): FilletEdgeRef[] {
+  const result: FilletEdgeRef[] = [];
+  const edges = shape.edges;
+  for (const edge of edges) {
+    if (edge.geomType === "LINE") {
+      const startVec = edge.startPoint;
+      const endVec = edge.endPoint;
+      const midVec = edge.pointAt(0.5);
+      const p1 = startVec.toTuple();
+      const p2 = endVec.toTuple();
+      const midpoint = midVec.toTuple();
+      startVec.delete();
+      endVec.delete();
+      midVec.delete();
+      if (Math.abs(p1[2] - topZ) < 1e-6 && Math.abs(p2[2] - topZ) < 1e-6) {
+        result.push({ edgeId: edge.hashCode, p1, p2, midpoint });
+      }
+    }
+    edge.delete();
+  }
+  return result;
 }
 
 const SKIP_NOTE = "Node上でのOpenCascade WASM初期化に失敗したためスキップ";
@@ -1620,5 +1649,168 @@ describe("ロールバックバー(rollbackIndex、Phase 25): evaluateDocument�
     const restoredVolume = measureVolume(restoredResult.shape);
     restoredResult.shape.delete();
     expect(restoredVolume).toBeCloseTo(fullVolume, 3);
+  });
+});
+
+describe("evaluateDocument (WASM統合): 3Dフィレット/面取り(Phase 25a)", () => {
+  /** 60x40x20の箱(XY原点中心、Z方向に押し出し)のドキュメントを作る共通セットアップ。 */
+  function buildBoxDoc(distance = 20) {
+    const empty = createEmptyDocument();
+    const rect = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+    });
+    const { doc, feature: extrude } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance,
+      direction: 1,
+      operation: "newBody",
+    });
+    return { doc, extrude };
+  }
+
+  it("箱の上面1エッジにフィレット5を適用すると体積が減る", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: boxDoc } = buildBoxDoc(20);
+    const boxResult = evaluateDocument(boxDoc);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const boxVolume = measureVolume(boxResult.shape);
+    expect(boxVolume).toBeCloseTo(60 * 40 * 20, 3);
+    const topEdges = topFaceEdgeSnapshots(boxResult.shape, 20);
+    boxResult.shape.delete();
+    expect(topEdges.length).toBe(4);
+
+    const { doc } = addFillet3DFeature(boxDoc, {
+      name: "フィレット1",
+      kind: "fillet",
+      size: 5,
+      edges: [topEdges[0]],
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const volume = measureVolume(result.shape);
+    result.shape.delete();
+    expect(volume).toBeLessThan(boxVolume);
+  });
+
+  it("箱の上面4エッジ全周にフィレット5を適用すると、1エッジのみより体積が減る", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: boxDoc } = buildBoxDoc(20);
+    const boxResult = evaluateDocument(boxDoc);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const boxVolume = measureVolume(boxResult.shape);
+    const topEdges = topFaceEdgeSnapshots(boxResult.shape, 20);
+    boxResult.shape.delete();
+    expect(topEdges.length).toBe(4);
+
+    const { doc: singleDoc } = addFillet3DFeature(boxDoc, {
+      name: "フィレット1",
+      kind: "fillet",
+      size: 5,
+      edges: [topEdges[0]],
+    });
+    const singleResult = evaluateDocument(singleDoc);
+    expect(singleResult.ok).toBe(true);
+    if (!singleResult.ok) return;
+    const singleVolume = measureVolume(singleResult.shape);
+    singleResult.shape.delete();
+
+    const { doc: allDoc } = addFillet3DFeature(boxDoc, {
+      name: "フィレット1",
+      kind: "fillet",
+      size: 5,
+      edges: topEdges,
+    });
+    const allResult = evaluateDocument(allDoc);
+    expect(allResult.ok).toBe(true);
+    if (!allResult.ok) return;
+    const allVolume = measureVolume(allResult.shape);
+    allResult.shape.delete();
+
+    expect(allVolume).toBeLessThan(singleVolume);
+    expect(singleVolume).toBeLessThan(boxVolume);
+  });
+
+  it("箱の上面1エッジに面取り5を適用すると体積が減る", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: boxDoc } = buildBoxDoc(20);
+    const boxResult = evaluateDocument(boxDoc);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const boxVolume = measureVolume(boxResult.shape);
+    const topEdges = topFaceEdgeSnapshots(boxResult.shape, 20);
+    boxResult.shape.delete();
+
+    const { doc } = addFillet3DFeature(boxDoc, {
+      name: "面取り1",
+      kind: "chamfer",
+      size: 5,
+      edges: [topEdges[0]],
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const volume = measureVolume(result.shape);
+    result.shape.delete();
+    expect(volume).toBeLessThan(boxVolume);
+  });
+
+  it("寸法変更(押し出し距離)後も幾何マッチングで同じ稜線にフィレットが追従する", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: boxDoc, extrude } = buildBoxDoc(20);
+    const boxResult = evaluateDocument(boxDoc);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const topEdges = topFaceEdgeSnapshots(boxResult.shape, 20);
+    boxResult.shape.delete();
+
+    const { doc: filletDoc } = addFillet3DFeature(boxDoc, {
+      name: "フィレット1",
+      kind: "fillet",
+      size: 3,
+      edges: [topEdges[0]],
+    });
+
+    // 高さを20→22へ小さく変更する(edgeIdはOCCTの再構築で変わりうるため、
+    // resolveFilletEdgesのフォールバック[中点距離最近傍+方向一致]で再解決される想定)。
+    const changedDoc = patchExtrudeFeature(filletDoc, extrude.id, { distance: 22 });
+    const result = evaluateDocument(changedDoc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const volume = measureVolume(result.shape);
+    result.shape.delete();
+    // フィレットが追従して適用されていれば、無加工の60x40x22の箱より体積が小さいはず。
+    expect(volume).toBeLessThan(60 * 40 * 22);
+  });
+
+  it("過大な半径を指定するとfeatureId付きのエラーになる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: boxDoc } = buildBoxDoc(20);
+    const boxResult = evaluateDocument(boxDoc);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const topEdges = topFaceEdgeSnapshots(boxResult.shape, 20);
+    boxResult.shape.delete();
+
+    const { doc, feature } = addFillet3DFeature(boxDoc, {
+      name: "フィレット1",
+      kind: "fillet",
+      size: 1000,
+      edges: [topEdges[0]],
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.featureId).toBe(feature.id);
+    expect(result.message.length).toBeGreaterThan(0);
   });
 });

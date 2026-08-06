@@ -4,6 +4,7 @@ import { DimensionOverlay } from "../components/DimensionOverlay";
 import { DimensionToolPopup } from "../components/DimensionToolPopup";
 import { ExtrudeEditor } from "../components/ExtrudeEditor";
 import { FeatureTree } from "../components/FeatureTree";
+import { Fillet3DEditor } from "../components/Fillet3DEditor";
 import { SketchEditor } from "../components/SketchEditor";
 import { downloadStl } from "../export/downloadStl";
 import {
@@ -28,7 +29,7 @@ import {
   createRectangleEntity,
   createSlotEntity,
 } from "../model/entity";
-import type { PolygonCorner } from "../model/types";
+import type { FilletEdgeRef, PolygonCorner } from "../model/types";
 import {
   addConcentricConstraint,
   addPerpendicularConstraint,
@@ -57,7 +58,12 @@ import { rectangleFromCorners, regularPolygonVertices } from "../sketch/shapeFro
 import { trimSegmentAtPoint } from "../sketch/trim";
 import { updateDocumentWithConflictRollback } from "../state/constraintUpdate";
 import { useCadStore } from "../state/store";
-import { CadViewer, type ConstraintPickTarget, type DimensionToolTarget, type SketchOverlayEntry } from "../viewer/CadViewer";
+import {
+  CadViewer,
+  type ConstraintPickTarget,
+  type DimensionToolTarget,
+  type SketchOverlayEntry,
+} from "../viewer/CadViewer";
 import type { StandardView } from "../viewer/standardViews";
 
 /**
@@ -98,6 +104,7 @@ export default function App() {
   const status = useCadStore((s) => s.status);
   const mesh = useCadStore((s) => s.mesh);
   const faceInfo = useCadStore((s) => s.faceInfo);
+  const edgeInfo = useCadStore((s) => s.edgeInfo);
   const sketchPlanes = useCadStore((s) => s.sketchPlanes);
   const referenceEdges = useCadStore((s) => s.referenceEdges);
   const errorMessage = useCadStore((s) => s.errorMessage);
@@ -115,6 +122,7 @@ export default function App() {
   const addExtrude = useCadStore((s) => s.addExtrude);
   const addFaceSketch = useCadStore((s) => s.addFaceSketch);
   const removeFeature = useCadStore((s) => s.removeFeature);
+  const addFillet3D = useCadStore((s) => s.addFillet3D);
   const exportStl = useCadStore((s) => s.exportStl);
   const setShowSketches = useCadStore((s) => s.setShowSketches);
   const updateDocument = useCadStore((s) => s.updateDocument);
@@ -134,6 +142,13 @@ export default function App() {
   const [newSketchPlane, setNewSketchPlane] = useState<"XY" | "XZ" | "YZ">("XY");
   // 現在アクティブなフィレット/面取りツール(未選択はnull、Phase 18)。
   const [cornerTool, setCornerTool] = useState<"fillet" | "chamfer" | null>(null);
+  // 現在アクティブな3Dフィレット/面取りツール(未選択はnull、Phase 25a)。cornerTool(2Dスケッチの
+  // 頂点フィレット/面取り)とは別物で、ボディのB-Repエッジを直接選択する。
+  const [edgeTool, setEdgeTool] = useState<"fillet" | "chamfer" | null>(null);
+  // 3Dフィレット/面取りツールで適用するサイズ(mm、デフォルト5)。
+  const [edgeToolSize, setEdgeToolSize] = useState(5);
+  // 3Dフィレット/面取りツールで現在選択中のエッジ集合(選択した順、Phase 25a)。
+  const [edgeSelection, setEdgeSelection] = useState<FilletEdgeRef[]>([]);
   // トリムツール(未選択はfalse、Phase 19b)。
   const [trimTool, setTrimTool] = useState(false);
   // 寸法ツール(未選択はfalse、Phase 20b)。segmentをクリックしてlength/radius/distance拘束を作成する。
@@ -223,9 +238,9 @@ export default function App() {
   // ここでのnullチェックは「まだ一度もWorkerから応答が無い」ケースのみを意味する)。
   useEffect(() => {
     if (mesh) {
-      viewerRef.current?.setMesh(mesh, faceInfo);
+      viewerRef.current?.setMesh(mesh, faceInfo, edgeInfo);
     }
-  }, [mesh, faceInfo]);
+  }, [mesh, faceInfo, edgeInfo]);
 
   // ドキュメントに1つもフィーチャーが無い(=空ドキュメント、ボディなし)間だけ基準平面3枚を表示する。
   // 基準平面クリック等で最初のスケッチが作られた時点(features.length>0)で非表示になる(Phase 13)。
@@ -374,6 +389,8 @@ export default function App() {
     selectedFeature?.type === "sketch"
       ? sketchPlanes.find((p) => p.sketchId === selectedFeature.id)
       : undefined;
+  // 3Dフィレット/面取りツールのボタン有効化条件(押し出しフィーチャーによりボディが存在するか)。
+  const hasBody = mesh !== null && mesh.positions.length > 0;
 
   const busy = status === "initializing" || status === "evaluating";
   // WASM初期化は"evaluate"リクエストの中で行われる(initialize()参照)ため、
@@ -566,7 +583,7 @@ export default function App() {
 
   /** 指定ツールのボタンをdisabledにすべきか(他のツールが実行中、または対象スケッチ平面が未確定)。 */
   function isToolDisabled(tool: Exclude<DrawingTool, null>): boolean {
-    if (cornerTool || trimTool || dimensionTool || constraintTool) return true;
+    if (cornerTool || trimTool || dimensionTool || constraintTool || edgeTool) return true;
     if (activeTool) return activeTool !== tool;
     return !selectedSketchPlane;
   }
@@ -621,9 +638,40 @@ export default function App() {
 
   /** フィレット/面取りボタンをdisabledにすべきか(他の作図ツール実行中、または対象スケッチ平面が未確定)。 */
   function isCornerToolDisabled(kind: "fillet" | "chamfer"): boolean {
-    if (activeTool || trimTool || dimensionTool || constraintTool) return true;
+    if (activeTool || trimTool || dimensionTool || constraintTool || edgeTool) return true;
     if (cornerTool) return cornerTool !== kind;
     return !selectedSketchPlane;
+  }
+
+  /**
+   * 3Dフィレット/面取りツール(Phase 25a)を開始する。スケッチではなくボディのB-Repエッジを
+   * 直接クリックして選択する(スケッチ選択・スケッチ平面は不要、ボディが存在すればよい)。
+   * 選択集合が変わるたびにonSelectionChangeが呼ばれ、edgeSelection(React state、「適用」ボタンの
+   * 有効化・件数表示に使う)を更新する。実際のフィーチャー追加は「適用」ボタン
+   * (handleApplyEdgeTool)が行う。
+   */
+  function handleStartEdgeTool(kind: "fillet" | "chamfer") {
+    if (!viewerRef.current || !hasBody) return;
+    viewerRef.current.startEdgeSelectTool({
+      onSelectionChange: (edges) => setEdgeSelection(edges),
+      onCancel: () => {
+        setEdgeTool(null);
+        setEdgeSelection([]);
+      },
+    });
+    setEdgeSelection([]);
+    setEdgeTool(kind);
+  }
+
+  function handleCancelEdgeTool() {
+    viewerRef.current?.cancelEdgeSelectTool();
+  }
+
+  /** 「適用」ボタン: 現在の選択エッジ集合・サイズでfillet3dフィーチャーを追加し、ツールを終了する。 */
+  function handleApplyEdgeTool() {
+    if (!edgeTool || edgeSelection.length === 0) return;
+    addFillet3D(edgeTool, edgeToolSize, edgeSelection);
+    viewerRef.current?.cancelEdgeSelectTool();
   }
 
   /**
@@ -667,7 +715,7 @@ export default function App() {
 
   /** トリムボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isTrimToolDisabled(): boolean {
-    if (activeTool || cornerTool || dimensionTool || constraintTool) return true;
+    if (activeTool || cornerTool || dimensionTool || constraintTool || edgeTool) return true;
     if (trimTool) return false;
     return !selectedSketchPlane;
   }
@@ -817,7 +865,7 @@ export default function App() {
 
   /** 寸法ツールボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isDimensionToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || constraintTool) return true;
+    if (activeTool || cornerTool || trimTool || constraintTool || edgeTool) return true;
     if (dimensionTool) return false;
     return !selectedSketchPlane;
   }
@@ -955,9 +1003,16 @@ export default function App() {
 
   /** 拘束ツールボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isConstraintToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || edgeTool) return true;
     if (constraintTool) return false;
     return !selectedSketchPlane;
+  }
+
+  /** 3Dフィレット/面取りボタンをdisabledにすべきか(他のツール実行中、またはボディが無い)。 */
+  function isEdgeToolDisabled(kind: "fillet" | "chamfer"): boolean {
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool) return true;
+    if (edgeTool) return edgeTool !== kind;
+    return !hasBody;
   }
 
   /**
@@ -1269,6 +1324,54 @@ export default function App() {
             >
               {constraintTool ? "拘束キャンセル(Esc)" : "拘束"}
             </button>
+            <button
+              type="button"
+              data-testid="btn-edge-fillet"
+              className={edgeTool === "fillet" ? "toolbar-btn-active" : undefined}
+              onClick={edgeTool === "fillet" ? handleCancelEdgeTool : () => handleStartEdgeTool("fillet")}
+              disabled={isEdgeToolDisabled("fillet")}
+              title="ボディのエッジをクリックして選択し、3Dフィレット(丸め)を適用します(Escで終了)"
+            >
+              {edgeTool === "fillet" ? "3Dフィレットキャンセル(Esc)" : "3Dフィレット"}
+            </button>
+            <button
+              type="button"
+              data-testid="btn-edge-chamfer"
+              className={edgeTool === "chamfer" ? "toolbar-btn-active" : undefined}
+              onClick={edgeTool === "chamfer" ? handleCancelEdgeTool : () => handleStartEdgeTool("chamfer")}
+              disabled={isEdgeToolDisabled("chamfer")}
+              title="ボディのエッジをクリックして選択し、3D面取りを適用します(Escで終了)"
+            >
+              {edgeTool === "chamfer" ? "3D面取りキャンセル(Esc)" : "3D面取り"}
+            </button>
+            {edgeTool && (
+              <>
+                <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }} title="適用するサイズ(mm)">
+                  <input
+                    type="number"
+                    data-testid="edge-tool-size"
+                    value={edgeToolSize}
+                    min={0.1}
+                    step="any"
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      if (Number.isFinite(v) && v > 0) setEdgeToolSize(v);
+                    }}
+                    style={{ width: 50 }}
+                  />
+                  mm
+                </label>
+                <button
+                  type="button"
+                  data-testid="btn-edge-tool-apply"
+                  onClick={handleApplyEdgeTool}
+                  disabled={edgeSelection.length === 0}
+                  title="選択したエッジにフィレット/面取りを適用してフィーチャーを追加します"
+                >
+                  適用({edgeSelection.length})
+                </button>
+              </>
+            )}
           </div>
 
           <div className="toolbar-group" style={{ marginLeft: "auto" }}>
@@ -1350,6 +1453,11 @@ export default function App() {
               style={{ fontSize: 11, fontWeight: "bold", color: "#ffb74d" }}
             >
               {constraintPendingLabel}
+            </span>
+          )}
+          {edgeTool && (
+            <span data-testid="edge-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
+              エッジをクリックして選択(複数可)、サイズを入力して「適用」
             </span>
           )}
           <span data-testid="status-text" style={{ fontSize: 12, opacity: 0.8, marginLeft: "auto" }}>
@@ -1434,6 +1542,7 @@ export default function App() {
             <div style={{ borderTop: "1px solid #444", paddingTop: 12 }}>
               {selectedFeature.type === "sketch" && <SketchEditor sketch={selectedFeature} />}
               {selectedFeature.type === "extrude" && <ExtrudeEditor extrude={selectedFeature} doc={doc} />}
+              {selectedFeature.type === "fillet3d" && <Fillet3DEditor fillet={selectedFeature} />}
             </div>
           )}
 
@@ -1451,7 +1560,7 @@ export default function App() {
               viewerRef={viewerRef}
               // 寸法ツール中(dimensionTool)は既存の寸法線・ラベルを隠さない(むしろ見えているべき、
               // UI改善対応)。線分/矩形/円等の作図ツール・フィレット/面取り・トリムの間は従来通り隠す。
-              visible={showSketches && !activeTool && !cornerTool && !trimTool && !constraintTool}
+              visible={showSketches && !activeTool && !cornerTool && !trimTool && !constraintTool && !edgeTool}
               onConflictRollback={showTransientMessage}
             />
           )}

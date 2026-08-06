@@ -7,6 +7,8 @@ import type {
   ExtrudeFeature,
   Feature,
   FeatureId,
+  Fillet3DFeature,
+  FilletEdgeRef,
   PlaneRef,
   PolygonCorner,
   SketchConstraint,
@@ -68,6 +70,31 @@ export function addExtrudeFeature(
     operation: params.operation,
   };
   return { doc: addFeature(doc, feature), feature };
+}
+
+/** 新しい3Dフィレット/面取りフィーチャーを作成して末尾に追加する。IDは自動生成される(Phase 25a)。 */
+export function addFillet3DFeature(
+  doc: CadDocument,
+  params: { name: string; kind: "fillet" | "chamfer"; size: number; edges: FilletEdgeRef[] },
+): { doc: CadDocument; feature: Fillet3DFeature } {
+  const feature: Fillet3DFeature = {
+    type: "fillet3d",
+    id: generateId("fillet3d"),
+    name: params.name,
+    kind: params.kind,
+    size: params.size,
+    edges: params.edges,
+  };
+  return { doc: addFeature(doc, feature), feature };
+}
+
+/** fillet3d フィーチャーの一部フィールド(name, size)を更新する。edges/kindは再選択が必要なため対象外(v1)。 */
+export function patchFillet3DFeature(
+  doc: CadDocument,
+  featureId: FeatureId,
+  patch: Partial<Pick<Fillet3DFeature, "name" | "size">>,
+): CadDocument {
+  return updateFeature<Fillet3DFeature>(doc, featureId, (f) => ({ ...f, ...patch }));
 }
 
 /** 指定IDのフィーチャーを探す。見つからなければ undefined。 */

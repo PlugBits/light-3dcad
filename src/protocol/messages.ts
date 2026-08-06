@@ -27,6 +27,12 @@ export interface MeshData {
   faceGroups: FaceGroup[];
   /** エッジの線分頂点列(2点で1線分、3成分/点)。省略可(未計算時は空配列)。 */
   edges: Float32Array;
+  /**
+   * edges配列中の各B-Repエッジの範囲(Phase 25a、3Dエッジ選択のスクリーン距離ヒット判定用)。
+   * start/countは頂点単位(edges配列は3成分/点なのでfloatオフセットは*3)。
+   * replicadのShape.meshEdges()がそのまま返す形をprotocol型として転送する。
+   */
+  edgeGroups: EdgeGroup[];
 }
 
 export interface FaceGroup {
@@ -44,6 +50,26 @@ export interface FaceInfo {
   center: [number, number, number];
   normal: [number, number, number];
   isPlanar: boolean;
+}
+
+/**
+ * 各B-Repエッジの付加情報(Phase 25a、3Dフィレット/面取りのエッジ選択に使う)。
+ * edgeIdはreplicadのedge.hashCode(meshEdges()のedgeGroups.edgeIdと同じ値、再評価で変わりうる
+ * 一時的なID)。midpoint/p1/p2はワールド座標(mm)で、edge.pointAt(0.5)/startPoint/endPointから
+ * 算出する(曲線エッジも含め常に取得できる。円弧の場合pointAt(0.5)は弧長中点に相当)。
+ */
+export interface EdgeInfo {
+  edgeId: number;
+  midpoint: [number, number, number];
+  p1: [number, number, number];
+  p2: [number, number, number];
+}
+
+/** MeshData.edgeGroups の1要素。B-Repエッジ1本に対応するedges配列中の頂点範囲。 */
+export interface EdgeGroup {
+  start: number;
+  count: number;
+  edgeId: number;
 }
 
 /**
@@ -88,6 +114,8 @@ export type WorkerResponse =
       requestId: string;
       mesh: MeshData;
       faceInfo: FaceInfo[];
+      /** 各B-Repエッジの付加情報(Phase 25a)。ボディが無い場合は空配列。 */
+      edgeInfo: EdgeInfo[];
       sketchPlanes: SketchPlaneInfo[];
       referenceEdges: ReferenceEdgeSet[];
     }

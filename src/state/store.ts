@@ -4,6 +4,7 @@ import { create } from "zustand";
 
 import {
   addExtrudeFeature,
+  addFillet3DFeature,
   addSketchFeature,
   createEmptyDocument,
   effectiveFeatureCount,
@@ -13,8 +14,8 @@ import {
   setRollbackIndex as setDocRollbackIndex,
 } from "../model/document";
 import { createRectangleEntity } from "../model/entity";
-import type { CadDocument, ExtrudeFeature, FeatureId, WorldPlaneName } from "../model/types";
-import type { FaceInfo, MeshData, MeshQuality, ReferenceEdgeSet, SketchPlaneInfo, WorkerResponse } from "../protocol/messages";
+import type { CadDocument, ExtrudeFeature, FeatureId, FilletEdgeRef, WorldPlaneName } from "../model/types";
+import type { EdgeInfo, FaceInfo, MeshData, MeshQuality, ReferenceEdgeSet, SketchPlaneInfo, WorkerResponse } from "../protocol/messages";
 import { updateReferenceEdgeSnapshots } from "../sketch/referenceEdgeMatch";
 import { solveDocumentSketches } from "../sketch/solver";
 import { createHistoryState, pushHistory, redoHistory, undoHistory, type HistoryState } from "./history";
@@ -113,6 +114,8 @@ interface CadStoreState {
   status: EvalStatus;
   mesh: MeshData | null;
   faceInfo: FaceInfo[];
+  /** 各B-Repエッジの付加情報(Phase 25a、3Dフィレット/面取りのエッジ選択に使う派生状態)。 */
+  edgeInfo: EdgeInfo[];
   /** 各スケッチの解決済み平面基底(origin/xDir/yDir/normal)。ビューアのスケッチ線描画に使う派生状態。 */
   sketchPlanes: SketchPlaneInfo[];
   /**
@@ -176,6 +179,11 @@ interface CadStoreState {
   addFaceSketch: () => void;
   /** 現在のドキュメントをSTLとしてエクスポートする(exporting/exportErrorはストアで管理)。 */
   exportStl: () => Promise<Blob>;
+  /**
+   * 現在選択中の3Dエッジ群(ビューアのエッジ選択ツールで確定した配列)を対象に、
+   * 3Dフィレット/面取りフィーチャーを追加し、選択状態にする(Phase 25a)。
+   */
+  addFillet3D: (kind: "fillet" | "chamfer", size: number, edges: FilletEdgeRef[]) => void;
 }
 
 function applyEvaluated(
@@ -199,6 +207,7 @@ function applyEvaluated(
       status: "ready",
       mesh: response.mesh,
       faceInfo: response.faceInfo,
+      edgeInfo: response.edgeInfo,
       sketchPlanes: response.sketchPlanes,
       referenceEdges: response.referenceEdges,
       errorMessage: null,
@@ -220,6 +229,7 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   status: "initializing",
   mesh: null,
   faceInfo: [],
+  edgeInfo: [],
   sketchPlanes: [],
   referenceEdges: [],
   errorMessage: null,
@@ -345,6 +355,20 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
       distance: 10,
       direction: 1,
       operation: hasBody ? "add" : "newBody",
+    });
+    get().updateDocument(() => nextDoc);
+    set({ selectedFeatureId: feature.id });
+  },
+
+  addFillet3D: (kind, size, edges) => {
+    if (edges.length === 0) return;
+    const doc = get().doc;
+    const namePrefix = kind === "fillet" ? "フィレット" : "面取り";
+    const { doc: nextDoc, feature } = addFillet3DFeature(doc, {
+      name: nextFeatureName(doc, namePrefix),
+      kind,
+      size,
+      edges,
     });
     get().updateDocument(() => nextDoc);
     set({ selectedFeatureId: feature.id });
