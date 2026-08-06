@@ -1,5 +1,5 @@
 import { generateId } from "./id";
-import type { PolygonCorner, SketchEntity } from "./types";
+import type { PolygonCorner, SketchEntity, SketchSegment } from "./types";
 
 /** ID付きの矩形エンティティを作成する。 */
 export function createRectangleEntity(params: {
@@ -71,4 +71,14 @@ export function createRegularPolygonEntity(params: {
     sides: params.sides,
     ...(params.rotation !== undefined ? { rotation: params.rotation } : {}),
   };
+}
+
+/** ID付きの直線セグメントを作成する(Phase 19a、SketchFeature.segments用)。 */
+export function createLineSegment(params: { p1: [number, number]; p2: [number, number] }): SketchSegment {
+  return { kind: "line", id: generateId("segment"), p1: params.p1, p2: params.p2 };
+}
+
+/** ID付きの円弧セグメントを作成する(Phase 19a、SketchFeature.segments用)。bulgeの定義はsrc/sketch/bulge.tsと同一。 */
+export function createArcSegment(params: { p1: [number, number]; p2: [number, number]; bulge: number }): SketchSegment {
+  return { kind: "arc", id: generateId("segment"), p1: params.p1, p2: params.p2, bulge: params.bulge };
 }

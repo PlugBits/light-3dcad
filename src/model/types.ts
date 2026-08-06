@@ -80,13 +80,36 @@ export type SketchEntity =
       rotation?: number;
     };
 
-/** 2Dスケッチフィーチャー。 */
+/**
+ * スケッチ内の自由な線分・円弧セグメント(Phase 19a)。
+ * entitiesとは独立した「セグメントの集まり」で、閉じている必要はない
+ * (ぶら下がり枝や開いた線が混在してもよい。閉領域検出はsrc/sketch/regions.tsが担う)。
+ * kind:"arc" のときのみ bulge を持つ(定義はsrc/sketch/bulge.tsと同一: bulge = tan(挟角/4)、
+ * 符号は始点p1から終点p2への掃引方向を決める。0/未指定は直線として扱う)。
+ * バリデーション: p1とp2の距離は1e-6mmを超えること(src/model/validation.ts)。
+ */
+export type SketchSegment = {
+  id: string;
+  kind: "line" | "arc";
+  p1: [number, number];
+  p2: [number, number];
+  /** kind:"line" のときは無視される。 */
+  bulge?: number;
+};
+
+/**
+ * 2Dスケッチフィーチャー。
+ * segments(Phase 19a)はentitiesと後方互換のため独立した追加フィールド(省略可)。
+ * 押し出し時、segmentsが存在すればsrc/sketch/regions.tsで閉領域検出を行いDrawing化し、
+ * entities由来のDrawingとfuseする(src/worker/evaluator.ts参照)。
+ */
 export interface SketchFeature {
   type: "sketch";
   id: FeatureId;
   name: string;
   plane: PlaneRef;
   entities: SketchEntity[];
+  segments?: SketchSegment[];
 }
 
 /** 押し出しフィーチャー(新規ボディ作成 or 既存ボディからのカット)。 */

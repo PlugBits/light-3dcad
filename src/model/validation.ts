@@ -1,4 +1,4 @@
-import type { CadDocument, Feature, FeatureId, PolygonCorner, SketchEntity } from "./types";
+import type { CadDocument, Feature, FeatureId, PolygonCorner, SketchEntity, SketchSegment } from "./types";
 
 /** ドキュメント/フィーチャーのバリデーションエラー。featureId が特定できる場合のみ付与する。 */
 export interface ValidationError {
@@ -137,6 +137,33 @@ export function validatePolygonCorners(
   return errors;
 }
 
+/**
+ * セグメント(Phase 19a)のバリデーション。p1・p2は有限であること、距離は
+ * POLYGON_MIN_VERTEX_DISTANCE(1e-6mm)を超えること(=同一点でないこと)。
+ * kind:"arc" の bulge は有限数であること(0は直線扱いになるだけで不正ではない)。
+ */
+function validateSegment(segment: SketchSegment, featureId: FeatureId): ValidationError[] {
+  const errors: ValidationError[] = [];
+  if (
+    !Number.isFinite(segment.p1[0]) ||
+    !Number.isFinite(segment.p1[1]) ||
+    !Number.isFinite(segment.p2[0]) ||
+    !Number.isFinite(segment.p2[1])
+  ) {
+    errors.push({ featureId, message: `セグメント(${segment.id})の座標が不正です` });
+    return errors;
+  }
+  const dx = segment.p1[0] - segment.p2[0];
+  const dy = segment.p1[1] - segment.p2[1];
+  if (Math.sqrt(dx * dx + dy * dy) <= POLYGON_MIN_VERTEX_DISTANCE) {
+    errors.push({ featureId, message: `セグメント(${segment.id})の始点と終点が一致しています` });
+  }
+  if (segment.kind === "arc" && segment.bulge !== undefined && !Number.isFinite(segment.bulge)) {
+    errors.push({ featureId, message: `セグメント(${segment.id})のbulge値が不正です` });
+  }
+  return errors;
+}
+
 /** 単一フィーチャーのバリデーション。extrudeの参照先チェックには doc.features 全体が必要。 */
 export function validateFeature(feature: Feature, allFeatures: readonly Feature[]): ValidationError[] {
   const errors: ValidationError[] = [];
@@ -153,6 +180,9 @@ export function validateFeature(feature: Feature, allFeatures: readonly Feature[
     }
     feature.entities.forEach((entity) => {
       errors.push(...validateEntity(entity, feature.id));
+    });
+    feature.segments?.forEach((segment) => {
+      errors.push(...validateSegment(segment, feature.id));
     });
   } else if (feature.type === "extrude") {
     if (!isPositiveFiniteNumber(feature.distance)) {

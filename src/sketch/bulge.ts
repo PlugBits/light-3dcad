@@ -76,6 +76,32 @@ function sweepThroughPoint(center: Point2, p1: Point2, p2: Point2, via: Point2):
   return deltaCCW - Math.PI * 2;
 }
 
+/** bulgeから換算した円弧の中心・半径・角度範囲(Phase 19a、src/sketch/intersections.ts・regions.tsが再利用)。 */
+export interface ArcGeometry {
+  center: Point2;
+  radius: number;
+  /** p1における角度(atan2、ラジアン)。 */
+  startAngle: number;
+  /** p1からp2までの符号付き掃引角(ラジアン、反時計回りが正)。p2における角度は startAngle+sweep。 */
+  sweep: number;
+}
+
+/**
+ * bulge値(p1→p2の円弧)を中心・半径・角度範囲に変換する(Phase 19a)。
+ * p1・p2・経由点(sagPointForBulge)から circumcircle() で中心・半径を求め、
+ * sweepThroughPoint() で経由点を通る側の符号付き掃引角を求める。
+ * 3点がほぼ一直線上にある場合(円が定まらない)は null を返す(bulgeが実質0に近い場合など)。
+ */
+export function arcGeometryFromBulge(p1: Point2, p2: Point2, bulge: number): ArcGeometry | null {
+  const via = sagPointForBulge(p1, p2, bulge);
+  const circle = circumcircle(p1, via, p2);
+  if (!circle) return null;
+  const { center, radius } = circle;
+  const startAngle = Math.atan2(p1[1] - center[1], p1[0] - center[0]);
+  const sweep = sweepThroughPoint(center, p1, p2, via);
+  return { center, radius, startAngle, sweep };
+}
+
 /**
  * 3点(始点p1・経由点via・終点p2)を通る円弧のbulge値(tan(θ/4))を計算する。
  * 3点がほぼ一直線上にある場合は0(直線)を返す。
