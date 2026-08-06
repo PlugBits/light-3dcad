@@ -10,12 +10,16 @@ const ICONS: Record<Feature["type"], string> = {
   sketch: "▢", // □
   extrude: "⬆", // ⬆
   fillet3d: "◠", // 3Dフィレット/面取り(Phase 25a)
+  shell: "▨", // シェル(中抜き、Phase 25b)
+  revolve: "◍", // 回転体(Phase 25b)
 };
 
 const TYPE_LABEL: Record<Feature["type"], string> = {
   sketch: "スケッチ",
   extrude: "押し出し",
   fillet3d: "フィレット/面取り",
+  shell: "シェル",
+  revolve: "回転体",
 };
 
 /**

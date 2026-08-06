@@ -624,3 +624,14 @@ WorkerのmeshEdges()応答にedgeGroups(既存のlinesと同じ形の折れ線�
 箱上面エッジのホバー/選択強調→フィレット適用(丸まり確認)→ツリーでsize編集→再評価反映→面取り
 1回、をスクリーンショットで確認済み。既知の制限: エッジ再選択UIは無く、寸法変更等でエッジが
 解決できなくなった場合はフィーチャーを削除して作り直す必要がある。
+
+## Phase 25b: シェル(中抜き)+回転体(Revolve)フィーチャー
+
+新設フィーチャー`shell`(replicadの`Shape3D#shell(thickness, finder)`、正の厚みで内側へ肉厚を残す規約。
+対象面はfillet3dと同じhashCode優先+平面/法線/中心マッチングの`resolveShellFaces()`で再解決)と
+`revolve`(スケッチ平面のワールド基底xDir/yDirを回転軸に使い`SketchInterface#revolve(axisDir, {origin,
+angle})`を適用。newBody/add/cutの3操作は押し出しと共通のヘルパーに統合)を追加した。ツールバーに
+「シェル」(3Dエッジ選択と同型の複数面選択ツール、CadViewerにFaceSelectTool新設)・「回転体」ボタンを
+追加し、ShellEditor/RevolveEditorで肉厚・軸・角度・操作を編集できる。Vitest348件(evaluator.ts統合7件
+[シェル3件・回転体4件]が新規)。ブラウザ実機で箱上面開口シェル(中抜き表示)→スケッチ矩形の回転体360°
+(リング形状)→角度180°(半リング)確認済み。既知の制限: 面/軸再選択UIは無く、削除して作り直す運用。

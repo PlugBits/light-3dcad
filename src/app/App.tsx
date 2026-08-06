@@ -5,6 +5,8 @@ import { DimensionToolPopup } from "../components/DimensionToolPopup";
 import { ExtrudeEditor } from "../components/ExtrudeEditor";
 import { FeatureTree } from "../components/FeatureTree";
 import { Fillet3DEditor } from "../components/Fillet3DEditor";
+import { RevolveEditor } from "../components/RevolveEditor";
+import { ShellEditor } from "../components/ShellEditor";
 import { SketchEditor } from "../components/SketchEditor";
 import { downloadStl } from "../export/downloadStl";
 import {
@@ -29,7 +31,7 @@ import {
   createRectangleEntity,
   createSlotEntity,
 } from "../model/entity";
-import type { FilletEdgeRef, PolygonCorner } from "../model/types";
+import type { FilletEdgeRef, PolygonCorner, ShellFaceRef } from "../model/types";
 import {
   addConcentricConstraint,
   addPerpendicularConstraint,
@@ -120,9 +122,11 @@ export default function App() {
   const selectFace = useCadStore((s) => s.selectFace);
   const addSketch = useCadStore((s) => s.addSketch);
   const addExtrude = useCadStore((s) => s.addExtrude);
+  const addRevolve = useCadStore((s) => s.addRevolve);
   const addFaceSketch = useCadStore((s) => s.addFaceSketch);
   const removeFeature = useCadStore((s) => s.removeFeature);
   const addFillet3D = useCadStore((s) => s.addFillet3D);
+  const addShell3D = useCadStore((s) => s.addShell3D);
   const exportStl = useCadStore((s) => s.exportStl);
   const setShowSketches = useCadStore((s) => s.setShowSketches);
   const updateDocument = useCadStore((s) => s.updateDocument);
@@ -149,6 +153,12 @@ export default function App() {
   const [edgeToolSize, setEdgeToolSize] = useState(5);
   // 3Dフィレット/面取りツールで現在選択中のエッジ集合(選択した順、Phase 25a)。
   const [edgeSelection, setEdgeSelection] = useState<FilletEdgeRef[]>([]);
+  // 現在アクティブなシェルツール(未選択はfalse、Phase 25b)。ボディのB-Rep面を直接選択する。
+  const [shellTool, setShellTool] = useState(false);
+  // シェルツールで適用する肉厚(mm、デフォルト2)。
+  const [shellToolThickness, setShellToolThickness] = useState(2);
+  // シェルツールで現在選択中の面集合(選択した順、Phase 25b)。
+  const [shellSelection, setShellSelection] = useState<ShellFaceRef[]>([]);
   // トリムツール(未選択はfalse、Phase 19b)。
   const [trimTool, setTrimTool] = useState(false);
   // 寸法ツール(未選択はfalse、Phase 20b)。segmentをクリックしてlength/radius/distance拘束を作成する。
@@ -420,6 +430,13 @@ export default function App() {
     addExtrude(target.id);
   }
 
+  function handleAddRevolve() {
+    if (sketches.length === 0) return;
+    // デフォルトは最後のスケッチ。作成後の編集パネルで軸・角度・操作を変更できる。
+    const target = sketches[sketches.length - 1];
+    addRevolve(target.id);
+  }
+
   async function handleDownloadStl() {
     try {
       const blob = await exportStl();
@@ -583,7 +600,7 @@ export default function App() {
 
   /** 指定ツールのボタンをdisabledにすべきか(他のツールが実行中、または対象スケッチ平面が未確定)。 */
   function isToolDisabled(tool: Exclude<DrawingTool, null>): boolean {
-    if (cornerTool || trimTool || dimensionTool || constraintTool || edgeTool) return true;
+    if (cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool) return true;
     if (activeTool) return activeTool !== tool;
     return !selectedSketchPlane;
   }
@@ -638,7 +655,7 @@ export default function App() {
 
   /** フィレット/面取りボタンをdisabledにすべきか(他の作図ツール実行中、または対象スケッチ平面が未確定)。 */
   function isCornerToolDisabled(kind: "fillet" | "chamfer"): boolean {
-    if (activeTool || trimTool || dimensionTool || constraintTool || edgeTool) return true;
+    if (activeTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool) return true;
     if (cornerTool) return cornerTool !== kind;
     return !selectedSketchPlane;
   }
@@ -672,6 +689,42 @@ export default function App() {
     if (!edgeTool || edgeSelection.length === 0) return;
     addFillet3D(edgeTool, edgeToolSize, edgeSelection);
     viewerRef.current?.cancelEdgeSelectTool();
+  }
+
+  /**
+   * シェルツール(Phase 25b)を開始する。3Dフィレット/面取りツールと同じく、ボディのB-Rep面を
+   * 直接クリックして選択する(スケッチ選択・スケッチ平面は不要、ボディが存在すればよい)。
+   * 実際のフィーチャー追加は「適用」ボタン(handleApplyShellTool)が行う。
+   */
+  function handleStartShellTool() {
+    if (!viewerRef.current || !hasBody) return;
+    viewerRef.current.startFaceSelectTool({
+      onSelectionChange: (faces) => setShellSelection(faces),
+      onCancel: () => {
+        setShellTool(false);
+        setShellSelection([]);
+      },
+    });
+    setShellSelection([]);
+    setShellTool(true);
+  }
+
+  function handleCancelShellTool() {
+    viewerRef.current?.cancelFaceSelectTool();
+  }
+
+  /** 「適用」ボタン: 現在の選択面集合・肉厚でshellフィーチャーを追加し、ツールを終了する。 */
+  function handleApplyShellTool() {
+    if (!shellTool || shellSelection.length === 0) return;
+    addShell3D(shellToolThickness, shellSelection);
+    viewerRef.current?.cancelFaceSelectTool();
+  }
+
+  /** シェルボタンをdisabledにすべきか(他のツール実行中、またはボディが存在しない)。 */
+  function isShellToolDisabled(): boolean {
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool) return true;
+    if (shellTool) return false;
+    return !hasBody;
   }
 
   /**
@@ -715,7 +768,7 @@ export default function App() {
 
   /** トリムボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isTrimToolDisabled(): boolean {
-    if (activeTool || cornerTool || dimensionTool || constraintTool || edgeTool) return true;
+    if (activeTool || cornerTool || dimensionTool || constraintTool || edgeTool || shellTool) return true;
     if (trimTool) return false;
     return !selectedSketchPlane;
   }
@@ -865,7 +918,7 @@ export default function App() {
 
   /** 寸法ツールボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isDimensionToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || constraintTool || edgeTool) return true;
+    if (activeTool || cornerTool || trimTool || constraintTool || edgeTool || shellTool) return true;
     if (dimensionTool) return false;
     return !selectedSketchPlane;
   }
@@ -1003,14 +1056,14 @@ export default function App() {
 
   /** 拘束ツールボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isConstraintToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || edgeTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || edgeTool || shellTool) return true;
     if (constraintTool) return false;
     return !selectedSketchPlane;
   }
 
   /** 3Dフィレット/面取りボタンをdisabledにすべきか(他のツール実行中、またはボディが無い)。 */
   function isEdgeToolDisabled(kind: "fillet" | "chamfer"): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || shellTool) return true;
     if (edgeTool) return edgeTool !== kind;
     return !hasBody;
   }
@@ -1106,6 +1159,15 @@ export default function App() {
               title="選択中(なければ最後)のスケッチを押し出します"
             >
               押し出し
+            </button>
+            <button
+              type="button"
+              data-testid="btn-add-revolve"
+              onClick={handleAddRevolve}
+              disabled={sketches.length === 0}
+              title="選択中(なければ最後)のスケッチをスケッチ原点を通るX/Y軸周りに回転させます"
+            >
+              回転体
             </button>
             <button
               type="button"
@@ -1372,6 +1434,44 @@ export default function App() {
                 </button>
               </>
             )}
+            <button
+              type="button"
+              data-testid="btn-shell"
+              className={shellTool ? "toolbar-btn-active" : undefined}
+              onClick={shellTool ? handleCancelShellTool : handleStartShellTool}
+              disabled={isShellToolDisabled()}
+              title="ボディの面をクリックして選択し(複数可)、シェル(中抜き)を適用します(Escで終了)"
+            >
+              {shellTool ? "シェルキャンセル(Esc)" : "シェル"}
+            </button>
+            {shellTool && (
+              <>
+                <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }} title="適用する肉厚(mm)">
+                  <input
+                    type="number"
+                    data-testid="shell-tool-thickness"
+                    value={shellToolThickness}
+                    min={0.1}
+                    step="any"
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      if (Number.isFinite(v) && v > 0) setShellToolThickness(v);
+                    }}
+                    style={{ width: 50 }}
+                  />
+                  mm
+                </label>
+                <button
+                  type="button"
+                  data-testid="btn-shell-tool-apply"
+                  onClick={handleApplyShellTool}
+                  disabled={shellSelection.length === 0}
+                  title="選択した面を開口してシェルフィーチャーを追加します"
+                >
+                  適用({shellSelection.length})
+                </button>
+              </>
+            )}
           </div>
 
           <div className="toolbar-group" style={{ marginLeft: "auto" }}>
@@ -1543,6 +1643,8 @@ export default function App() {
               {selectedFeature.type === "sketch" && <SketchEditor sketch={selectedFeature} />}
               {selectedFeature.type === "extrude" && <ExtrudeEditor extrude={selectedFeature} doc={doc} />}
               {selectedFeature.type === "fillet3d" && <Fillet3DEditor fillet={selectedFeature} />}
+              {selectedFeature.type === "shell" && <ShellEditor shell={selectedFeature} />}
+              {selectedFeature.type === "revolve" && <RevolveEditor revolve={selectedFeature} doc={doc} />}
             </div>
           )}
 

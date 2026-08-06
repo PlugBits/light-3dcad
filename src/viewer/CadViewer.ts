@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
-import type { FeatureId, FilletEdgeRef, LineRef, PointRef, SketchEntity, SketchSegment } from "../model/types";
+import type { FeatureId, FilletEdgeRef, LineRef, PointRef, ShellFaceRef, SketchEntity, SketchSegment } from "../model/types";
 import type { EdgeGroup, EdgeInfo, FaceGroup, FaceInfo, MeshData, ReferenceEdgeLine } from "../protocol/messages";
 import { bulgeArcPoints, bulgeFromThreePoints, DEFAULT_BULGE_SEGMENTS } from "../sketch/bulge";
 import { findEntityDimensionHit, type EntityDimensionHit } from "../sketch/entityDimensionPick";
@@ -50,6 +50,9 @@ const EDGE_HOVER_COLOR = 0x40c4ff;
 const EDGE_SELECTED_COLOR = 0xff9800;
 /** 3Dエッジ選択(Phase 25a)ヒット判定のスクリーン距離許容(px)。 */
 const EDGE_PICK_TOLERANCE_PX = 8;
+/** 3D面選択(Phase 25b、シェルの開口面選択)の選択済み強調色。3Dエッジ選択と同系色(オレンジ)にして
+ * 通常の単一面選択(スケッチ平面化用、HIGHLIGHT_COLOR=黄)と見た目で区別する。 */
+const FACE_SELECT_COLOR = 0xff9800;
 
 /** 基準平面(Phase 13)の一辺(mm)。ボディが存在しない空ドキュメント状態で表示する。 */
 const REFERENCE_PLANE_SIZE = 60;
@@ -254,6 +257,21 @@ export interface EdgeSelectToolCallbacks {
    * フィーチャー追加自体はApp側の責務とする(「適用」ボタン押下時にこの配列をそのまま使う想定)。
    */
   onSelectionChange: (edges: FilletEdgeRef[]) => void;
+  /** Escapeキーまたはcancel呼び出しで終了したときに呼ばれる。 */
+  onCancel: () => void;
+}
+
+/**
+ * 3D面選択ツール(Phase 25b、シェルフィーチャーの開口面選択)の開始/終了時、および選択面集合が
+ * 変わるたびに呼ばれるコールバック。EdgeSelectToolCallbacksと同じ設計(スケッチ平面に依存しない、
+ * 複数選択可、フィーチャー追加自体はApp側の責務)。
+ */
+export interface FaceSelectToolCallbacks {
+  /**
+   * クリックで面がトグル(選択/解除)されるたびに呼ばれる。facesは現在の選択集合全体
+   * (トグル後、選択した順)。
+   */
+  onSelectionChange: (faces: ShellFaceRef[]) => void;
   /** Escapeキーまたはcancel呼び出しで終了したときに呼ばれる。 */
   onCancel: () => void;
 }
@@ -908,6 +926,23 @@ export class CadViewer {
   private edgeHoverMesh: THREE.LineSegments | null = null;
   private edgeSelectMesh: THREE.LineSegments | null = null;
 
+  /**
+   * 3D面選択ツール(Phase 25b、シェルフィーチャーの開口面選択)。edgeSelectActiveと違い、
+   * 既存のfaceGroups/materials(通常の単一面選択と同じデータ)をそのまま使い、選択済み面は
+   * materials[groupIndex]の色をFACE_SELECT_COLORに差し替えることでハイライトする
+   * (エッジのような専用ラインジオメトリは不要)。
+   */
+  private faceSelectActive = false;
+  private faceSelectCallbacks: FaceSelectToolCallbacks | null = null;
+  /** 選択順を保つため配列で持つ(selectedEdgeIdsと同じ設計)。値はfaceId(materialIndexではない)。 */
+  private selectedFaceIds: number[] = [];
+  /**
+   * 面選択ツール中のホバー中materialIndex。通常の単一面選択が使うhoveredGroupIndexとは別フィールドに
+   * する(handleMouseLeave等で無条件にsetHoverGroup(null)が呼ばれても、選択済み面のオレンジ表示が
+   * 誤って消されないようにするため)。
+   */
+  private hoveredFaceSelectIndex: number | null = null;
+
   constructor(
     container: HTMLElement,
     onFaceSelect?: (face: FaceInfo | null) => void,
@@ -1109,6 +1144,12 @@ export class CadViewer {
       }
       return;
     }
+    if (this.faceSelectActive) {
+      if (event.key === "Escape") {
+        this.cancelFaceSelectTool();
+      }
+      return;
+    }
     if (this.drawingActive) {
       const isChainShape = this.drawingShape === "polygon" || this.drawingShape === "segment";
       if (event.key === "Escape") {
@@ -1215,6 +1256,10 @@ export class CadViewer {
     }
     if (this.edgeSelectActive) {
       this.handleEdgeSelectClick(event);
+      return;
+    }
+    if (this.faceSelectActive) {
+      this.handleFaceSelectClick(event);
       return;
     }
     if (this.drawingActive) {
@@ -1346,6 +1391,13 @@ export class CadViewer {
       this.hoveredEdgeId = null;
       this.rebuildEdgeHoverHighlight();
     }
+    if (this.faceSelectActive && this.hoveredFaceSelectIndex != null) {
+      const faceId = this.faceGroups[this.hoveredFaceSelectIndex]?.faceId;
+      if (faceId == null || !this.selectedFaceIds.includes(faceId)) {
+        this.materials[this.hoveredFaceSelectIndex]?.color.setHex(BASE_COLOR);
+      }
+      this.hoveredFaceSelectIndex = null;
+    }
   };
 
   /** 基準平面(XY/XZ/YZ)を60x60mmの半透明四角として構築する(Phase 13)。色分け: XY=青系/XZ=緑系/YZ=赤系。 */
@@ -1463,6 +1515,10 @@ export class CadViewer {
     this.selectedEdgeIds = [];
     this.hoveredEdgeId = null;
     this.clearEdgeHighlights();
+    // 3D面選択(Phase 25b)も同じ理由(B-Rep面IDの対応が変わりうる)でリセットする。
+    // materials自体はこの直後に全面新規生成される(BASE_COLORから開始)ため、色の復元は不要。
+    this.selectedFaceIds = [];
+    this.hoveredFaceSelectIndex = null;
 
     if (this.mesh) {
       this.scene.remove(this.mesh);
@@ -1797,6 +1853,7 @@ export class CadViewer {
     this.cancelDimensionTool();
     this.cancelConstraintTool();
     this.cancelEdgeSelectTool();
+    this.cancelFaceSelectTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.drawingActive = true;
@@ -1924,6 +1981,7 @@ export class CadViewer {
     this.cancelDimensionTool();
     this.cancelConstraintTool();
     this.cancelEdgeSelectTool();
+    this.cancelFaceSelectTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.cornerToolActive = true;
@@ -2046,6 +2104,7 @@ export class CadViewer {
     this.cancelDimensionTool();
     this.cancelConstraintTool();
     this.cancelEdgeSelectTool();
+    this.cancelFaceSelectTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.trimActive = true;
@@ -2195,6 +2254,7 @@ export class CadViewer {
     this.cancelCornerTool();
     this.cancelTrimTool();
     this.cancelEdgeSelectTool();
+    this.cancelFaceSelectTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.dimensionToolActive = true;
@@ -3082,6 +3142,10 @@ export class CadViewer {
       this.handleEdgeSelectMouseMove(event);
       return;
     }
+    if (this.faceSelectActive) {
+      this.handleFaceSelectMouseMove(event);
+      return;
+    }
     // フィレット/面取りツール中は面ホバーハイライトも描画プレビューも不要(クリックのみで完結する)。
     if (this.cornerToolActive) return;
     if (!this.drawingActive || !this.drawingBasis) {
@@ -3534,6 +3598,7 @@ export class CadViewer {
     this.cancelCornerTool();
     this.cancelDimensionTool();
     this.cancelEdgeSelectTool();
+    this.cancelFaceSelectTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.constraintToolActive = true;
@@ -3675,6 +3740,7 @@ export class CadViewer {
     this.cancelCornerTool();
     this.cancelDimensionTool();
     this.cancelConstraintTool();
+    this.cancelFaceSelectTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.edgeSelectActive = true;
@@ -3828,6 +3894,120 @@ export class CadViewer {
       this.edgeSelectMesh.geometry.dispose();
       (this.edgeSelectMesh.material as THREE.Material).dispose();
       this.edgeSelectMesh = null;
+    }
+  }
+
+  // ---- 3D面選択ツール(Phase 25b、シェルフィーチャーの開口面選択) ----
+  // 通常の単一面選択(this.selectedGroupIndex)とは独立して動く、複数選択可の面選択モード。
+  // ヒット判定・ハイライトは既存のfaceGroups/materials(setMesh()で構築済み)をそのまま使う
+  // (3Dエッジ選択のような専用ラインジオメトリは不要。materials[groupIndex]の色を直接差し替える)。
+
+  /**
+   * 3D面選択ツールを開始する。以後、ボディの面上でのマウス移動はホバー強調(水色)、クリックは
+   * 選択トグル(複数選択可、選択色はオレンジ)として扱われ、選択集合が変わるたびに
+   * `callbacks.onSelectionChange`が呼ばれる。Escapeまたはcancel呼び出しで終了する
+   * (callbacks.onCancelが呼ばれる)。
+   */
+  startFaceSelectTool(callbacks: FaceSelectToolCallbacks) {
+    this.cancelFaceSelectTool();
+    this.cancelPolygonDrawing();
+    this.cancelTrimTool();
+    this.cancelCornerTool();
+    this.cancelDimensionTool();
+    this.cancelConstraintTool();
+    this.cancelEdgeSelectTool();
+    this.clearSelection();
+    this.setHoverGroup(null);
+    this.faceSelectActive = true;
+    this.faceSelectCallbacks = callbacks;
+    this.selectedFaceIds = [];
+    this.hoveredFaceSelectIndex = null;
+  }
+
+  isFaceSelectToolActive(): boolean {
+    return this.faceSelectActive;
+  }
+
+  /** 現在の選択面集合を、選択した順のShellFaceRef配列として返す(faceInfoに無いIDは無視)。 */
+  getSelectedFaceRefs(): ShellFaceRef[] {
+    const byId = new Map(this.faceInfo.map((info) => [info.faceId, info]));
+    const refs: ShellFaceRef[] = [];
+    for (const id of this.selectedFaceIds) {
+      const info = byId.get(id);
+      if (info) refs.push({ faceId: info.faceId, center: info.center, normal: info.normal });
+    }
+    return refs;
+  }
+
+  /** 3D面選択ツールを終了する(onCancelが呼ばれる)。非アクティブなら何もしない。 */
+  cancelFaceSelectTool() {
+    if (!this.faceSelectActive) return;
+    const callbacks = this.faceSelectCallbacks;
+    this.faceSelectActive = false;
+    this.faceSelectCallbacks = null;
+    // 選択済み・ホバー中だった面の色をBASE_COLORへ戻す(materialsは次のsetMesh()まで生存し続けるため)。
+    for (const id of this.selectedFaceIds) {
+      const idx = this.faceGroups.findIndex((g) => g.faceId === id);
+      if (idx !== -1) this.materials[idx]?.color.setHex(BASE_COLOR);
+    }
+    if (this.hoveredFaceSelectIndex != null) {
+      this.materials[this.hoveredFaceSelectIndex]?.color.setHex(BASE_COLOR);
+    }
+    this.selectedFaceIds = [];
+    this.hoveredFaceSelectIndex = null;
+    this.renderer.domElement.style.cursor = "";
+    callbacks?.onCancel();
+  }
+
+  /** キャンバス内スクリーン座標からレイキャストし、ヒットしたfaceGroupのインデックスを返す(未ヒットはnull)。 */
+  private raycastFaceGroupAt(event: MouseEvent): number | null {
+    if (!this.mesh) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const pointer = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(pointer, this.camera);
+    const intersections = this.raycaster.intersectObject(this.mesh, false);
+    if (intersections.length === 0) return null;
+    const triangleIndex = intersections[0].faceIndex;
+    if (triangleIndex == null) return null;
+    const triangleOffset = triangleIndex * 3;
+    const groupIndex = this.faceGroups.findIndex((g) => triangleOffset >= g.start && triangleOffset < g.start + g.count);
+    return groupIndex === -1 ? null : groupIndex;
+  }
+
+  private handleFaceSelectClick(event: MouseEvent) {
+    const groupIndex = this.raycastFaceGroupAt(event);
+    if (groupIndex == null) return;
+    const faceId = this.faceGroups[groupIndex].faceId;
+    const index = this.selectedFaceIds.indexOf(faceId);
+    if (index === -1) {
+      this.selectedFaceIds = [...this.selectedFaceIds, faceId];
+      this.materials[groupIndex]?.color.setHex(FACE_SELECT_COLOR);
+    } else {
+      this.selectedFaceIds = this.selectedFaceIds.filter((id) => id !== faceId);
+      this.materials[groupIndex]?.color.setHex(groupIndex === this.hoveredFaceSelectIndex ? HOVER_COLOR : BASE_COLOR);
+    }
+    this.faceSelectCallbacks?.onSelectionChange(this.getSelectedFaceRefs());
+  }
+
+  private handleFaceSelectMouseMove(event: MouseEvent) {
+    const groupIndex = this.raycastFaceGroupAt(event);
+    this.renderer.domElement.style.cursor = groupIndex != null ? "pointer" : "";
+    if (this.hoveredFaceSelectIndex === groupIndex) return;
+    if (this.hoveredFaceSelectIndex != null) {
+      const prevFaceId = this.faceGroups[this.hoveredFaceSelectIndex]?.faceId;
+      if (prevFaceId == null || !this.selectedFaceIds.includes(prevFaceId)) {
+        this.materials[this.hoveredFaceSelectIndex]?.color.setHex(BASE_COLOR);
+      }
+    }
+    this.hoveredFaceSelectIndex = groupIndex;
+    if (groupIndex != null) {
+      const faceId = this.faceGroups[groupIndex].faceId;
+      if (!this.selectedFaceIds.includes(faceId)) {
+        this.materials[groupIndex]?.color.setHex(HOVER_COLOR);
+      }
     }
   }
 

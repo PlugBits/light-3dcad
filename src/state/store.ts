@@ -5,6 +5,8 @@ import { create } from "zustand";
 import {
   addExtrudeFeature,
   addFillet3DFeature,
+  addRevolveFeature,
+  addShellFeature,
   addSketchFeature,
   createEmptyDocument,
   effectiveFeatureCount,
@@ -14,7 +16,14 @@ import {
   setRollbackIndex as setDocRollbackIndex,
 } from "../model/document";
 import { createRectangleEntity } from "../model/entity";
-import type { CadDocument, ExtrudeFeature, FeatureId, FilletEdgeRef, WorldPlaneName } from "../model/types";
+import type {
+  CadDocument,
+  ExtrudeFeature,
+  FeatureId,
+  FilletEdgeRef,
+  ShellFaceRef,
+  WorldPlaneName,
+} from "../model/types";
 import type { EdgeInfo, FaceInfo, MeshData, MeshQuality, ReferenceEdgeSet, SketchPlaneInfo, WorkerResponse } from "../protocol/messages";
 import { updateReferenceEdgeSnapshots } from "../sketch/referenceEdgeMatch";
 import { solveDocumentSketches } from "../sketch/solver";
@@ -184,6 +193,13 @@ interface CadStoreState {
    * 3Dフィレット/面取りフィーチャーを追加し、選択状態にする(Phase 25a)。
    */
   addFillet3D: (kind: "fillet" | "chamfer", size: number, edges: FilletEdgeRef[]) => void;
+  /**
+   * 現在選択中の面群(ビューアの面選択ツールで確定した配列)を対象に、シェル(中抜き)
+   * フィーチャーを追加し、選択状態にする(Phase 25b)。
+   */
+  addShell3D: (thickness: number, faces: ShellFaceRef[]) => void;
+  /** 指定スケッチを対象にした回転体フィーチャーを追加し、選択状態にする(Phase 25b)。 */
+  addRevolve: (sketchId: FeatureId) => void;
 }
 
 function applyEvaluated(
@@ -369,6 +385,33 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
       kind,
       size,
       edges,
+    });
+    get().updateDocument(() => nextDoc);
+    set({ selectedFeatureId: feature.id });
+  },
+
+  addShell3D: (thickness, faces) => {
+    if (faces.length === 0) return;
+    const doc = get().doc;
+    const { doc: nextDoc, feature } = addShellFeature(doc, {
+      name: nextFeatureName(doc, "シェル"),
+      thickness,
+      faces,
+    });
+    get().updateDocument(() => nextDoc);
+    set({ selectedFeatureId: feature.id });
+  },
+
+  addRevolve: (sketchId) => {
+    const doc = get().doc;
+    // extrudeと同じ方針: ボディが既に存在する場合は"add"、無ければ"newBody"をデフォルトにする。
+    const hasBody = doc.features.some((f) => f.type === "extrude" || f.type === "revolve");
+    const { doc: nextDoc, feature } = addRevolveFeature(doc, {
+      name: nextFeatureName(doc, "Revolve"),
+      sketchId,
+      axis: "x",
+      angle: 360,
+      operation: hasBody ? "add" : "newBody",
     });
     get().updateDocument(() => nextDoc);
     set({ selectedFeatureId: feature.id });
