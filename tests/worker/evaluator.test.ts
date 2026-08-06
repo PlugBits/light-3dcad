@@ -1426,4 +1426,77 @@ describe("evaluateDocument (WASM統合): segmentsベースの閉領域検出→�
 
     result.shape.delete();
   });
+
+  it("線分ツールで描いた矩形(segments、閉チェーン)の内側に円entityを置いて押し出すと、穴あき体積になる(報告バグの再現・Phase 22)", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const outer = rectSegments([
+      [0, 0],
+      [60, 0],
+      [60, 40],
+      [0, 40],
+    ]);
+    const hole = createCircleEntity({ radius: 2, center: [30, 20] });
+    const height = 5;
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [hole],
+      segments: outer,
+    });
+    const { doc } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: height,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    // 修正前は円entityがsegments矩形と単純にfuseされ(穴として無視され)、体積が変わらなかった。
+    const expectedArea = 60 * 40 - Math.PI * 2 * 2;
+    const volume = measureVolume(result.shape);
+    expect(volume).toBeCloseTo(expectedArea * height, 1);
+
+    result.shape.delete();
+  });
+
+  it("矩形entity(外形)の内側に線分ツールで描いた矩形(segments、閉チェーン)を穴として置いて押し出すと、穴あき体積になる(逆方向の回帰確認・Phase 22)", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const outerRect = createRectangleEntity({ width: 60, height: 40, center: [30, 20] });
+    const innerHole = rectSegments([
+      [20, 10],
+      [40, 10],
+      [40, 30],
+      [20, 30],
+    ]);
+    const height = 5;
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [outerRect],
+      segments: innerHole,
+    });
+    const { doc } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: height,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const expectedArea = 60 * 40 - 20 * 20;
+    const volume = measureVolume(result.shape);
+    expect(volume).toBeCloseTo(expectedArea * height, 3);
+
+    result.shape.delete();
+  });
 });

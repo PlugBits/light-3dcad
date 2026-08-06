@@ -107,8 +107,12 @@ function segmentPolyline(seg: SketchSegment, segs = 24): Point2[] {
   return [seg.p1, seg.p2];
 }
 
-/** ループ(セグメント列)を1本の閉ポリラインに変換する(連続する区間の重複点は間引く)。 */
-function loopPolyline(loop: Loop): Point2[] {
+/**
+ * ループ(セグメント列)を1本の閉ポリラインに変換する(連続する区間の重複点は間引く)。
+ * evaluator.ts が entities と segments-regions を横断した包含判定(Phase 22)のために
+ * 外部公開する(region.outer を疑似polygonエンティティの points として使う)。
+ */
+export function loopPolyline(loop: Loop): Point2[] {
   const points: Point2[] = [];
   for (const seg of loop) {
     const pts = segmentPolyline(seg);

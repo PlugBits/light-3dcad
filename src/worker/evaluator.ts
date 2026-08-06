@@ -20,7 +20,7 @@ import type { CadDocument, FeatureId, PolygonCorner, SketchEntity, SketchFeature
 import { validatePolygonCorners } from "../model/validation";
 import { effectivePolygonBulges } from "../sketch/bulge";
 import { classifySketchEntities } from "../sketch/containment";
-import { findClosedRegions, type Region } from "../sketch/regions";
+import { findClosedRegions, loopPolyline } from "../sketch/regions";
 import { regularPolygonVertices, slotAxisNormal, SLOT_CAP_BULGE } from "../sketch/shapeFromPoints";
 import type { SketchPlaneInfo } from "../protocol/messages";
 
@@ -232,23 +232,6 @@ interface DrawingParts {
 }
 
 /**
- * sketch内のentities(rectangle/circle/polygon)を「外形」と「穴」に分類する(Phase 15: 入れ子穴対応)。
- * src/sketch/containment.ts の分類(2階層: 外枠/穴)に基づき、外枠(outers)同士をfuseして外形、
- * 穴(holes、外枠に含まれる他のいずれのエンティティにも完全に含まれるエンティティ)同士をfuseして
- * holesとする(ここではまだcutしない。呼び出し側のbuildDrawingParts()参照)。部分的に重なる
- * (包含ではない)エンティティは従来どおりfuse対象のまま(いずれもoutersに分類される)。
- * entitiesが空の場合はnullを返す(呼び出し側のbuildDrawingParts()がsegments側と合流させる)。
- */
-function buildEntitiesParts(entities: SketchEntity[]): DrawingParts | null {
-  if (entities.length === 0) return null;
-
-  const { outers, holes } = classifySketchEntities(entities);
-  // entitiesが非空である限り、包含関係に循環は起こり得ないため outers は必ず1件以上になる。
-  const solid = fuseEntities(outers);
-  return { solid, holes: holes.length > 0 ? fuseEntities(holes) : null };
-}
-
-/**
  * 1つの閉ループ(src/sketch/regions.tsのLoop)をDrawingに変換する(Phase 19a)。
  * ループのセグメントは既に向き付け・連結済み(各セグメントのp2が次のセグメントのp1と一致し、
  * 最後のセグメントのp2が最初のセグメントのp1に戻る)なので、そのままlineTo/bulgeArcToで辿り、
@@ -262,31 +245,31 @@ function loopDrawing(loop: SketchSegment[]): Drawing {
   return pen.close();
 }
 
-/**
- * src/sketch/regions.tsが検出した閉領域(Region[])を「外形」と「穴」に分ける(Phase 19a、Phase 21で
- * 2D cutをやめて3D側に穴減算を先送りするよう変更)。各領域の外枠(outer)同士・穴(holes)同士を
- * それぞれ独立にfuseする(ここではまだcutしない)。regionsは非空を前提とする。
- */
-function buildRegionsParts(regions: Region[]): DrawingParts {
-  let solid: Drawing | null = null;
-  let holesAll: Drawing | null = null;
-  for (const region of regions) {
-    const regionOuter = loopDrawing(region.outer);
-    solid = solid ? solid.fuse(regionOuter) : regionOuter;
-    for (const hole of region.holes) {
-      const holeDrawing = loopDrawing(hole);
-      holesAll = holesAll ? holesAll.fuse(holeDrawing) : holeDrawing;
-    }
-  }
-  // 呼び出し側で regions.length > 0 を保証しているため solid は必ず非null。
-  return { solid: solid as Drawing, holes: holesAll };
-}
+/** src/sketch/regions.tsのRegion由来の疑似polygonエンティティに付けるidの接頭辞(実entityのidと衝突しない前提)。 */
+const REGION_PROXY_PREFIX = "__region_outer__";
 
 /**
  * sketch内のentitiesとsegments(Phase 19a)を合成して、「外形(solid)」と「穴(holes)」に分けて返す。
- * entities由来の外形/穴(buildEntitiesParts、従来どおりの外枠/穴分類)と、
- * segments由来の外形/穴(src/sketch/regions.tsの閉領域検出→buildRegionsParts)を、
- * それぞれsolid同士・holes同士でfuseして合流させる。
+ *
+ * Phase 22修正: 以前はentities同士の外枠/穴分類(src/sketch/containment.ts)とsegments由来の
+ * 各領域(Region)の外枠/穴分類(src/sketch/regions.ts、領域どうしの入れ子のみ判定)を、それぞれ
+ * 独立に行ったうえでsolid同士・holes同士を単純にfuseしていた。そのため「線分ツールで描いた
+ * 矩形(segments、閉領域の外枠)の中に円ツールで描いた円(entity)を置く」ような、entityと
+ * segments領域をまたぐ包含関係は一切判定されず、円entityは(単独では他のentityに含まれないため)
+ * 常にouter側に分類されて穴として減算されず、fuseされてしまっていた(報告バグの根本原因)。
+ *
+ * 修正方針: 各Regionの外枠ループ(region.outer)を、その頂点列(loopPolyline)を持つ疑似
+ * polygonエンティティとしてラップし、実entities配列と合わせた1つの配列に対して
+ * classifySketchEntities()(src/sketch/containment.ts、entity-entity間の厳密な包含判定を持つ
+ * 既存の関数)を1回だけ適用する。これによりentity-entity・entity-region・region-entity・
+ * region-region のすべての組み合わせで同じ包含判定ロジックが使われ、outer/holeの2階層分類が
+ * ソース(entity/segments領域)をまたいで一貫する。
+ *
+ * 各Regionの内部の入れ子穴(region.holes、segments同士のみの入れ子)は、そのRegionの外枠が
+ * 最終的にouter側と判定された場合はそのまま穴として保持する(region.outerがholeと判定された
+ * 場合、region.holesは加味しない=そのRegion全体を単純な穴として扱う。entities側の「穴の中の島は
+ * 既知の制限としてholeのまま扱われる」という既存の2階層制限と同じ設計。src/sketch/containment.ts
+ * 冒頭のコメント参照)。
  *
  * 穴の減算(cut)をここでは行わない理由(Phase 21): 外形と穴の輪郭がちょうど接する
  * (タンジェント。例: 幅20の矩形の中心に半径10の円=辺の中点にちょうど接する)場合、OCCTの2D
@@ -301,28 +284,69 @@ function buildRegionsParts(regions: Region[]): DrawingParts {
  * 場合は従来どおり「スケッチに図形がありません」。
  */
 function buildDrawingParts(entities: SketchEntity[], segments: SketchSegment[] | undefined): DrawingParts {
-  const entitiesParts = buildEntitiesParts(entities);
   const regions = segments && segments.length > 0 ? findClosedRegions(segments) : [];
 
-  if (!entitiesParts && regions.length === 0) {
+  if (entities.length === 0 && regions.length === 0) {
     if (segments && segments.length > 0) {
       throw new Error("閉じた領域がありません");
     }
     throw new Error("スケッチに図形がありません");
   }
 
-  if (regions.length === 0) {
-    return entitiesParts as DrawingParts;
-  }
-  const regionsParts = buildRegionsParts(regions);
-  if (!entitiesParts) return regionsParts;
+  const regionProxies: SketchEntity[] = regions.map((region, index) => ({
+    kind: "polygon",
+    id: `${REGION_PROXY_PREFIX}${index}`,
+    points: loopPolyline(region.outer),
+  }));
 
-  const solid = entitiesParts.solid.fuse(regionsParts.solid);
-  let holes = entitiesParts.holes;
-  if (regionsParts.holes) {
-    holes = holes ? holes.fuse(regionsParts.holes) : regionsParts.holes;
+  const { outers, holes } = classifySketchEntities([...entities, ...regionProxies]);
+  const regionIndexOf = (entity: SketchEntity): number | null =>
+    entity.id.startsWith(REGION_PROXY_PREFIX) ? Number(entity.id.slice(REGION_PROXY_PREFIX.length)) : null;
+
+  let solid: Drawing | null = null;
+  let holesDrawing: Drawing | null = null;
+
+  const outerEntities: SketchEntity[] = [];
+  for (const entity of outers) {
+    const regionIndex = regionIndexOf(entity);
+    if (regionIndex === null) {
+      outerEntities.push(entity);
+      continue;
+    }
+    // outer判定された領域: 自身の外枠に加えて、自身の内部の入れ子穴(region.holes)もそのまま穴に加える
+    // (従来どおりの領域内入れ子判定、region-region間のみ)。
+    const region = regions[regionIndex];
+    const regionOuter = loopDrawing(region.outer);
+    solid = solid ? solid.fuse(regionOuter) : regionOuter;
+    for (const hole of region.holes) {
+      const holeDrawing = loopDrawing(hole);
+      holesDrawing = holesDrawing ? holesDrawing.fuse(holeDrawing) : holeDrawing;
+    }
   }
-  return { solid, holes };
+  if (outerEntities.length > 0) {
+    const entitiesSolid = fuseEntities(outerEntities);
+    solid = solid ? solid.fuse(entitiesSolid) : entitiesSolid;
+  }
+
+  const holeEntities: SketchEntity[] = [];
+  for (const entity of holes) {
+    const regionIndex = regionIndexOf(entity);
+    if (regionIndex === null) {
+      holeEntities.push(entity);
+      continue;
+    }
+    // hole判定された領域全体(その内部の入れ子穴=島は加味しない、上記コメント参照)。
+    const regionOuter = loopDrawing(regions[regionIndex].outer);
+    holesDrawing = holesDrawing ? holesDrawing.fuse(regionOuter) : regionOuter;
+  }
+  if (holeEntities.length > 0) {
+    const entitiesHoles = fuseEntities(holeEntities);
+    holesDrawing = holesDrawing ? holesDrawing.fuse(entitiesHoles) : entitiesHoles;
+  }
+
+  // entities/regionsのいずれかが非空である限り、classifySketchEntities()の性質上
+  // outersは必ず1件以上になるため、solidは必ず非nullになる。
+  return { solid: solid as Drawing, holes: holesDrawing };
 }
 
 /** faceの中心・法線をプレーンなタプルとして取り出す(Vectorラッパーは即delete)。 */
