@@ -21,6 +21,8 @@ import {
   createRegularPolygonEntity,
   createSlotEntity,
   patchExtrudeFeature,
+  resolveEvaluationDocument,
+  setRollbackIndex,
 } from "../../src/model";
 import type { SketchSegment } from "../../src/model/types";
 import { evaluateDocument } from "../../src/worker/evaluator";
@@ -1550,5 +1552,73 @@ describe("evaluateDocument (WASM統合): segmentsベースの閉領域検出→�
     expect(volume).toBeCloseTo(expectedArea * height, 3);
 
     result.shape.delete();
+  });
+});
+
+describe("ロールバックバー(rollbackIndex、Phase 25): evaluateDocumentとの統合", () => {
+  it("箱+穴カットのドキュメントで、バーを穴カット前に置いて評価すると穴なしの体積になる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+
+    // Sketch1(60x40矩形) -> Extrude1(newBody, 20mm) -> Sketch2(円r10) -> Cut1(cut, 30mm)
+    const empty = createEmptyDocument();
+    const rect = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: doc1, feature: rectSketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+    });
+    const { doc: doc2 } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: rectSketch.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+    const circle = createCircleEntity({ radius: 10 });
+    const { doc: doc3, feature: circleSketch } = addSketchFeature(doc2, {
+      name: "Sketch2",
+      plane: { kind: "world", plane: "XY" },
+      entities: [circle],
+    });
+    const { doc: fullDoc } = addExtrudeFeature(doc3, {
+      name: "Cut1",
+      sketchId: circleSketch.id,
+      distance: 30,
+      direction: 1,
+      operation: "cut",
+    });
+
+    // 末尾(rollbackIndex未設定)で評価: 穴あきの体積。
+    const fullResult = evaluateDocument(resolveEvaluationDocument(fullDoc));
+    expect(fullResult.ok).toBe(true);
+    if (!fullResult.ok) return;
+    const fullVolume = measureVolume(fullResult.shape);
+    fullResult.shape.delete();
+
+    // ロールバックバーをCut1の直前(Extrude1までの2フィーチャー)に移動して評価: 穴なしの体積。
+    const rolledBackDoc = setRollbackIndex(fullDoc, 2);
+    const evalDoc = resolveEvaluationDocument(rolledBackDoc);
+    expect(evalDoc.features.map((f) => f.name)).toEqual(["Sketch1", "Extrude1"]);
+
+    const rolledBackResult = evaluateDocument(evalDoc);
+    expect(rolledBackResult.ok).toBe(true);
+    if (!rolledBackResult.ok) return;
+    const rolledBackVolume = measureVolume(rolledBackResult.shape);
+    rolledBackResult.shape.delete();
+
+    const boxVolume = 60 * 40 * 20;
+    expect(rolledBackVolume).toBeCloseTo(boxVolume, 3);
+    expect(fullVolume).toBeLessThan(rolledBackVolume);
+    expect(fullVolume).toBeCloseTo(boxVolume - Math.PI * 10 * 10 * 20, 1);
+
+    // バーを末尾へ戻すと穴ありの体積に復帰する(rollbackIndex: nullは「末尾」を表す)。
+    const restoredDoc = setRollbackIndex(rolledBackDoc, null);
+    expect(resolveEvaluationDocument(restoredDoc)).toBe(restoredDoc); // 末尾はコピーせず正本をそのまま使う
+    const restoredResult = evaluateDocument(resolveEvaluationDocument(restoredDoc));
+    expect(restoredResult.ok).toBe(true);
+    if (!restoredResult.ok) return;
+    const restoredVolume = measureVolume(restoredResult.shape);
+    restoredResult.shape.delete();
+    expect(restoredVolume).toBeCloseTo(fullVolume, 3);
   });
 });

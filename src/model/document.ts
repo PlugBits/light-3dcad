@@ -365,6 +365,40 @@ export function removeFeatureCascade(doc: CadDocument, featureId: FeatureId): Ca
   return { ...doc, features };
 }
 
+/**
+ * ロールバックバー(rollbackIndex)を考慮した「現在有効なフィーチャー数」を返す。
+ * rollbackIndexがnull/undefinedなら全フィーチャーが有効(=features.length)。
+ * 数値の場合は0〜features.lengthにクランプする(履歴削除等でindexが範囲外になっても安全に扱う)。
+ */
+export function effectiveFeatureCount(doc: CadDocument): number {
+  const n = doc.rollbackIndex;
+  if (n === null || n === undefined) return doc.features.length;
+  return Math.max(0, Math.min(n, doc.features.length));
+}
+
+/**
+ * rollbackIndexが設定されていれば、features先頭からeffectiveFeatureCount()件だけに絞った
+ * 新しいドキュメントを返す(Worker評価専用。正本のdoc.featuresは変更しない)。
+ * rollbackIndexが末尾を指す場合はdocをそのまま返す(無駄なコピーを避ける)。
+ */
+export function resolveEvaluationDocument(doc: CadDocument): CadDocument {
+  const count = effectiveFeatureCount(doc);
+  if (count >= doc.features.length) return doc;
+  return { ...doc, features: doc.features.slice(0, count) };
+}
+
+/**
+ * ロールバックバーの位置を設定する。indexがnull、またはfeatures.length以上であれば
+ * 「末尾」を表すnullに正規化する(rollbackIndexが常に「末尾かどうか」を素直に判定できるように)。
+ * 負の値は0にクランプする。
+ */
+export function setRollbackIndex(doc: CadDocument, index: number | null): CadDocument {
+  if (index === null || index >= doc.features.length) {
+    return { ...doc, rollbackIndex: null };
+  }
+  return { ...doc, rollbackIndex: Math.max(0, index) };
+}
+
 /** フィーチャー(または追加/更新しようとしているフィーチャー)を検証する。 */
 export function validateSingleFeature(feature: Feature, doc: CadDocument): ValidationError[] {
   return validateFeature(feature, doc.features);

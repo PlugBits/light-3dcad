@@ -109,6 +109,7 @@ export default function App() {
   const exportError = useCadStore((s) => s.exportError);
   const initialize = useCadStore((s) => s.initialize);
   const selectFeature = useCadStore((s) => s.selectFeature);
+  const setRollbackIndex = useCadStore((s) => s.setRollbackIndex);
   const selectFace = useCadStore((s) => s.selectFace);
   const addSketch = useCadStore((s) => s.addSketch);
   const addExtrude = useCadStore((s) => s.addExtrude);
@@ -1364,6 +1365,7 @@ export default function App() {
               errorFeatureId={errorFeatureId}
               onSelect={selectFeature}
               onDelete={handleDelete}
+              onSetRollback={setRollbackIndex}
             />
           </div>
 

@@ -11,6 +11,7 @@ import {
   createLineSegment,
   createPolygonEntity,
   createRectangleEntity,
+  effectiveFeatureCount,
   findFeature,
   getDependentFeatureIds,
   getDirectDependentFeatureIds,
@@ -20,7 +21,9 @@ import {
   removeFeature,
   removeFeatureCascade,
   removeSketchEntity,
+  resolveEvaluationDocument,
   setPolygonVertexCorner,
+  setRollbackIndex,
   updateSketchEntity,
   validateDocument,
   validateFeature,
@@ -776,5 +779,60 @@ describe("validateFeature / validateDocument", () => {
     const doc: CadDocument = { version: 1, features: [dup, { ...dup, name: "B" }] };
     const errors = validateDocument(doc);
     expect(errors.some((e) => e.message.includes("重複"))).toBe(true);
+  });
+});
+
+describe("ロールバックバー(rollbackIndex、Phase 25)", () => {
+  function makeThreeFeatureDoc(): CadDocument {
+    const { doc: doc1, sketch } = makeRectSketchDoc();
+    const { doc: doc2 } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+    const circle = createCircleEntity({ radius: 5 });
+    const { doc: doc3 } = addSketchFeature(doc2, {
+      name: "Sketch2",
+      plane: { kind: "world", plane: "XY" },
+      entities: [circle],
+    });
+    return doc3; // Sketch1, Extrude1, Sketch2 の3フィーチャー
+  }
+
+  it("rollbackIndex未設定(undefined)は全フィーチャーが有効", () => {
+    const doc = makeThreeFeatureDoc();
+    expect(effectiveFeatureCount(doc)).toBe(3);
+    expect(resolveEvaluationDocument(doc)).toBe(doc); // 無駄なコピーをしない
+  });
+
+  it("setRollbackIndexで先頭2件のみに絞ると、resolveEvaluationDocumentが正本を書き換えずスライスした複製を返す", () => {
+    const doc = makeThreeFeatureDoc();
+    const rolledBack = setRollbackIndex(doc, 2);
+    expect(rolledBack.rollbackIndex).toBe(2);
+    expect(effectiveFeatureCount(rolledBack)).toBe(2);
+
+    const evalDoc = resolveEvaluationDocument(rolledBack);
+    expect(evalDoc.features).toHaveLength(2);
+    expect(evalDoc.features.map((f) => f.name)).toEqual(["Sketch1", "Extrude1"]);
+    // 正本(rolledBack.features)は削られていない。
+    expect(rolledBack.features).toHaveLength(3);
+    expect(doc.features).toHaveLength(3);
+  });
+
+  it("setRollbackIndexに末尾以上のindex(またはnull)を渡すと末尾(null)に正規化され、末尾復帰する", () => {
+    const doc = makeThreeFeatureDoc();
+    const rolledBack = setRollbackIndex(doc, 1);
+    expect(effectiveFeatureCount(rolledBack)).toBe(1);
+
+    const restoredByNull = setRollbackIndex(rolledBack, null);
+    expect(restoredByNull.rollbackIndex).toBeNull();
+    expect(effectiveFeatureCount(restoredByNull)).toBe(3);
+    expect(resolveEvaluationDocument(restoredByNull).features).toHaveLength(3);
+
+    const restoredByLength = setRollbackIndex(rolledBack, 999);
+    expect(restoredByLength.rollbackIndex).toBeNull();
+    expect(effectiveFeatureCount(restoredByLength)).toBe(3);
   });
 });

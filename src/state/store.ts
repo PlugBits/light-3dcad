@@ -6,8 +6,11 @@ import {
   addExtrudeFeature,
   addSketchFeature,
   createEmptyDocument,
+  effectiveFeatureCount,
   findFeature,
   removeFeatureCascade,
+  resolveEvaluationDocument,
+  setRollbackIndex as setDocRollbackIndex,
 } from "../model/document";
 import { createRectangleEntity } from "../model/entity";
 import type { CadDocument, ExtrudeFeature, FeatureId, WorldPlaneName } from "../model/types";
@@ -150,6 +153,12 @@ interface CadStoreState {
   updateDocument: (updater: (doc: CadDocument) => CadDocument) => void;
   /** フィーチャーツリーの選択を変更する。 */
   selectFeature: (featureId: FeatureId | null) => void;
+  /**
+   * ロールバックバーの位置を移動する(SolidWorks風)。indexはfeatures配列の先頭から数えた
+   * 有効フィーチャー数(null/features.length以上は「末尾」=全フィーチャー有効を表す)。
+   * updateDocument()経由で行うため、アンドゥ/リドゥの対象になる。
+   */
+  setRollbackIndex: (index: number | null) => void;
   /** 指定平面(省略時XY)の空スケッチフィーチャーを追加し、選択状態にする。 */
   addSketch: (plane?: WorldPlaneName) => void;
   /** 指定スケッチを対象にした押し出しフィーチャーを追加し、選択状態にする。 */
@@ -230,7 +239,7 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   undo: () => {
     const result = undoHistory(get().history, structuredClone(get().doc));
     if (!result) return;
-    const { requestId, promise } = postRequest({ kind: "evaluate", doc: result.doc });
+    const { requestId, promise } = postRequest({ kind: "evaluate", doc: resolveEvaluationDocument(result.doc) });
     // 復元後のドキュメントに選択中フィーチャーがまだ存在するなら選択状態を維持する
     // (スケッチ編集中のCtrl+Zでスケッチから抜けてしまう問題の修正)。selectedFaceは
     // トポロジカルネーミングのずれで復元後も有効か判定しづらいため、従来どおりクリアする。
@@ -248,7 +257,7 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   redo: () => {
     const result = redoHistory(get().history, structuredClone(get().doc));
     if (!result) return;
-    const { requestId, promise } = postRequest({ kind: "evaluate", doc: result.doc });
+    const { requestId, promise } = postRequest({ kind: "evaluate", doc: resolveEvaluationDocument(result.doc) });
     // undo()と同じく、復元後のドキュメントに選択中フィーチャーがまだ存在するなら選択状態を維持する。
     set({
       doc: result.doc,
@@ -263,7 +272,7 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
 
   initialize: () => {
     // "evaluate" は Worker側で ensureOC() を経由するため、別途 "init" 往復は不要。
-    const { requestId, promise } = postRequest({ kind: "evaluate", doc: get().doc });
+    const { requestId, promise } = postRequest({ kind: "evaluate", doc: resolveEvaluationDocument(get().doc) });
     set({ status: "evaluating", latestEvaluateRequestId: requestId });
     promise.then((response) => applyEvaluated(set, get, requestId, response));
   },
@@ -293,12 +302,26 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
     }
 
     const nextDoc = solved.doc;
-    const { requestId, promise } = postRequest({ kind: "evaluate", doc: nextDoc });
+    const { requestId, promise } = postRequest({ kind: "evaluate", doc: resolveEvaluationDocument(nextDoc) });
     set({ doc: nextDoc, status: "evaluating", latestEvaluateRequestId: requestId, history: nextHistory });
     promise.then((response) => applyEvaluated(set, get, requestId, response));
   },
 
   selectFeature: (featureId) => set({ selectedFeatureId: featureId }),
+
+  setRollbackIndex: (index) => {
+    get().updateDocument((doc) => setDocRollbackIndex(doc, index));
+    // ロールバックで選択中フィーチャーが範囲外になった場合は選択を解除する
+    // (範囲外フィーチャーは選択不可の方針。インデックス比較は現在のdoc.featuresの並び順に基づく)。
+    const nextDoc = get().doc;
+    const selected = get().selectedFeatureId;
+    if (selected) {
+      const idx = nextDoc.features.findIndex((f) => f.id === selected);
+      if (idx === -1 || idx >= effectiveFeatureCount(nextDoc)) {
+        set({ selectedFeatureId: null });
+      }
+    }
+  },
 
   addSketch: (plane = "XY") => {
     const doc = get().doc;

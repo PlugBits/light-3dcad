@@ -225,8 +225,16 @@ export interface ExtrudeFeature {
 /** フィーチャー(履歴列の1要素)。 */
 export type Feature = SketchFeature | ExtrudeFeature;
 
-/** CADドキュメント全体。features は順序付き(=編集履歴)。 */
+/**
+ * CADドキュメント全体。features は順序付き(=編集履歴)。
+ * rollbackIndex(SolidWorks風ロールバックバー)は省略可(後方互換)。null/undefinedは
+ * 「末尾」=全フィーチャーが評価対象であることを表す。数値nは「features先頭からn個のみ」が
+ * 評価対象であることを表す(0〜features.lengthにクランプして解釈する。詳細は
+ * src/model/document.ts の resolveEvaluationDocument()/effectiveFeatureCount() 参照)。
+ * 正本のfeatures配列自体は変更しない(評価用に一時的に絞り込んだドキュメントを別途作る)。
+ */
 export interface CadDocument {
   version: 1;
   features: Feature[];
+  rollbackIndex?: number | null;
 }

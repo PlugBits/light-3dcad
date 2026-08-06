@@ -1,5 +1,10 @@
 // フィーチャーツリーパネル。doc.features を順序どおり一覧表示し、選択/削除を行う。
+// SolidWorks風ロールバックバー(Phase 25): 各フィーチャー行の間+末尾に常時クリック可能な
+// 挿入スロットを表示し、クリックでバーをその位置へ移動する(ドラッグはサポートしない)。
+// バー以降(index >= 有効フィーチャー数)のフィーチャーはグレーアウト表示にし、選択不可にする。
+import { useState } from "react";
 import type { CadDocument, Feature, FeatureId } from "../model/types";
+import { effectiveFeatureCount } from "../model/document";
 
 const ICONS: Record<Feature["type"], string> = {
   sketch: "▢", // □
@@ -25,30 +30,86 @@ interface FeatureTreeProps {
   errorFeatureId: FeatureId | null;
   onSelect: (featureId: FeatureId) => void;
   onDelete: (featureId: FeatureId) => void;
+  /** ロールバックバーの移動。indexはfeatures先頭からの有効フィーチャー数(末尾はnull)。 */
+  onSetRollback: (index: number | null) => void;
 }
 
-export function FeatureTree({ doc, selectedFeatureId, errorFeatureId, onSelect, onDelete }: FeatureTreeProps) {
+/**
+ * ロールバックバーの挿入スロット。slotIndexは「このスロットにバーを置いたときの有効フィーチャー数」。
+ * activeCountと一致する場合は実際のバー(横線)として表示し、それ以外は薄い当たり判定のみのバーとして
+ * ホバー時に見える細い線を表示する。
+ */
+function RollbackSlot({
+  slotIndex,
+  activeCount,
+  total,
+  onSetRollback,
+}: {
+  slotIndex: number;
+  activeCount: number;
+  total: number;
+  onSetRollback: (index: number | null) => void;
+}) {
+  const isBarHere = slotIndex === activeCount;
+  const [hovered, setHovered] = useState(false);
+  return (
+    <div
+      data-testid={`rollback-slot-${slotIndex}`}
+      onClick={() => onSetRollback(slotIndex >= total ? null : slotIndex)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      title="ロールバックバーをここに移動"
+      style={{
+        height: 8,
+        margin: "1px 0",
+        cursor: "pointer",
+        display: "flex",
+        alignItems: "center",
+      }}
+    >
+      <div
+        data-testid={isBarHere ? "rollback-bar" : undefined}
+        style={{
+          height: isBarHere ? 3 : 1,
+          width: "100%",
+          borderRadius: 2,
+          background: isBarHere ? "#3b82f6" : hovered ? "rgba(150,170,255,0.5)" : "transparent",
+          transition: "background 0.1s",
+        }}
+      />
+    </div>
+  );
+}
+
+export function FeatureTree({ doc, selectedFeatureId, errorFeatureId, onSelect, onDelete, onSetRollback }: FeatureTreeProps) {
   if (doc.features.length === 0) {
     return <p style={{ fontSize: 13, opacity: 0.7 }}>フィーチャーがありません。</p>;
   }
 
+  const total = doc.features.length;
+  const activeCount = effectiveFeatureCount(doc);
+
   return (
-    <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-      {doc.features.map((feature) => {
+    <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 0 }}>
+      {doc.features.map((feature, index) => {
         const selected = feature.id === selectedFeatureId;
         const hasError = feature.id === errorFeatureId;
+        const isActive = index < activeCount;
         return (
           <li key={feature.id}>
+            <RollbackSlot slotIndex={index} activeCount={activeCount} total={total} onSetRollback={onSetRollback} />
             <div
               data-testid={`feature-item-${feature.name}`}
-              onClick={() => onSelect(feature.id)}
+              onClick={isActive ? () => onSelect(feature.id) : undefined}
               style={{
                 display: "flex",
                 alignItems: "center",
                 gap: 6,
                 padding: "6px 8px",
                 borderRadius: 4,
-                cursor: "pointer",
+                cursor: isActive ? "pointer" : "default",
+                opacity: isActive ? 1 : 0.45,
+                fontStyle: isActive ? "normal" : "italic",
                 background: selected ? "rgba(100, 150, 255, 0.25)" : "transparent",
                 border: hasError ? "1px solid #ff6b6b" : "1px solid transparent",
               }}
@@ -79,6 +140,9 @@ export function FeatureTree({ doc, selectedFeatureId, errorFeatureId, onSelect, 
           </li>
         );
       })}
+      <li>
+        <RollbackSlot slotIndex={total} activeCount={activeCount} total={total} onSetRollback={onSetRollback} />
+      </li>
     </ul>
   );
 }
