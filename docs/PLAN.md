@@ -591,3 +591,21 @@ regularPolygonは中心、polygon/slotは剛体並進オフセット。フィレ
 「固定」チェックボックスを全entity種別に拡大)で選べるようにした。寸法ツールはrectangle/polygonの辺を
 1点目としてクリックできるようにし(`dimensionPendingEdgeLine`、円が2点目でも同じ`distanceEntityLine`
 拘束になる)。Vitest331件。
+
+## ユーザー報告(実機)の修正: 矩形が線分チェーンのとき円を固定すると必ず矛盾になるバグ+参照エッジを1点目に選べるように
+
+前フェーズ(矩形・多角形をソルバで動かせるように)はrectangle/polygonエンティティの辺(entityEdge)
+のみ対応しており、線分ツールで描いた矩形状の4本線分チェーン(rectangle/polygonエンティティではない、
+実機でよくある描き方)を寸法ツールで「円→辺」選択すると`distanceEntityLine`の`line`が常に
+`refEdge`(ピック時点の座標を凍結した固定スナップショット)になっていた。円を固定(fixEntity)すると
+円・辺の双方が動けなくなり、距離を現在値から変更すると必ず矛盾(巻き戻し)になる不具合(ブラウザ実機で
+再現・単体テストは新形式の拘束を直接組み立てていたため検出できていなかった)。`LineRef`に
+`segmentEdge`(自由な線分本体、既にソルバの変数であるsegmentsのp1/p2をentityEdgeと同じく「今の値」
+から解決)を追加し、CadViewer.tsの寸法ツールが自由な線分をヒットしたとき`refEdge`ではなく
+`segmentEdge`を作るよう修正(円の固定状態に応じて辺・円のどちらかが動く。線分チェーンがvertical/
+horizontal+coincident拘束を持つ通常の描画結果なら辺は平行移動として解ける)。
+あわせて、寸法ツールでボディ端面参照エッジ(破線)を1点目としてクリックできるようにし
+(`dimensionPendingRefEdgeLine`、2点目に円/線分を選ぶと既存の`circle-distance-refedge`/
+`line-refedge`ターゲットになる。ホバー・ピック判定も保留状態に関わらず常時参照エッジを対象にした)。
+Vitest336件。ブラウザ実機で「円固定→線分チェーンの辺が移動」「参照エッジ1点目→円で距離拘束」を
+確認済み。

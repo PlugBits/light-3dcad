@@ -110,6 +110,11 @@ export type EntityRef = { entityId: string };
  * 円の中心↔辺の距離拘束(distanceEntityLine)が参照する「辺」(Phase 22)。
  * "entityEdge" は rectangle/polygon エンティティの辺(edgeIndex: rectangleは0=下/1=右/2=上/3=左、
  * polygonはpoints[i]→points[i+1 mod n])を指し、エンティティが動けば辺も追従する(常に生値から解決)。
+ * "segmentEdge" は自由な線分セグメント(kind:"line"、rectangle/polygonエンティティに属さない、
+ * 例: 線分ツールで描いた矩形状のチェーン)本体を指す(ユーザー報告対応: 矩形を線分チェーンとして
+ * 描いた場合にdistanceEntityLineが常にrefEdge[固定]化され、円を固定すると矛盾になっていたバグの
+ * 修正。segmentIdの指す2端点は元々ソルバの変数[varIndex]なので、entityEdgeと同様にエンティティ
+ * ではなく線分自体が動く)。
  * "refEdge" はボディ端面参照(Phase 22、src/worker/evaluator.tsのreferenceEdges)のスナップショットで、
  * p1/p2はピック時点のスケッチローカル2D座標を凍結したもの。再評価のたびに
  * src/sketch/referenceEdgeMatch.ts が最新のreferenceEdgesと幾何マッチングして更新を試みる
@@ -117,6 +122,7 @@ export type EntityRef = { entityId: string };
  */
 export type LineRef =
   | { kind: "entityEdge"; entityId: string; edgeIndex: number }
+  | { kind: "segmentEdge"; segmentId: string }
   | { kind: "refEdge"; p1: [number, number]; p2: [number, number] };
 
 /**

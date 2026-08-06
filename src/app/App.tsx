@@ -734,7 +734,13 @@ export default function App() {
           titleLabel = target.kind === "circle-distance-refedge" ? "中心↔参照エッジの距離 (mm)" : "中心↔辺の距離 (mm)";
           const entity = entities.find((e) => e.id === target.entityId);
           initialValue = entity?.kind === "circle" ? distancePointToLine(entity.center, target.edgeA, target.edgeB) : 0;
-          hintLabel = "辺は動かず、円の中心だけが移動します";
+          // 矩形・多角形・線分をソルバで動かせるようにする改善(ユーザー報告対応)で、rectangle/
+          // polygonの辺・自由な線分は円の「固定」チェック次第でどちらも動けるようになった。
+          // 参照エッジ(refedge)はボディ端面のスナップショットで常に固定なので円だけが動く。
+          hintLabel =
+            target.kind === "circle-distance-refedge"
+              ? "参照エッジは動かず、円の中心だけが移動します"
+              : "円を固定していれば辺が、していなければ円が移動します";
         }
         let quantityOptions: { distanceValue: number; angleValue: number; initial: "distance" | "angle" } | undefined;
         if (target.kind === "line-line") {
@@ -791,6 +797,11 @@ export default function App() {
           // 選択順柔軟化(UI改善): 辺(矩形・多角形)を1つ目としてクリックした状態。
           // 混乱を避けるため線分↔線分の「距離/角度」ではなく「次: 円をクリック」と明示する。
           setDimensionPendingLabel("1つ目: 辺 → 次: 円をクリック");
+        } else if (state.kind === "refedge") {
+          // 参照エッジを1つ目に選べるようにする改善(追加項目): ボディ端面参照エッジ(破線)を
+          // 1つ目としてクリックした状態。次は円(円↔参照エッジの距離)または線分
+          // (線分↔参照エッジの距離/角度)のどちらも選べる。
+          setDimensionPendingLabel("1つ目: 参照エッジ → 次: 円/線分をクリック");
         } else {
           setDimensionPendingLabel("1つ目: 端点 → 2つ目の端点を選択(距離)");
         }

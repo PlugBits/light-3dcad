@@ -249,17 +249,29 @@ function lineSideSign(initX: number[], idx: [number, number], a: Point2, b: Poin
  * LineRefを、entities配列の元の形状ではなく「ソルバの現在の変数値x」から解決する
  * (矩形・多角形をソルバで動かせるようにする改善)。rectangle/regularPolygonはentityVarIdxに
  * 積んだ中心(cx,cy)、polygonは並進オフセット(dx,dy)を使って辺の座標を組み立てる。
+ * segmentEdge(自由な線分)はvarIndexに積んだ両端点(p1,p2)そのものを使う(ユーザー報告対応:
+ * 矩形を線分チェーンとして描いた場合にdistanceEntityLineが常にrefEdge[固定]扱いされていた
+ * バグの修正。線分の端点は元々ソルバの変数なので、rectangle/polygonの辺と同様に動かせる)。
  * refEdge(ボディ端面参照のスナップショット)は常に固定座標のままなのでvarsを見ない。
- * entityVarIdxに載っていないentity(=このソルバ呼び出しの対象外)は元のentities側の値を使う
- * (通常は起きないが、防御的なフォールバック)。
+ * entityVarIdx/varIndexに載っていないentity/segment(=このソルバ呼び出しの対象外)は
+ * 元のentities側の値を使う(通常は起きないが、防御的なフォールバック)。
  */
 function resolveLineRefPointsFromVars(
   line: LineRef,
   entities: readonly SketchEntity[],
   entityVarIdx: EntityVarIndexMap,
+  varIndex: VarIndexMap,
   x: number[],
 ): [Point2, Point2] | null {
   if (line.kind === "refEdge") return [line.p1, line.p2];
+  if (line.kind === "segmentEdge") {
+    const base = varIndex.get(line.segmentId);
+    if (base === undefined) return null;
+    return [
+      [x[base], x[base + 1]],
+      [x[base + 2], x[base + 3]],
+    ];
+  }
   const entity = entities.find((e) => e.id === line.entityId);
   if (!entity) return null;
   const base = entityVarIdx.get(entity.id);
@@ -277,7 +289,7 @@ function resolveLineRefPointsFromVars(
 /**
  * circleエンティティの中心↔辺(LineRef)の符号付き垂直距離(distanceEntityLine拘束の残差値)。
  * lineの辺は「今の変数値」から解決する(resolveLineRefPointsFromVars)ため、entity側(円)だけで
- * なくline側(rectangle/polygonの辺)が変数として動いてもこの値は正しく追従する。
+ * なくline側(rectangle/polygonの辺、または自由な線分)が変数として動いてもこの値は正しく追従する。
  * 解析的な偏微分の導出はentity+line両方が可変になったことで煩雑なため、tangent/distanceLineLine
  * と同じくnumericResidual(中心差分)でヤコビアンを近似する(value自体は厳密値)。
  */
@@ -287,9 +299,10 @@ function distanceEntityLineValue(
   line: LineRef,
   entities: readonly SketchEntity[],
   entityVarIdx: EntityVarIndexMap,
+  varIndex: VarIndexMap,
   sign: number,
 ): number {
-  const pts = resolveLineRefPointsFromVars(line, entities, entityVarIdx, x);
+  const pts = resolveLineRefPointsFromVars(line, entities, entityVarIdx, varIndex, x);
   if (!pts) return 0;
   const [a, b] = pts;
   const dx = b[0] - a[0];
@@ -423,6 +436,7 @@ function angleLineFixedValueDeg(x: number[], aBase: number, bDx: number, bDy: nu
 /** 拘束由来の残差式一覧を作る(正則化は含まない)。参照先セグメントが見つからない拘束は無視する(呼び出し側でバリデーション済みの前提)。 */
 function buildConstraintResiduals(
   constraints: readonly SketchConstraint[],
+  segments: readonly SketchSegment[],
   segmentsById: Map<string, SketchSegment>,
   varIndex: VarIndexMap,
   entityVarIdx: EntityVarIndexMap,
@@ -527,20 +541,24 @@ function buildConstraintResiduals(
         // 矩形・多角形をソルバで動かせるようにする改善: lineがrectangle/polygonの辺(entityEdge)を
         // 参照している場合、その辺の座標もソルバの変数(entityVarIdx)から解決するため、円の中心
         // だけでなく辺(の親エンティティ)も拘束に応じて動く(例: 円を固定して距離を指定すると
-        // 矩形側が並進する)。refEdge(ボディ端面参照)は常に固定なのでvarIndicesに追加しない。
+        // 矩形側が並進する)。segmentEdge(自由な線分、ユーザー報告対応)も同様にvarIndexから解決し、
+        // 線分の両端点そのものが動く。refEdge(ボディ端面参照)は常に固定なのでvarIndicesに追加しない。
         const idx = entityVarIndex(entityVarIdx, c.entity);
         if (!idx) break;
-        const line0 = resolveLineRefPoints(c.line, entities);
+        const line0 = resolveLineRefPoints(c.line, entities, segments);
         if (!line0) break;
         const sign = lineSideSign(initX, idx, line0[0], line0[1]);
         const varIndices: number[] = [idx[0], idx[1]];
         if (c.line.kind === "entityEdge") {
           const lineBase = entityVarIdx.get(c.line.entityId);
           if (lineBase !== undefined) varIndices.push(lineBase, lineBase + 1);
+        } else if (c.line.kind === "segmentEdge") {
+          const lineBase = varIndex.get(c.line.segmentId);
+          if (lineBase !== undefined) varIndices.push(lineBase, lineBase + 1, lineBase + 2, lineBase + 3);
         }
         eqs.push(
           numericResidual(
-            (vars) => distanceEntityLineValue(vars, idx, c.line, entities, entityVarIdx, sign) - c.value,
+            (vars) => distanceEntityLineValue(vars, idx, c.line, entities, entityVarIdx, varIndex, sign) - c.value,
             x,
             varIndices,
           ),
@@ -938,7 +956,7 @@ export function solveSketch(
   });
 
   const buildHardResiduals = (vars: number[]): ResidualEq[] => [
-    ...buildConstraintResiduals(constraints, segmentsById, varIndex, entityVarIdx, entities, vars, initX),
+    ...buildConstraintResiduals(constraints, segments, segmentsById, varIndex, entityVarIdx, entities, vars, initX),
     ...buildFixResiduals(constraints, varIndex, entityVarIdx, vars, initX),
   ];
 

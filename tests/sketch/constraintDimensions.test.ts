@@ -9,6 +9,7 @@ import {
   segmentLength,
   segmentRadius,
   upsertDistanceConstraint,
+  upsertDistanceEntityLineConstraint,
   upsertLengthConstraint,
   upsertRadiusConstraint,
 } from "../../src/sketch/constraintDimensions";
@@ -52,6 +53,48 @@ describe("upsertDistanceConstraint", () => {
     const result = upsertDistanceConstraint([], a, b, 15);
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({ kind: "distance", a, b, value: 15 });
+  });
+});
+
+describe("upsertDistanceEntityLineConstraint(寸法ツールが実際に生成する形式、ユーザー報告対応)", () => {
+  it("line.kind:'segmentEdge'(自由な線分)で新規作成できる(CadViewer.tsが円クリック済み+自由な線分クリックで生成する形式)", () => {
+    const result = upsertDistanceEntityLineConstraint([], "circle-1", { kind: "segmentEdge", segmentId: "seg-1" }, 20);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      kind: "distanceEntityLine",
+      entity: { entityId: "circle-1" },
+      line: { kind: "segmentEdge", segmentId: "seg-1" },
+      value: 20,
+    });
+  });
+
+  it("同じentityId+同じsegmentIdのsegmentEdgeが既にあれば値だけ差し替える(id・件数は変わらない)", () => {
+    const existing = [
+      {
+        id: "c-1",
+        kind: "distanceEntityLine" as const,
+        entity: { entityId: "circle-1" },
+        line: { kind: "segmentEdge" as const, segmentId: "seg-1" },
+        value: 20,
+      },
+    ];
+    const result = upsertDistanceEntityLineConstraint(existing, "circle-1", { kind: "segmentEdge", segmentId: "seg-1" }, 30);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({ ...existing[0], value: 30 });
+  });
+
+  it("同じentityIdでもsegmentIdが異なれば別拘束として追加する(sameLineRefがsegmentId不一致を区別する)", () => {
+    const existing = [
+      {
+        id: "c-1",
+        kind: "distanceEntityLine" as const,
+        entity: { entityId: "circle-1" },
+        line: { kind: "segmentEdge" as const, segmentId: "seg-1" },
+        value: 20,
+      },
+    ];
+    const result = upsertDistanceEntityLineConstraint(existing, "circle-1", { kind: "segmentEdge", segmentId: "seg-2" }, 30);
+    expect(result).toHaveLength(2);
   });
 });
 

@@ -1,9 +1,10 @@
 // LineRef(Phase 22、src/model/types.ts)を実際の2点(スケッチローカル2D)に解決する純関数群。
 // ReactにもThree.jsにもReplicad(OCCT)にも依存しない(src/sketch/entityDimensionPick.tsと同じ方針)。
 // entityEdge(rectangle/polygon)は常に「今のentitiesの値」から解決するため、エンティティが動けば
-// 辺も追従する。refEdge(ボディ端面参照)はピック時点の座標を凍結したスナップショットなので、
-// entities配列に関わらずline.p1/line.p2をそのまま返す。
-import type { LineRef, SketchEntity } from "../model/types";
+// 辺も追従する。segmentEdge(自由な線分)も同様に「今のsegmentsの値」から解決するため、線分自体が
+// 動けば辺も追従する。refEdge(ボディ端面参照)はピック時点の座標を凍結したスナップショットなので、
+// entities/segments配列に関わらずline.p1/line.p2をそのまま返す。
+import type { LineRef, SketchEntity, SketchSegment } from "../model/types";
 
 export type Point2 = [number, number];
 
@@ -61,10 +62,20 @@ export function polygonEdgePointsWithOffset(points: readonly Point2[], offset: P
 
 /**
  * LineRefを実際の2点に解決する。entityEdgeが参照するentityが見つからない・rectangle/polygon
- * 以外の場合はnullを返す(呼び出し側は防御的にこの拘束の残差を無視する)。
+ * 以外、またはsegmentEdgeが参照するsegmentが見つからない場合はnullを返す
+ * (呼び出し側は防御的にこの拘束の残差を無視する)。segmentsはsegmentEdge解決にのみ使う
+ * (省略可、entityEdge/refEdgeのみ扱う既存呼び出し元との後方互換のためデフォルト空配列)。
  */
-export function resolveLineRefPoints(line: LineRef, entities: readonly SketchEntity[]): [Point2, Point2] | null {
+export function resolveLineRefPoints(
+  line: LineRef,
+  entities: readonly SketchEntity[],
+  segments: readonly SketchSegment[] = [],
+): [Point2, Point2] | null {
   if (line.kind === "refEdge") return [line.p1, line.p2];
+  if (line.kind === "segmentEdge") {
+    const seg = segments.find((s) => s.id === line.segmentId);
+    return seg ? [seg.p1, seg.p2] : null;
+  }
   const entity = entities.find((e) => e.id === line.entityId);
   if (!entity) return null;
   if (entity.kind === "rectangle") return rectangleEdgePoints(entity, line.edgeIndex);
@@ -72,10 +83,16 @@ export function resolveLineRefPoints(line: LineRef, entities: readonly SketchEnt
   return null;
 }
 
-/** 2つのLineRefが「同じ辺」を指すかどうか(拘束のupsert時の同一判定に使う)。refEdge同士は座標一致で判定する。 */
+/**
+ * 2つのLineRefが「同じ辺」を指すかどうか(拘束のupsert時の同一判定に使う)。refEdge同士は座標一致、
+ * segmentEdge同士はsegmentId一致で判定する。
+ */
 export function sameLineRef(a: LineRef, b: LineRef): boolean {
   if (a.kind === "entityEdge" && b.kind === "entityEdge") {
     return a.entityId === b.entityId && a.edgeIndex === b.edgeIndex;
+  }
+  if (a.kind === "segmentEdge" && b.kind === "segmentEdge") {
+    return a.segmentId === b.segmentId;
   }
   if (a.kind === "refEdge" && b.kind === "refEdge") {
     const closeEnough = (p: Point2, q: Point2) => Math.hypot(p[0] - q[0], p[1] - q[1]) < 1e-6;

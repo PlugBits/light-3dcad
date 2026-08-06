@@ -467,6 +467,64 @@ describe("solveSketch circleエンティティの位置拘束(Phase 22)", () => 
     expect(result.conflicting).toBe(true);
   });
 
+  it("③d distanceEntityLine(segmentEdge): 円を固定すると自由な線分(vertical拘束付き)が平行移動して距離を満たす(寸法ツールが実際に生成する形式の回帰テスト、ユーザー報告対応)", () => {
+    // 前回コミット(19bd54d)のバグ再現条件: 矩形を線分ツールで描いた場合(4本の線分チェーン、
+    // rectangle/polygonエンティティではない)、CadViewer.ts側は以前distanceEntityLineの
+    // lineを常にrefEdge(ピック時点の座標を凍結)で作っていたため、円を固定して距離を変更すると
+    // 辺・円のどちらも動けず必ず矛盾になっていた(ブラウザ再現・ユーザー報告に一致)。
+    // segmentEdge(この改善で追加)はentityEdgeと同じく「今の値」から解決するため、線分自体が動く。
+    // verticalは実際の線分ツール確定時にbuildAutoConstraintsForChain(src/sketch/autoConstraints.ts)
+    // が軸ロックで付与する拘束を模したもの(無ければ線分が斜めに傾いて解かれてしまう、既知の制限)。
+    const c = circle("c1", [0, 0]);
+    const seg: SketchSegment = { id: "s1", kind: "line", p1: [10, -10], p2: [10, 10] };
+    const constraints: SketchConstraint[] = [
+      { id: "fixc", kind: "fixEntity", entity: { entityId: "c1" } },
+      { id: "vert", kind: "vertical", segmentId: "s1" },
+      {
+        id: "d1",
+        kind: "distanceEntityLine",
+        entity: { entityId: "c1" },
+        line: { kind: "segmentEdge", segmentId: "s1" },
+        value: 25,
+      },
+    ];
+    const result = solveSketch([seg], constraints, [c]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outC = result.entities.find((e) => e.id === "c1")!;
+    if (outC.kind !== "circle") throw new Error("not circle");
+    // 円は動いていない(fixEntity)。center[0]/[1]は-0になりうるためtoBeCloseToで比較する。
+    expect(outC.center[0]).toBeCloseTo(c.center[0], 6);
+    expect(outC.center[1]).toBeCloseTo(c.center[1], 6);
+    // 線分が平行移動してx=25(距離25)を満たし、vertical拘束によりp1/p2のxが揃ったまま解ける
+    // (segmentEdgeでなくrefEdgeのままだったなら、線分は固定線扱いとなり残差が変化しないため
+    // このケースは必ず矛盾[conflicting]になっていた)。
+    const outSeg = result.segments.find((s) => s.id === "s1")!;
+    expect(outSeg.p1[0]).toBeCloseTo(25, 3);
+    expect(outSeg.p2[0]).toBeCloseTo(25, 3);
+  });
+
+  it("③e distanceEntityLine(segmentEdge): 円・線分の双方を固定すると矛盾を検出する(segmentEdgeもfixEntity/fix同様に凍結できることの確認)", () => {
+    const c = circle("c1", [0, 0]);
+    const seg: SketchSegment = { id: "s1", kind: "line", p1: [10, -10], p2: [10, 10] };
+    const constraints: SketchConstraint[] = [
+      { id: "fixc", kind: "fixEntity", entity: { entityId: "c1" } },
+      { id: "fixp1", kind: "fix", point: { segmentId: "s1", end: "p1" } },
+      { id: "fixp2", kind: "fix", point: { segmentId: "s1", end: "p2" } },
+      {
+        id: "d1",
+        kind: "distanceEntityLine",
+        entity: { entityId: "c1" },
+        line: { kind: "segmentEdge", segmentId: "s1" },
+        value: 25,
+      },
+    ];
+    const result = solveSketch([seg], constraints, [c]);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.conflicting).toBe(true);
+  });
+
   it("④ distanceEntityLine(refEdge): ボディ端面参照エッジのスナップショット座標を固定線として解く", () => {
     const c = circle("c1", [0, 5]);
     const constraints: SketchConstraint[] = [
