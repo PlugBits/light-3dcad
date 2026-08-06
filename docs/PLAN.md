@@ -411,3 +411,23 @@ arc×2、slot→2line+2arc、regularPolygon→line列、polygon→`computeCorner
 Vitest210件(トリム5件・分解3件が新規)。ブラウザ確認: 線分ツールで十字の交差線を描く→トリムで
 右腕の交点より先を削除(赤プレビュー→クリックで実削除、残り半分は保持)→別の場所で線分ツールの
 始点付近クリックによる閉チェーンで正方形を作図→押し出しが成功、を確認した。
+
+## Phase 20a: スケッチ拘束ソルバコア(純TS)完了
+
+寸法ドリブン編集(Phase 20b)の土台。`SketchFeature`に`SketchConstraint`(coincident/horizontal/
+vertical/length/distance/radius/fix、後方互換の追加フィールド)を追加し、新設`src/sketch/solver.ts`の
+`solveSketch()`が自前実装のLevenberg-Marquardt法(外部ライブラリ非依存、ヤコビアンは解析的)で
+拘束残差二乗和を最小化する。全セグメント端点座標を独立変数とし(coincidentはマージせず残差で表現)、
+劣拘束自由度は「初期位置からの移動量への弱い正則化」で入力形状に最も近い解を選ぶ「暖機」段階と、
+正則化を外して拘束残差のみを追い込む「仕上げ」段階の2段階で解く(単一段階の重み付き最小二乗では
+正則化由来の恒常的バイアスが許容誤差1e-4mmを超えることを実装検証で確認したため)。矛盾(過拘束)は
+`conflicting:true`で返す。新設`src/sketch/autoConstraints.ts`が線分ツール確定時の自動拘束(連続辺の
+coincident・軸ロック確定辺のhorizontal/vertical・既存セグメントへのスナップ接続のcoincident)を
+組み立て、`App.tsx`の線分ツール確定経路から`addSketchSegments`のconstraints引数へ渡す(UIの見た目は
+変更なし)。`store.ts`の`updateDocument`はWorker評価に回す前に`solveDocumentSketches()`でsegmentsを
+解いた状態に置き換え、矛盾があれば評価をスキップしてfeatureId付きエラーを表示する。
+Vitest243件(ソルバ17件[長さ/水平/垂直/coincident伝播/矩形4辺リサイズ/矛盾検出2種/distance/radius/
+正則化不動/T字接合/恒等変換/空配列/fix/円弧属性保持/solveDocumentSketches2件]・自動拘束9件・
+拘束バリデーション5件・addSketchSegments2件が新規)。20bへの申し送り: 拘束の追加・編集UI(SketchEditor
+への拘束一覧・寸法入力パネル)、既存entities(rectangle/circle等)を拘束対象にする場合はsegments化
+(分解)が前提になる点、ビューア上での拘束アイコン表示は未着手。

@@ -6,6 +6,7 @@ import { FeatureTree } from "../components/FeatureTree";
 import { SketchEditor } from "../components/SketchEditor";
 import { downloadStl } from "../export/downloadStl";
 import { addSketchEntity, addSketchSegments, findFeature, getDependentFeatureIds, setPolygonVertexCorner, setSketchSegments } from "../model/document";
+import { buildAutoConstraintsForChain } from "../sketch/autoConstraints";
 import {
   createArcSegment,
   createCircleEntity,
@@ -314,7 +315,7 @@ export default function App() {
       selectedFeature.entities,
       selectedFeature.segments ?? [],
       {
-        onComplete: (points, bulges) => {
+        onComplete: (points, bulges, axisLocks) => {
           const segments: ReturnType<typeof createLineSegment>[] = [];
           for (let i = 0; i < points.length - 1; i += 1) {
             const bulge = bulges[i];
@@ -322,7 +323,14 @@ export default function App() {
               bulge ? createArcSegment({ p1: points[i], p2: points[i + 1], bulge }) : createLineSegment({ p1: points[i], p2: points[i + 1] }),
             );
           }
-          updateDocument((d) => addSketchSegments(d, sketchId, segments));
+          // 接続端点のcoincident・軸ロック確定辺のhorizontal/verticalを自動付与する(Phase 20a)。
+          // ソルバへの反映(store.ts)まではUIの見た目は変わらない(20bで拘束編集UIを追加する)。
+          const autoConstraints = buildAutoConstraintsForChain({
+            newSegments: segments,
+            axisLocks,
+            existingSegments: selectedFeature.segments ?? [],
+          });
+          updateDocument((d) => addSketchSegments(d, sketchId, segments, autoConstraints));
           setActiveTool(null);
           setDrawingSketchId(null);
           setArcModeActive(false);

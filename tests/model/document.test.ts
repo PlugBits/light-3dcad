@@ -4,8 +4,10 @@ import {
   addExtrudeFeature,
   addSketchEntity,
   addSketchFeature,
+  addSketchSegments,
   createEmptyDocument,
   createCircleEntity,
+  createLineSegment,
   createPolygonEntity,
   createRectangleEntity,
   findFeature,
@@ -22,7 +24,7 @@ import {
   validateDocument,
   validateFeature,
 } from "../../src/model";
-import type { CadDocument, ExtrudeFeature, SketchFeature } from "../../src/model";
+import type { CadDocument, ExtrudeFeature, SketchConstraint, SketchFeature } from "../../src/model";
 
 function makeRectSketchDoc(): { doc: CadDocument; sketch: SketchFeature } {
   const empty = createEmptyDocument();
@@ -229,6 +231,27 @@ describe("addSketchEntity / removeSketchEntity", () => {
   });
 });
 
+describe("addSketchSegments(constraints引数、Phase 20a)", () => {
+  it("constraintsを渡すと既存constraintsに追記される(segmentsも追加される)", () => {
+    const { doc, sketch } = makeRectSketchDoc();
+    const seg = createLineSegment({ p1: [0, 0], p2: [10, 0] });
+    const constraint: SketchConstraint = { id: "c1", kind: "horizontal", segmentId: seg.id };
+    const updated = addSketchSegments(doc, sketch.id, [seg], [constraint]);
+    const found = findFeature(updated, sketch.id) as SketchFeature;
+    expect(found.segments).toEqual([seg]);
+    expect(found.constraints).toEqual([constraint]);
+  });
+
+  it("constraintsを省略すると既存のconstraintsフィールドは追加されない(後方互換)", () => {
+    const { doc, sketch } = makeRectSketchDoc();
+    const seg = createLineSegment({ p1: [0, 0], p2: [10, 0] });
+    const updated = addSketchSegments(doc, sketch.id, [seg]);
+    const found = findFeature(updated, sketch.id) as SketchFeature;
+    expect(found.segments).toEqual([seg]);
+    expect(found.constraints).toBeUndefined();
+  });
+});
+
 describe("getDirectDependentFeatureIds / getDependentFeatureIds / removeFeatureCascade", () => {
   function makeSketchExtrudeChainDoc(): { doc: CadDocument; sketch: SketchFeature; extrude: ExtrudeFeature } {
     const { doc, sketch } = makeRectSketchDoc();
@@ -417,6 +440,60 @@ describe("validateFeature / validateDocument", () => {
       [],
     );
     expect(errors).toEqual([]);
+  });
+
+  describe("スケッチ拘束(SketchConstraint、Phase 20a)のバリデーション", () => {
+    function sketchWithSegmentsAndConstraints(constraints: SketchConstraint[]): SketchFeature {
+      return {
+        type: "sketch",
+        id: "s1",
+        name: "S",
+        plane: { kind: "world", plane: "XY" },
+        entities: [],
+        segments: [
+          { id: "line1", kind: "line", p1: [0, 0], p2: [10, 0] },
+          { id: "arc1", kind: "arc", p1: [0, 0], p2: [10, 0], bulge: 1 },
+        ],
+        constraints,
+      };
+    }
+
+    it("正しい拘束(参照先が存在し、値が正、radiusはarc対象)はエラーなし", () => {
+      const feature = sketchWithSegmentsAndConstraints([
+        { id: "c1", kind: "horizontal", segmentId: "line1" },
+        { id: "c2", kind: "length", segmentId: "line1", value: 10 },
+        { id: "c3", kind: "radius", segmentId: "arc1", value: 8 },
+        { id: "c4", kind: "coincident", a: { segmentId: "line1", end: "p1" }, b: { segmentId: "arc1", end: "p1" } },
+        { id: "c5", kind: "fix", point: { segmentId: "line1", end: "p2" } },
+      ]);
+      expect(validateFeature(feature, [feature])).toEqual([]);
+    });
+
+    it("存在しないsegmentIdを参照する拘束はエラー", () => {
+      const feature = sketchWithSegmentsAndConstraints([{ id: "c1", kind: "horizontal", segmentId: "missing" }]);
+      const errors = validateFeature(feature, [feature]);
+      expect(errors.some((e) => e.message.includes("見つかりません"))).toBe(true);
+    });
+
+    it("length拘束の値が0以下だとエラー", () => {
+      const feature = sketchWithSegmentsAndConstraints([{ id: "c1", kind: "length", segmentId: "line1", value: 0 }]);
+      const errors = validateFeature(feature, [feature]);
+      expect(errors.some((e) => e.message.includes("長さ"))).toBe(true);
+    });
+
+    it("radius拘束をline(直線)セグメントに指定するとエラー", () => {
+      const feature = sketchWithSegmentsAndConstraints([{ id: "c1", kind: "radius", segmentId: "line1", value: 5 }]);
+      const errors = validateFeature(feature, [feature]);
+      expect(errors.some((e) => e.message.includes("円弧セグメントにのみ"))).toBe(true);
+    });
+
+    it("distance拘束の参照点(PointRef)のsegmentIdが存在しないとエラー", () => {
+      const feature = sketchWithSegmentsAndConstraints([
+        { id: "c1", kind: "distance", a: { segmentId: "line1", end: "p1" }, b: { segmentId: "missing", end: "p2" }, value: 10 },
+      ]);
+      const errors = validateFeature(feature, [feature]);
+      expect(errors.some((e) => e.message.includes("見つかりません"))).toBe(true);
+    });
   });
 
   describe("多角形の頂点コーナー(fillet/chamfer、Phase 11)", () => {

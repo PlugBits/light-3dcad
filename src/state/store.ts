@@ -12,6 +12,7 @@ import {
 import { createRectangleEntity } from "../model/entity";
 import type { CadDocument, ExtrudeFeature, FeatureId, WorldPlaneName } from "../model/types";
 import type { FaceInfo, MeshData, MeshQuality, SketchPlaneInfo, WorkerResponse } from "../protocol/messages";
+import { solveDocumentSketches } from "../sketch/solver";
 import { createHistoryState, pushHistory, redoHistory, undoHistory, type HistoryState } from "./history";
 
 export type EvalStatus = "initializing" | "evaluating" | "ready" | "error";
@@ -239,10 +240,30 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
 
   updateDocument: (updater) => {
     const prevDoc = get().doc;
-    const nextDoc = updater(prevDoc);
-    if (nextDoc === prevDoc) return;
-    const { requestId, promise } = postRequest({ kind: "evaluate", doc: nextDoc });
+    const updatedDoc = updater(prevDoc);
+    if (updatedDoc === prevDoc) return;
     const nextHistory = pushHistory(get().history, structuredClone(prevDoc));
+
+    // 拘束(SketchConstraint、Phase 20a)を持つsketchがあれば、Worker評価に回す前にsolveSketch()で
+    // segmentsを解いた状態に置き換える(ソルバは純粋TSでメインスレッドで完結する)。
+    // いずれかのスケッチで矛盾(過拘束)が検出された場合は評価そのものをスキップし、
+    // featureId付きのエラーとして表示する(既存のWorker評価エラーと同じerrorMessage/errorFeatureId経路)。
+    const solved = solveDocumentSketches(updatedDoc);
+    if (solved.conflict) {
+      const requestId = nextRequestId(); // 実際にはWorkerへ送らないが、latestEvaluateRequestIdを進めて古い応答を無効化する。
+      set({
+        doc: updatedDoc,
+        status: "error",
+        errorMessage: solved.conflict.message,
+        errorFeatureId: solved.conflict.featureId,
+        latestEvaluateRequestId: requestId,
+        history: nextHistory,
+      });
+      return;
+    }
+
+    const nextDoc = solved.doc;
+    const { requestId, promise } = postRequest({ kind: "evaluate", doc: nextDoc });
     set({ doc: nextDoc, status: "evaluating", latestEvaluateRequestId: requestId, history: nextHistory });
     promise.then((response) => applyEvaluated(set, get, requestId, response));
   },

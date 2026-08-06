@@ -7,6 +7,7 @@ import type {
   FeatureId,
   PlaneRef,
   PolygonCorner,
+  SketchConstraint,
   SketchEntity,
   SketchFeature,
   SketchSegment,
@@ -172,11 +173,21 @@ export function setSketchSegments(doc: CadDocument, sketchId: FeatureId, segment
   return updateFeature<SketchFeature>(doc, sketchId, (sketch) => ({ ...sketch, segments }));
 }
 
-/** sketch にセグメント(Phase 19a)を追加する(線分作図ツール・分解の確定時に使う、Phase 19b)。 */
-export function addSketchSegments(doc: CadDocument, sketchId: FeatureId, segments: SketchSegment[]): CadDocument {
+/**
+ * sketch にセグメント(Phase 19a)を追加する(線分作図ツール・分解の確定時に使う、Phase 19b)。
+ * constraints(Phase 20a)を同時に渡すと、追加されたセグメントに対する自動拘束
+ * (src/sketch/autoConstraints.ts参照)も一緒に既存constraintsへ追記する(省略可、後方互換)。
+ */
+export function addSketchSegments(
+  doc: CadDocument,
+  sketchId: FeatureId,
+  segments: SketchSegment[],
+  constraints?: SketchConstraint[],
+): CadDocument {
   return updateFeature<SketchFeature>(doc, sketchId, (sketch) => ({
     ...sketch,
     segments: [...(sketch.segments ?? []), ...segments],
+    ...(constraints && constraints.length > 0 ? { constraints: [...(sketch.constraints ?? []), ...constraints] } : {}),
   }));
 }
 

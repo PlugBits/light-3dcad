@@ -176,8 +176,10 @@ export interface SegmentDrawingCallbacks {
    * (points.length >= 2 が保証される)。bulges[i]はpoints[i]→points[i+1]の辺のふくらみ(nullは直線、
    * 長さは常に points.length-1)。始点付近クリックで閉じた場合はpoints[0]と同じ座標が末尾に追加され、
    * 実質的な閉チェーンになる(polygonエンティティへの変換はしない)。
+   * axisLocks[i](Phase 20a、長さはbulgesと同じpoints.length-1)は辺iの確定時に軸ロック
+   * (水平/垂直吸着)が効いていたか。src/sketch/autoConstraints.tsの自動拘束付与に使う。
    */
-  onComplete: (points: [number, number][], bulges: (number | null)[]) => void;
+  onComplete: (points: [number, number][], bulges: (number | null)[], axisLocks: AxisLockKind[]) => void;
   /** Escapeキーまたはcancel呼び出しで中断したときに呼ばれる(頂点0でも呼ばれうる)。 */
   onCancel: () => void;
   /** 円弧モード(Phase 17と同じ仕組み)のON/OFFが切り替わるたびに呼ばれる。省略可。 */
@@ -540,6 +542,12 @@ export class CadViewer {
    * (drawingBulges.length === drawingPoints.length - 1 を維持する。頂点0にはまだ対応する辺が無いため)。
    */
   private drawingBulges: (number | null)[] = [];
+  /**
+   * セグメント描画モード中の辺ごとの軸ロック状態(Phase 20a)。drawingBulgesと同じ並び
+   * (drawingPoints[i]→drawingPoints[i+1]に対応、長さはdrawingPoints.length-1)。
+   * polygonツールでは使わない(常にnullのまま、finishPolygonDrawing()のコールバックに含めない)。
+   */
+  private drawingAxisLocks: AxisLockKind[] = [];
   /** 円弧セグメント(Phase 17)トグル中かどうか。trueの間、次のクリックは通過点/終点として扱われる。 */
   private drawingArcMode = false;
   /** 円弧セグメントの1クリック目(通過点)。null=まだ通過点未確定。 */
@@ -816,6 +824,8 @@ export class CadViewer {
     if (dist === 0) return;
     const next: [number, number] = [from[0] + (dx / dist) * value, from[1] + (dy / dist) * value];
 
+    // 数値長さ入力で確定した辺は軸ロック状態を追跡していないため、常にaxis:null(自動水平/垂直拘束の対象外)。
+    // 実用上はコインシデント拘束(接続端点)のみが自動で付き、水平/垂直はPhase 20bの手動拘束UIで付けられる。
     this.pushDrawingPoint(next, null);
     this.updateDrawingPreview();
     this.updateCoordOverlay(this.lastMousePx, this.lastMousePy, next);
@@ -1360,6 +1370,7 @@ export class CadViewer {
     this.drawingSegments = existingSegments;
     this.drawingPoints = [];
     this.drawingBulges = [];
+    this.drawingAxisLocks = [];
     this.drawingArcMode = false;
     this.drawingArcPending = null;
     this.renderer.domElement.style.cursor = "crosshair";
@@ -1719,9 +1730,10 @@ export class CadViewer {
     if (!this.drawingActive || this.drawingShape !== "segment" || this.drawingPoints.length < 2) return;
     const points = [...this.drawingPoints];
     const bulges = [...this.drawingBulges];
+    const axisLocks = [...this.drawingAxisLocks];
     const callbacks = this.segmentCallbacks;
     this.exitDrawingState();
-    callbacks?.onComplete(points, bulges);
+    callbacks?.onComplete(points, bulges, axisLocks);
   }
 
   /**
@@ -1759,6 +1771,7 @@ export class CadViewer {
     this.drawingSegments = [];
     this.drawingPoints = [];
     this.drawingBulges = [];
+    this.drawingAxisLocks = [];
     this.drawingArcMode = false;
     this.drawingArcPending = null;
     this.polygonCallbacks = null;
@@ -1799,12 +1812,14 @@ export class CadViewer {
   }
 
   /**
-   * 頂点(またはbulge=null)を確定済み頂点列に追加する共通ヘルパー。drawingBulgesは
+   * 頂点(またはbulge=null)を確定済み頂点列に追加する共通ヘルパー。drawingBulges/drawingAxisLocksは
    * drawingPoints.length-1個を維持する(頂点0にはまだ対応する辺が無いため、2点目以降のみ追加)。
+   * axis(Phase 20a)はセグメントツールでのみ意味を持つ(polygonツールの呼び出しは省略し、既定のnullになる)。
    */
-  private pushDrawingPoint(point: [number, number], bulge: number | null) {
+  private pushDrawingPoint(point: [number, number], bulge: number | null, axis: AxisLockKind = null) {
     if (this.drawingPoints.length > 0) {
       this.drawingBulges.push(bulge);
+      this.drawingAxisLocks.push(axis);
     }
     this.drawingPoints.push(point);
   }
@@ -1924,7 +1939,7 @@ export class CadViewer {
       return;
     }
 
-    this.pushDrawingPoint(resolved.point, null);
+    this.pushDrawingPoint(resolved.point, null, resolved.axis);
     this.updateDrawingPreview();
     this.updateCoordOverlay(px, py, resolved.point);
   }
@@ -1943,6 +1958,7 @@ export class CadViewer {
       if (Math.hypot(last[0] - prev[0], last[1] - prev[1]) < 1e-6) {
         this.drawingPoints.pop();
         this.drawingBulges.pop();
+        this.drawingAxisLocks.pop();
       }
     }
     this.finishSegmentDrawing();
