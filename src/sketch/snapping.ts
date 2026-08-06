@@ -3,6 +3,7 @@
 // 呼び出し側(CadViewer)はスクリーンpx単位の許容距離をスケッチのローカルmm単位に換算してから
 // tolerance として渡すこと(このモジュール自体はmm単位の値しか扱わない)。
 import type { SketchEntity } from "../model/types";
+import { regularPolygonVertices } from "./shapeFromPoints";
 
 /** スナップ候補の種別。優先順位は SNAP_PRIORITY の定義順(数値が小さいほど優先)。 */
 export type SnapKind = "vertex" | "center" | "midpoint" | "origin" | "grid";
@@ -215,8 +216,16 @@ export function collectSketchSnapCandidates(entities: SketchEntity[]): SnapCandi
       }
     } else if (entity.kind === "circle") {
       candidates.push({ point: entity.center, kind: "center" });
+    } else if (entity.kind === "slot") {
+      candidates.push({ point: entity.start, kind: "vertex" });
+      candidates.push({ point: entity.end, kind: "vertex" });
+      candidates.push({ point: midpoint(entity.start, entity.end), kind: "midpoint" });
+    } else if (entity.kind === "regularPolygon") {
+      candidates.push({ point: entity.center, kind: "center" });
+      const vertices = regularPolygonVertices(entity.center, entity.radius, entity.sides, entity.rotation ?? 0);
+      vertices.forEach((p) => candidates.push({ point: p, kind: "vertex" }));
     } else {
-      const points = entity.points;
+      const points: [number, number][] = entity.points;
       points.forEach((p) => candidates.push({ point: p, kind: "vertex" }));
       for (let i = 0; i < points.length; i += 1) {
         candidates.push({ point: midpoint(points[i], points[(i + 1) % points.length]), kind: "midpoint" });

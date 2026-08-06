@@ -28,6 +28,7 @@
 // 含まれるhole」として扱われ、誤ってholeのまま(削れてしまう)になる既知の制限がある
 // (真の偶奇ネストにするには階層の深さを数える必要があるが、Phase 15スコープでは対応しない)。
 import type { SketchEntity } from "../model/types";
+import { regularPolygonVertices, slotAxisNormal } from "./shapeFromPoints";
 
 export type Point2 = [number, number];
 
@@ -36,7 +37,11 @@ const CONTAINMENT_EPS = 1e-6;
 /** 点が多角形の辺上にあるとみなす距離許容(mm)。 */
 const BOUNDARY_EPS = 1e-7;
 
-/** エンティティの代表点列(頂点ベース。円は中心点のみ)。corners は無視する。 */
+/**
+ * エンティティの代表点列(頂点ベース。円は中心点のみ)。corners/bulges(円弧のふくらみ)は無視する
+ * (モジュール先頭のコメント参照。既知の近似)。
+ * slot は4つの角(直線部の頂点、半円キャップの膨らみは無視)、regularPolygon は正確な頂点列を使う。
+ */
 function entityVertices(entity: SketchEntity): Point2[] {
   if (entity.kind === "rectangle") {
     const [cx, cy] = entity.center;
@@ -51,6 +56,21 @@ function entityVertices(entity: SketchEntity): Point2[] {
   }
   if (entity.kind === "circle") {
     return [entity.center];
+  }
+  if (entity.kind === "slot") {
+    const r = entity.width / 2;
+    const n = slotAxisNormal(entity.start, entity.end);
+    const [sx, sy] = entity.start;
+    const [ex, ey] = entity.end;
+    return [
+      [sx + n[0] * r, sy + n[1] * r],
+      [ex + n[0] * r, ey + n[1] * r],
+      [ex - n[0] * r, ey - n[1] * r],
+      [sx - n[0] * r, sy - n[1] * r],
+    ];
+  }
+  if (entity.kind === "regularPolygon") {
+    return regularPolygonVertices(entity.center, entity.radius, entity.sides, entity.rotation ?? 0);
   }
   return entity.points;
 }

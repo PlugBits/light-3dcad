@@ -358,3 +358,17 @@ Vitest138件(履歴・2点→矩形/円変換の新規11件)。
 (スクリーン距離10px以内、既存の`projectPoint`を流用)をクリックすると、既存の
 `setPolygonVertexCorner`でcornersデータを更新する(同種コーナー適用済みならトグルで解除)。
 連続クリック可・Escで終了。SketchEditorの既存頂点コーナーUIはそのまま残した。
+
+## Phase 17: 円弧・スロット・正多角形完了
+
+`slot`(直線+半円キャップ2つ)・`regularPolygon`(外接円半径・辺数・回転)エンティティを追加し、
+polygonに辺ごとのふくらみ`bulges`(bulge=tan(挟角/4)、DXF互換の定義)を追加した。新設
+`src/sketch/bulge.ts`がreplicadの`DrawingPen#bulgeArcTo(end, bulge)`(node_modules/replicad内の
+`sagittaArcTo`実装)と同じ経由点計算を再実装し、円弧のポリライン近似(オーバーレイ)と実際の
+B-Rep形状を一致させる。スロットの半円キャップはbulge=-1(半円)、evaluator/オーバーレイ両方が
+同じ`bulgeArcTo`/`bulgeArcPoints`を使う。ツールバーに「スロット」(幅入力欄)「正多角形」
+(辺数入力欄)ボタン(2クリック作図)、線描画モードに「円弧(A)」トグル(次セグメントを3点円弧に)
+を追加。corners(フィレット/面取り)とbulgeが同じ頂点で衝突する場合はcorners優先でbulge無視
+(`effectivePolygonBulges`)。containmentは頂点ベース近似のまま(slot/regularPolygonは代表点、
+bulgeの膨らみは無視、既知の制限)。Vitest167件(bulge幾何6件・スロット/正多角形頂点3件・
+polygon bulge輪郭2件・スロット/正多角形/bulge押し出し体積3件が新規)。

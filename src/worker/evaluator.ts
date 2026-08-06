@@ -18,7 +18,9 @@ import { Plane, draw, drawCircle, drawRectangle, type Drawing, type Face, type S
 
 import type { CadDocument, FeatureId, PolygonCorner, SketchEntity, SketchFeature } from "../model/types";
 import { validatePolygonCorners } from "../model/validation";
+import { effectivePolygonBulges } from "../sketch/bulge";
 import { classifySketchEntities } from "../sketch/containment";
+import { regularPolygonVertices, slotAxisNormal, SLOT_CAP_BULGE } from "../sketch/shapeFromPoints";
 import type { SketchPlaneInfo } from "../protocol/messages";
 
 export interface EvaluationSuccess {
@@ -114,20 +116,59 @@ const WORLD_PLANE_BASES: Record<"XY" | "XZ" | "YZ", PlaneBasis> = {
  * (_customCornerLastWithFirst()がpendingCurvesの先頭と末尾を取り出して処理する実装のため)。
  * これにより頂点0を含む全頂点でフィレット/面取りが可能(回避策の頂点シフトは不要)。
  */
-function polygonDrawing(points: [number, number][], corners?: PolygonCorner[]): Drawing {
+/**
+ * corners と同様、bulges(Phase 17)は辺i(points[i]→points[i+1]、最後は points[n-1]→points[0])の
+ * ふくらみをreplicadの DrawingPen#bulgeArcTo(end, bulge) で構築する。corners優先ルール
+ * (同じ頂点にcornerとbulgeが両方指定されている場合はcornerを優先しbulgeを無視)は
+ * effectivePolygonBulges()(src/sketch/bulge.ts)で解決する(polygonOutlinePointsと同じ規則)。
+ * 閉じる辺(points[n-1]→points[0])にbulgeがある場合はclose()の前に明示的にbulgeArcToで
+ * 描いておく(pointerが既にfirstPointと一致するため、close()内の"閉じる直線"はno-opになる)。
+ */
+function polygonDrawing(points: [number, number][], corners?: PolygonCorner[], bulges?: (number | null)[]): Drawing {
+  const n = points.length;
+  const effectiveBulges = effectivePolygonBulges(n, corners, bulges);
   let pen = draw(points[0]);
-  for (let i = 1; i < points.length; i += 1) {
-    pen = pen.lineTo(points[i]);
+  for (let i = 1; i < n; i += 1) {
+    const bulge = effectiveBulges[i - 1];
+    pen = bulge ? pen.bulgeArcTo(points[i], bulge) : pen.lineTo(points[i]);
     const corner = corners?.[i];
     if (corner) {
       pen = pen.customCorner(corner.size, corner.kind);
     }
+  }
+  const closingBulge = effectiveBulges[n - 1];
+  if (closingBulge) {
+    pen = pen.bulgeArcTo(points[0], closingBulge);
   }
   const corner0 = corners?.[0];
   if (corner0) {
     return pen.closeWithCustomCorner(corner0.size, corner0.kind);
   }
   return pen.close();
+}
+
+/**
+ * 直線スロット(中心線start→end、全幅width)をDrawingとして構築する(Phase 17)。
+ * 両端の半円キャップは replicad の bulgeArcTo(end, ±1)(半円 = tan(±π/4) = ±1)で作る。
+ * src/sketch/shapeFromPoints.ts の slotOutlinePoints() と同じ4隅(a,b,c,d)・向きを使うため、
+ * オーバーレイ(ポリライン近似)と実際のB-Rep形状が一致する。
+ */
+function slotDrawing(entity: Extract<SketchEntity, { kind: "slot" }>): Drawing {
+  const r = entity.width / 2;
+  const n = slotAxisNormal(entity.start, entity.end);
+  const [sx, sy] = entity.start;
+  const [ex, ey] = entity.end;
+  const a: [number, number] = [sx + n[0] * r, sy + n[1] * r];
+  const b: [number, number] = [ex + n[0] * r, ey + n[1] * r];
+  const c: [number, number] = [ex - n[0] * r, ey - n[1] * r];
+  const d: [number, number] = [sx - n[0] * r, sy - n[1] * r];
+  return draw(a).lineTo(b).bulgeArcTo(c, SLOT_CAP_BULGE).lineTo(d).bulgeArcTo(a, SLOT_CAP_BULGE).close();
+}
+
+/** 正多角形(外接円半径・辺数・回転)をDrawingとして構築する(Phase 17)。頂点計算はpolygonと同じ経路(cornersなし)で構築する。 */
+function regularPolygonDrawing(entity: Extract<SketchEntity, { kind: "regularPolygon" }>): Drawing {
+  const vertices = regularPolygonVertices(entity.center, entity.radius, entity.sides, entity.rotation ?? 0);
+  return polygonDrawing(vertices);
 }
 
 /**
@@ -147,7 +188,7 @@ function validateSketchPolygonCorners(sketch: SketchFeature): void {
   }
 }
 
-/** 1つのエンティティ(rectangle/circle/polygon)をDrawingに変換する。 */
+/** 1つのエンティティ(rectangle/circle/polygon/slot/regularPolygon)をDrawingに変換する。 */
 function entityDrawing(entity: SketchEntity): Drawing {
   if (entity.kind === "rectangle") {
     const [cx, cy] = entity.center;
@@ -157,7 +198,13 @@ function entityDrawing(entity: SketchEntity): Drawing {
     const [cx, cy] = entity.center;
     return drawCircle(entity.radius).translate(cx, cy);
   }
-  return polygonDrawing(entity.points, entity.corners);
+  if (entity.kind === "slot") {
+    return slotDrawing(entity);
+  }
+  if (entity.kind === "regularPolygon") {
+    return regularPolygonDrawing(entity);
+  }
+  return polygonDrawing(entity.points, entity.corners, entity.bulges);
 }
 
 /** エンティティ列をfuseで1つのDrawingに合成する(entitiesは非空を前提)。 */

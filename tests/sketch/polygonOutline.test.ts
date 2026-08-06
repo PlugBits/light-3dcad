@@ -120,7 +120,25 @@ describe("polygonOutlinePoints", () => {
   });
 
   it("segmentsPerArcを指定すると弧の分割数が変わる", () => {
-    const outline = polygonOutlinePoints(SQUARE, [{ kind: "fillet", size: 5 }, null, null, null], 4);
+    const outline = polygonOutlinePoints(SQUARE, [{ kind: "fillet", size: 5 }, null, null, null], undefined, 4);
     expect(outline.length).toBe(4 + 1 + 3);
+  });
+
+  it("Phase 17: 辺にbulgeを指定すると円弧近似の中間点が挿入される(直線のときより点数が増える)", () => {
+    // 下辺(頂点0→1)にbulge=1(弦=40の弧)を指定。中間点(始点・終点を除く)がsegments-1点増える。
+    const outline = polygonOutlinePoints(SQUARE, undefined, [1, null, null, null], 8);
+    expect(outline.length).toBe(SQUARE.length + (8 - 1));
+    // 頂点0・頂点1自体はそのまま含まれる(端点は重複させない設計)。
+    expect(outline[0]).toEqual([0, 0]);
+    // 中間点は下辺の直線(y=0)から外れている(弧なので)。
+    const midIndex = 1 + Math.floor(8 / 2) - 1;
+    expect(Math.abs(outline[midIndex][1])).toBeGreaterThan(0.1);
+  });
+
+  it("Phase 17: 頂点にcornerがある場合、その頂点に接する辺のbulgeは無視される(corners優先)", () => {
+    // 頂点1にfillet、辺0(頂点0→1)にbulgeを同時指定→bulgeは無視され直線のまま(頂点1のフィレットのみ適用)。
+    const withCorner = polygonOutlinePoints(SQUARE, [null, { kind: "fillet", size: 5 }, null, null], [1, null, null, null], 8);
+    const withoutBulge = polygonOutlinePoints(SQUARE, [null, { kind: "fillet", size: 5 }, null, null], undefined, 8);
+    expect(withCorner).toEqual(withoutBulge);
   });
 });

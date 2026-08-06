@@ -3,8 +3,15 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
 import type { FeatureId, SketchEntity } from "../model/types";
 import type { FaceGroup, FaceInfo, MeshData } from "../protocol/messages";
+import { bulgeArcPoints, bulgeFromThreePoints } from "../sketch/bulge";
 import { polygonOutlinePoints } from "../sketch/polygonOutline";
-import { circleRadiusFromPoints, rectangleCornerPoints } from "../sketch/shapeFromPoints";
+import {
+  circleRadiusFromPoints,
+  rectangleCornerPoints,
+  regularPolygonFromCenterVertex,
+  regularPolygonVertices,
+  slotOutlinePoints,
+} from "../sketch/shapeFromPoints";
 import {
   collectSketchSnapCandidates,
   ORIGIN_CANDIDATE,
@@ -111,10 +118,16 @@ export interface PlaneBasis {
 
 /** 線描画モードの完了/キャンセル時に呼ばれるコールバック。 */
 export interface PolygonDrawingCallbacks {
-  /** 3点以上の頂点列で閉じて確定したときに呼ばれる(ローカル2D座標、スナップ適用済み)。 */
-  onComplete: (points: [number, number][]) => void;
+  /**
+   * 3点以上の頂点列で閉じて確定したときに呼ばれる(ローカル2D座標、スナップ適用済み)。
+   * bulges(Phase 17)は辺i(points[i]→points[i+1]、最後は閉じる辺)のふくらみ。円弧セグメントを
+   * 1つも使わなかった場合は省略される(undefined)。
+   */
+  onComplete: (points: [number, number][], bulges?: (number | null)[]) => void;
   /** Escapeキーまたはcancel呼び出しで中断したときに呼ばれる(頂点0でも呼ばれうる)。 */
   onCancel: () => void;
+  /** 円弧モード(Phase 17)のON/OFFが切り替わるたびに呼ばれる(Aキー/ツールバートグル両方の経路)。省略可。 */
+  onArcModeChange?: (active: boolean) => void;
 }
 
 /** 矩形ツール(2クリック)の完了/キャンセル時に呼ばれるコールバック(Phase 14)。 */
@@ -133,8 +146,30 @@ export interface CircleDrawingCallbacks {
   onCancel: () => void;
 }
 
-/** 描画モードの対象図形種別。polygonは既存の複数頂点線描画、rectangle/circleは2クリック作図(Phase 14)。 */
-type DrawingShapeKind = "polygon" | "rectangle" | "circle";
+/** スロットツール(2クリック)の完了/キャンセル時に呼ばれるコールバック(Phase 17)。 */
+export interface SlotDrawingCallbacks {
+  /** 2クリック目で確定したときに呼ばれる(中心線の始点・終点、ローカル2D座標、スナップ適用済み)。widthはツール開始時に固定済みのため呼び出し側が把握している。 */
+  onComplete: (start: [number, number], end: [number, number]) => void;
+  /** Escapeキーまたはcancel呼び出しで中断したときに呼ばれる(1クリック目前でも呼ばれうる)。 */
+  onCancel: () => void;
+}
+
+/** 正多角形ツール(2クリック)の完了/キャンセル時に呼ばれるコールバック(Phase 17)。 */
+export interface RegularPolygonDrawingCallbacks {
+  /** 2クリック目で確定したときに呼ばれる(中心、外接円半径、回転(ラジアン)、ローカル2D座標/mm、スナップ適用済み)。 */
+  onComplete: (center: [number, number], radius: number, rotation: number) => void;
+  /** Escapeキーまたはcancel呼び出しで中断したときに呼ばれる(1クリック目前でも呼ばれうる)。 */
+  onCancel: () => void;
+}
+
+/**
+ * 描画モードの対象図形種別。polygonは既存の複数頂点線描画、rectangle/circleは2クリック作図(Phase 14)、
+ * slot/regularPolygonも2クリック作図(Phase 17。幅/辺数はツール開始時に固定するパラメータ)。
+ */
+type DrawingShapeKind = "polygon" | "rectangle" | "circle" | "slot" | "regularPolygon";
+
+/** 線描画モード中の円弧セグメント(Phase 17)プレビューの弧分割数。 */
+const ARC_PREVIEW_SEGMENTS = 24;
 
 /** フィレット/面取りツール(Phase 18)の開始/終了時に呼ばれるコールバック。 */
 export interface CornerToolCallbacks {
@@ -201,7 +236,7 @@ function circleLocalPoints(center: [number, number], radius: number, segments: n
   return points;
 }
 
-/** rectangle/circle/polygonエンティティのローカル2D頂点列(閉ループ)を返す。 */
+/** rectangle/circle/polygon/slot/regularPolygonエンティティのローカル2D頂点列(閉ループ)を返す。 */
 function entityLocalPoints(entity: SketchEntity): [number, number][] {
   if (entity.kind === "rectangle") {
     const [cx, cy] = entity.center;
@@ -217,10 +252,18 @@ function entityLocalPoints(entity: SketchEntity): [number, number][] {
   if (entity.kind === "circle") {
     return circleLocalPoints(entity.center, entity.radius, CIRCLE_SEGMENTS);
   }
-  // polygon: フィレット/面取り(Phase 11)を適用した輪郭をポリライン近似する。
-  // corners未指定時は points がそのまま返る(既存の直線LineLoopと同じ結果)。
+  if (entity.kind === "slot") {
+    // Phase 17: 直線2本+半円2つの輪郭(evaluatorのbulgeArcTo(±1)と同じ弧定義)。
+    return slotOutlinePoints(entity.start, entity.end, entity.width);
+  }
+  if (entity.kind === "regularPolygon") {
+    // Phase 17: 外接円半径・辺数・回転から頂点を計算する(cornersなし)。
+    return regularPolygonVertices(entity.center, entity.radius, entity.sides, entity.rotation ?? 0);
+  }
+  // polygon: フィレット/面取り(Phase 11)・円弧辺のふくらみ(Phase 17)を適用した輪郭をポリライン近似する。
+  // corners/bulges未指定時は points がそのまま返る(既存の直線LineLoopと同じ結果)。
   // LineLoopが最後→最初を自動的に結ぶため、閉じる辺は明示しない。
-  return polygonOutlinePoints(entity.points, entity.corners);
+  return polygonOutlinePoints(entity.points, entity.corners, entity.bulges);
 }
 
 /** 平面基底に沿った方眼(LineSegments)を構築する。origin中心にhalfExtentの範囲、GRID_SPACING間隔。 */
@@ -430,6 +473,21 @@ export class CadViewer {
   private polygonCallbacks: PolygonDrawingCallbacks | null = null;
   private rectCallbacks: RectDrawingCallbacks | null = null;
   private circleCallbacks: CircleDrawingCallbacks | null = null;
+  private slotCallbacks: SlotDrawingCallbacks | null = null;
+  private regularPolygonCallbacks: RegularPolygonDrawingCallbacks | null = null;
+  /** スロットツール開始時に固定した全幅(mm、Phase 17)。プレビュー描画にのみ使う(確定値はApp側が把握)。 */
+  private drawingSlotWidth = 10;
+  /** 正多角形ツール開始時に固定した辺数(Phase 17)。プレビュー描画にのみ使う。 */
+  private drawingPolygonSides = 6;
+  /**
+   * polygon描画モード中の辺ごとのふくらみ(Phase 17)。drawingPoints[i]→drawingPoints[i+1]に対応
+   * (drawingBulges.length === drawingPoints.length - 1 を維持する。頂点0にはまだ対応する辺が無いため)。
+   */
+  private drawingBulges: (number | null)[] = [];
+  /** 円弧セグメント(Phase 17)トグル中かどうか。trueの間、次のクリックは通過点/終点として扱われる。 */
+  private drawingArcMode = false;
+  /** 円弧セグメントの1クリック目(通過点)。null=まだ通過点未確定。 */
+  private drawingArcPending: [number, number] | null = null;
   /** プレビュー線(確定済みセグメント+ラバーバンド+軸ロックガイド+スナップマーカー)を乗せるグループ。showSketchesトグルとは独立して常に表示する。 */
   private drawingGroup: THREE.Group;
   private drawingPreviewGeometries: THREE.BufferGeometry[] = [];
@@ -650,6 +708,15 @@ export class CadViewer {
         this.updateLengthInputOverlay();
         return;
       }
+      if (
+        this.drawingShape === "polygon" &&
+        !this.lengthInputActive &&
+        this.drawingPoints.length > 0 &&
+        event.key.toLowerCase() === "a"
+      ) {
+        this.togglePolygonArcMode();
+        return;
+      }
       if (this.drawingShape === "polygon" && this.drawingPoints.length > 0 && /^[0-9.]$/.test(event.key)) {
         this.lengthInputActive = true;
         this.lengthInputValue += event.key;
@@ -680,7 +747,7 @@ export class CadViewer {
     if (dist === 0) return;
     const next: [number, number] = [from[0] + (dx / dist) * value, from[1] + (dy / dist) * value];
 
-    this.drawingPoints.push(next);
+    this.pushDrawingPoint(next, null);
     this.updateDrawingPreview();
     this.updateCoordOverlay(this.lastMousePx, this.lastMousePy, next);
   }
@@ -1187,6 +1254,9 @@ export class CadViewer {
     this.drawingSnap = snap;
     this.drawingEntities = existingEntities;
     this.drawingPoints = [];
+    this.drawingBulges = [];
+    this.drawingArcMode = false;
+    this.drawingArcPending = null;
     this.renderer.domElement.style.cursor = "crosshair";
   }
 
@@ -1217,6 +1287,60 @@ export class CadViewer {
   startCircleDrawing(basis: PlaneBasis, snap: boolean, existingEntities: SketchEntity[], callbacks: CircleDrawingCallbacks) {
     this.beginDrawing("circle", basis, snap, existingEntities);
     this.circleCallbacks = callbacks;
+  }
+
+  /**
+   * スロットツール(2クリック)を開始する(Phase 17)。1クリック目で中心線の始点を確定、
+   * マウス移動でスロット(直線+半円キャップ)のラバーバンドプレビュー、2クリック目で終点を確定して
+   * onCompleteが呼ばれる。widthはツール開始時に固定する(プレビュー描画にのみ使う)。
+   */
+  startSlotDrawing(
+    basis: PlaneBasis,
+    snap: boolean,
+    existingEntities: SketchEntity[],
+    width: number,
+    callbacks: SlotDrawingCallbacks,
+  ) {
+    this.beginDrawing("slot", basis, snap, existingEntities);
+    this.drawingSlotWidth = width;
+    this.slotCallbacks = callbacks;
+  }
+
+  /**
+   * 正多角形ツール(2クリック)を開始する(Phase 17)。1クリック目で中心を確定、マウス移動で
+   * 正多角形のラバーバンドプレビュー(半径+回転)、2クリック目で頂点位置を確定してonCompleteが呼ばれる。
+   * sidesはツール開始時に固定する(プレビュー描画にのみ使う)。
+   */
+  startRegularPolygonDrawing(
+    basis: PlaneBasis,
+    snap: boolean,
+    existingEntities: SketchEntity[],
+    sides: number,
+    callbacks: RegularPolygonDrawingCallbacks,
+  ) {
+    this.beginDrawing("regularPolygon", basis, snap, existingEntities);
+    this.drawingPolygonSides = sides;
+    this.regularPolygonCallbacks = callbacks;
+  }
+
+  /**
+   * 円弧セグメントモード(Phase 17)のON/OFFを切り替える。線描画モード(polygon)がアクティブで、
+   * かつ確定済み頂点が1つ以上ある場合のみ有効(それ以外は何もせず現在の状態を返す)。
+   * トグル時は保留中の通過点(drawingArcPending)をリセットする。
+   */
+  togglePolygonArcMode(): boolean {
+    if (!this.drawingActive || this.drawingShape !== "polygon" || this.drawingPoints.length === 0) {
+      return this.drawingArcMode;
+    }
+    this.drawingArcMode = !this.drawingArcMode;
+    this.drawingArcPending = null;
+    this.updateDrawingPreview();
+    this.polygonCallbacks?.onArcModeChange?.(this.drawingArcMode);
+    return this.drawingArcMode;
+  }
+
+  isPolygonArcModeActive(): boolean {
+    return this.drawingArcMode;
   }
 
   /**
@@ -1317,24 +1441,32 @@ export class CadViewer {
     const polygonCallbacks = this.polygonCallbacks;
     const rectCallbacks = this.rectCallbacks;
     const circleCallbacks = this.circleCallbacks;
+    const slotCallbacks = this.slotCallbacks;
+    const regularPolygonCallbacks = this.regularPolygonCallbacks;
     this.exitDrawingState();
     if (shape === "polygon") polygonCallbacks?.onCancel();
     else if (shape === "rectangle") rectCallbacks?.onCancel();
-    else circleCallbacks?.onCancel();
-  }
-
-  /** 頂点3点以上であれば閉じて確定する(onCompleteが呼ばれる)。非アクティブ・頂点不足時は何もしない。 */
-  private finishPolygonDrawing() {
-    if (!this.drawingActive || this.drawingShape !== "polygon" || this.drawingPoints.length < 3) return;
-    const points = [...this.drawingPoints];
-    const callbacks = this.polygonCallbacks;
-    this.exitDrawingState();
-    callbacks?.onComplete(points);
+    else if (shape === "circle") circleCallbacks?.onCancel();
+    else if (shape === "slot") slotCallbacks?.onCancel();
+    else regularPolygonCallbacks?.onCancel();
   }
 
   /**
-   * 矩形/円ツールの2クリック目を確定する(onCompleteが呼ばれる)。始点と終点が実質同一点
-   * (縮退)の場合は無視して描画モードを継続する(誤クリックで幅・高さ0の図形ができるのを防ぐ)。
+   * 頂点3点以上であれば閉じて確定する(onCompleteが呼ばれる)。非アクティブ・頂点不足時は何もしない。
+   * 円弧セグメント(Phase 17)を1つも使わなかった場合はbulgesを渡さない(既存呼び出し側との互換)。
+   */
+  private finishPolygonDrawing() {
+    if (!this.drawingActive || this.drawingShape !== "polygon" || this.drawingPoints.length < 3) return;
+    const points = [...this.drawingPoints];
+    const bulges = this.drawingBulges.some((b) => !!b) ? [...this.drawingBulges] : undefined;
+    const callbacks = this.polygonCallbacks;
+    this.exitDrawingState();
+    callbacks?.onComplete(points, bulges);
+  }
+
+  /**
+   * 矩形/円/スロット/正多角形ツールの2クリック目を確定する(onCompleteが呼ばれる)。始点と終点が
+   * 実質同一点(縮退)の場合は無視して描画モードを継続する(誤クリックで幅・高さ0の図形ができるのを防ぐ)。
    */
   private finishShapeDrawing(first: [number, number], second: [number, number]) {
     if (Math.hypot(second[0] - first[0], second[1] - first[1]) < 1e-6) return;
@@ -1347,6 +1479,15 @@ export class CadViewer {
       const radius = circleRadiusFromPoints(first, second);
       this.exitDrawingState();
       callbacks?.onComplete(first, radius);
+    } else if (this.drawingShape === "slot") {
+      const callbacks = this.slotCallbacks;
+      this.exitDrawingState();
+      callbacks?.onComplete(first, second);
+    } else if (this.drawingShape === "regularPolygon") {
+      const callbacks = this.regularPolygonCallbacks;
+      const { radius, rotation } = regularPolygonFromCenterVertex(first, second);
+      this.exitDrawingState();
+      callbacks?.onComplete(first, radius, rotation);
     }
   }
 
@@ -1356,9 +1497,14 @@ export class CadViewer {
     this.drawingBasis = null;
     this.drawingEntities = [];
     this.drawingPoints = [];
+    this.drawingBulges = [];
+    this.drawingArcMode = false;
+    this.drawingArcPending = null;
     this.polygonCallbacks = null;
     this.rectCallbacks = null;
     this.circleCallbacks = null;
+    this.slotCallbacks = null;
+    this.regularPolygonCallbacks = null;
     this.lastHoverLocal = null;
     this.renderer.domElement.style.cursor = "";
     this.clearDrawingPreview();
@@ -1390,7 +1536,23 @@ export class CadViewer {
     this.finishShapeDrawing(this.drawingPoints[0], resolved.point);
   }
 
-  /** 描画モード中のクリックをレイキャストしてスケッチ平面上のローカル2D座標に変換し、頂点を追加する。 */
+  /**
+   * 頂点(またはbulge=null)を確定済み頂点列に追加する共通ヘルパー。drawingBulgesは
+   * drawingPoints.length-1個を維持する(頂点0にはまだ対応する辺が無いため、2点目以降のみ追加)。
+   */
+  private pushDrawingPoint(point: [number, number], bulge: number | null) {
+    if (this.drawingPoints.length > 0) {
+      this.drawingBulges.push(bulge);
+    }
+    this.drawingPoints.push(point);
+  }
+
+  /**
+   * 描画モード中のクリックをレイキャストしてスケッチ平面上のローカル2D座標に変換し、頂点を追加する。
+   * 円弧セグメントモード(Phase 17、drawingArcMode)が有効な間は、1クリック目を通過点(仮点、
+   * drawingPointsには追加しない)、2クリック目を終点として扱い、3点円弧のbulge値を計算して
+   * 直前の確定頂点からの辺として追加する(確定後は自動的に直線モードへ戻る)。
+   */
   private handlePolygonClick(event: MouseEvent) {
     if (!this.drawingBasis) return;
     // マウスクリックによる頂点確定は、入力中だった数値長さ(未確定)を破棄する。
@@ -1401,7 +1563,8 @@ export class CadViewer {
     const py = event.clientY - rect.top;
 
     // 始点付近(スクリーン距離10px程度以内)のクリックは閉じて確定する扱いにする(スナップ判定より優先)。
-    if (this.drawingPoints.length >= 3) {
+    // 円弧セグメント入力中(通過点/終点クリック待ち)はこの近接クローズを行わない。
+    if (!this.drawingArcMode && this.drawingPoints.length >= 3) {
       const startWorld = planeLocalToWorld(basis, this.drawingPoints[0][0], this.drawingPoints[0][1]);
       const startScreen = this.projectPoint(startWorld);
       if (startScreen) {
@@ -1416,9 +1579,31 @@ export class CadViewer {
 
     const hit = this.raycastDrawingPlane(basis, px, py, rect);
     if (!hit) return;
-
     const resolved = this.resolveDrawingCursor(basis, hit, event.shiftKey);
-    this.drawingPoints.push(resolved.point);
+
+    if (this.drawingArcMode) {
+      if (this.drawingArcPending === null) {
+        // 1クリック目: 円弧の通過点(仮点)。確定頂点列には追加しない。
+        this.drawingArcPending = resolved.point;
+        this.updateDrawingPreview();
+        this.updateCoordOverlay(px, py, resolved.point);
+        return;
+      }
+      // 2クリック目: 円弧の終点。直前の確定頂点→通過点→終点の3点円弧としてbulgeを計算する。
+      const start = this.drawingPoints[this.drawingPoints.length - 1];
+      const via = this.drawingArcPending;
+      const end = resolved.point;
+      const bulge = bulgeFromThreePoints(start, via, end);
+      this.pushDrawingPoint(end, bulge);
+      this.drawingArcPending = null;
+      this.drawingArcMode = false;
+      this.polygonCallbacks?.onArcModeChange?.(false);
+      this.updateDrawingPreview();
+      this.updateCoordOverlay(px, py, end);
+      return;
+    }
+
+    this.pushDrawingPoint(resolved.point, null);
     this.updateDrawingPreview();
     this.updateCoordOverlay(px, py, resolved.point);
   }
@@ -1533,7 +1718,18 @@ export class CadViewer {
     const basis = this.drawingBasis;
 
     if (this.drawingPoints.length > 0) {
-      const worldPts = this.drawingPoints.map(([u, v]) => planeLocalToWorld(basis, u, v));
+      // 確定済み頂点列を、円弧セグメント(Phase 17、drawingBulges)がある辺は弧近似で展開する。
+      const localPts: [number, number][] = [this.drawingPoints[0]];
+      for (let i = 1; i < this.drawingPoints.length; i += 1) {
+        const bulge = this.drawingBulges[i - 1] ?? null;
+        if (bulge) {
+          const arcPts = bulgeArcPoints(this.drawingPoints[i - 1], this.drawingPoints[i], bulge, ARC_PREVIEW_SEGMENTS);
+          localPts.push(...arcPts.slice(1));
+        } else {
+          localPts.push(this.drawingPoints[i]);
+        }
+      }
+      const worldPts = localPts.map(([u, v]) => planeLocalToWorld(basis, u, v));
       const positions = new Float32Array(worldPts.length * 3);
       worldPts.forEach((p, i) => positions.set(p, i * 3));
       const geometry = new THREE.BufferGeometry();
@@ -1546,10 +1742,21 @@ export class CadViewer {
       this.drawingPreviewMaterials.push(material);
 
       if (hover) {
-        const last = worldPts[worldPts.length - 1];
-        const hoverWorld = planeLocalToWorld(basis, hover.local[0], hover.local[1]);
+        const lastLocal = this.drawingPoints[this.drawingPoints.length - 1];
+        // 円弧セグメント入力中(通過点確定後、終点待ち)は、直前頂点→通過点→hover(仮終点)の
+        // 3点円弧としてラバーバンドを弧形状で描く。それ以外は直線のラバーバンド。
+        let rubberLocalPts: [number, number][];
+        if (this.drawingArcMode && this.drawingArcPending) {
+          const bulge = bulgeFromThreePoints(lastLocal, this.drawingArcPending, hover.local);
+          rubberLocalPts = bulgeArcPoints(lastLocal, hover.local, bulge, ARC_PREVIEW_SEGMENTS);
+        } else {
+          rubberLocalPts = [lastLocal, hover.local];
+        }
+        const rubberWorldPts = rubberLocalPts.map(([u, v]) => planeLocalToWorld(basis, u, v));
+        const rubberPositions = new Float32Array(rubberWorldPts.length * 3);
+        rubberWorldPts.forEach((p, i) => rubberPositions.set(p, i * 3));
         const rubberGeometry = new THREE.BufferGeometry();
-        rubberGeometry.setAttribute("position", new THREE.Float32BufferAttribute([...last, ...hoverWorld], 3));
+        rubberGeometry.setAttribute("position", new THREE.Float32BufferAttribute(rubberPositions, 3));
         const rubberMaterial = new THREE.LineDashedMaterial({
           color: DRAWING_PREVIEW_COLOR,
           dashSize: 2,
@@ -1564,6 +1771,16 @@ export class CadViewer {
         this.drawingPreviewGeometries.push(rubberGeometry);
         this.drawingPreviewMaterials.push(rubberMaterial);
       }
+    }
+
+    if (this.drawingArcMode && this.drawingArcPending) {
+      // 円弧の通過点(確定待ち)の位置にマーカーを表示する。
+      const markers = buildSnapMarkerObjects(basis, "vertex", this.drawingArcPending);
+      markers.forEach((obj) => {
+        this.drawingGroup.add(obj);
+        this.drawingPreviewGeometries.push(obj.geometry as THREE.BufferGeometry);
+        this.drawingPreviewMaterials.push(obj.material as THREE.Material);
+      });
     }
 
     if (hover?.axis && this.drawingPoints.length > 0) {
@@ -1615,8 +1832,9 @@ export class CadViewer {
   }
 
   /**
-   * 矩形/円ツール(2クリック)のプレビュー(Phase 14)。1クリック目(drawingPoints[0])がまだ無ければ
-   * スナップマーカーのみ、あればコーナー1/中心からhoverまでの矩形/円の破線ループを描く。
+   * 矩形/円/スロット/正多角形ツール(2クリック)のプレビュー(Phase 14/17)。1クリック目
+   * (drawingPoints[0])がまだ無ければスナップマーカーのみ、あればコーナー1/中心からhoverまでの
+   * 破線ループ(スロットは非ループの輪郭だが同じヘルパーで閉じても実害無いため流用)を描く。
    */
   private updateShapePreview(hover?: { local: [number, number]; snapKind: SnapKind | null; axis: AxisLockKind }) {
     const basis = this.drawingBasis;
@@ -1624,10 +1842,17 @@ export class CadViewer {
 
     if (this.drawingPoints.length > 0 && hover) {
       const first = this.drawingPoints[0];
-      const localPoints =
-        this.drawingShape === "rectangle"
-          ? rectangleCornerPoints(first, hover.local)
-          : circleLocalPoints(first, circleRadiusFromPoints(first, hover.local), CIRCLE_SEGMENTS);
+      let localPoints: [number, number][];
+      if (this.drawingShape === "rectangle") {
+        localPoints = rectangleCornerPoints(first, hover.local);
+      } else if (this.drawingShape === "circle") {
+        localPoints = circleLocalPoints(first, circleRadiusFromPoints(first, hover.local), CIRCLE_SEGMENTS);
+      } else if (this.drawingShape === "slot") {
+        localPoints = slotOutlinePoints(first, hover.local, this.drawingSlotWidth);
+      } else {
+        const { radius, rotation } = regularPolygonFromCenterVertex(first, hover.local);
+        localPoints = regularPolygonVertices(first, radius, this.drawingPolygonSides, rotation);
+      }
       this.addDashedPreviewLoop(basis, localPoints);
     }
 
@@ -1663,8 +1888,9 @@ export class CadViewer {
   }
 
   /**
-   * 矩形/円ツール(2クリック)のカーソル付近ライブ表示(Phase 14)。1クリック目前はローカル座標のみ、
-   * 1クリック目後は矩形なら「幅×高さ」、円なら「R半径」を表示する。
+   * 矩形/円/スロット/正多角形ツール(2クリック)のカーソル付近ライブ表示(Phase 14/17)。
+   * 1クリック目前はローカル座標のみ、1クリック目後は矩形なら「幅×高さ」、円なら「R半径」、
+   * スロットなら「L長さ(幅固定)」、正多角形なら「R半径(辺数固定)」を表示する。
    */
   private updateShapeCoordOverlay(px: number, py: number, first: [number, number] | null, current: [number, number]) {
     let text: string;
@@ -1674,8 +1900,14 @@ export class CadViewer {
       const w = Math.abs(current[0] - first[0]);
       const h = Math.abs(current[1] - first[1]);
       text = `${w.toFixed(1)} × ${h.toFixed(1)} mm`;
-    } else {
+    } else if (this.drawingShape === "circle") {
       text = `R${circleRadiusFromPoints(first, current).toFixed(1)} mm`;
+    } else if (this.drawingShape === "slot") {
+      const len = circleRadiusFromPoints(first, current);
+      text = `L${len.toFixed(1)} × W${this.drawingSlotWidth.toFixed(1)} mm`;
+    } else {
+      const { radius } = regularPolygonFromCenterVertex(first, current);
+      text = `${this.drawingPolygonSides}角形 R${radius.toFixed(1)} mm`;
     }
     this.coordOverlayEl.textContent = text;
     this.coordOverlayEl.style.left = `${px + 14}px`;

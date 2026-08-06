@@ -47,6 +47,37 @@ export type SketchEntity =
        * corners?.[i] の形でオプショナルに読む)。
        */
       corners?: PolygonCorner[];
+      /**
+       * 辺i(points[i]→points[i+1]、最後は points[length-1]→points[0])のふくらみ指定(Phase 17)。
+       * null/0/未指定はその辺が直線であることを表す。非0の値は3点円弧のbulge値
+       * (bulge = tan(挟角/4)、正負でどちら側に膨らむかが決まる。詳細は src/sketch/bulge.ts)。
+       * corners と同様、points より短い配列は残りを null 扱いにする並列配列。
+       * ある頂点(points[i])に corners[i] が設定されている場合、その頂点を端点に持つ辺
+       * (bulges[i-1] と bulges[i])のふくらみは無視される(フィレット/面取りを優先する。
+       * src/sketch/bulge.ts の effectivePolygonBulges() 参照)。
+       */
+      bulges?: (number | null)[];
+    }
+  | {
+      kind: "slot";
+      id: string;
+      /** 直線スロットの中心線の始点・終点(ローカル2D、mm)。両端に半円キャップが付く(Phase 17)。 */
+      start: [number, number];
+      end: [number, number];
+      /** スロットの全幅(mm)。キャップの半径は width/2。 */
+      width: number;
+    }
+  | {
+      kind: "regularPolygon";
+      id: string;
+      /** 外接円の中心(ローカル2D、mm、Phase 17)。 */
+      center: [number, number];
+      /** 外接円の半径(mm)。 */
+      radius: number;
+      /** 辺数(3〜24)。 */
+      sides: number;
+      /** 頂点0の回転角(ラジアン、+X軸からの反時計回り)。省略時は0。 */
+      rotation?: number;
     };
 
 /** 2Dスケッチフィーチャー。 */

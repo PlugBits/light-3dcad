@@ -29,15 +29,46 @@ export function createCircleEntity(params: { center?: [number, number]; radius: 
 /**
  * ID付きの多角形エンティティを作成する。points は順序付き頂点列(閉ループ、3点以上)。
  * corners は頂点ごとのフィレット/面取り指定(省略可、省略時は全頂点が角のまま)。
+ * bulges は辺ごとの円弧ふくらみ指定(省略可、省略時は全辺が直線のまま、Phase 17)。
  */
 export function createPolygonEntity(params: {
   points: [number, number][];
   corners?: PolygonCorner[];
+  bulges?: (number | null)[];
 }): SketchEntity {
   return {
     kind: "polygon",
     id: generateId("entity"),
     points: params.points,
     ...(params.corners ? { corners: params.corners } : {}),
+    ...(params.bulges ? { bulges: params.bulges } : {}),
+  };
+}
+
+/** ID付きのスロット(長円)エンティティを作成する(Phase 17)。start/endは中心線の両端、widthは全幅。 */
+export function createSlotEntity(params: { start: [number, number]; end: [number, number]; width: number }): SketchEntity {
+  return {
+    kind: "slot",
+    id: generateId("entity"),
+    start: params.start,
+    end: params.end,
+    width: params.width,
+  };
+}
+
+/** ID付きの正多角形エンティティを作成する(Phase 17)。radiusは外接円半径、sidesは辺数(3〜24)。 */
+export function createRegularPolygonEntity(params: {
+  center?: [number, number];
+  radius: number;
+  sides: number;
+  rotation?: number;
+}): SketchEntity {
+  return {
+    kind: "regularPolygon",
+    id: generateId("entity"),
+    center: params.center ?? [0, 0],
+    radius: params.radius,
+    sides: params.sides,
+    ...(params.rotation !== undefined ? { rotation: params.rotation } : {}),
   };
 }

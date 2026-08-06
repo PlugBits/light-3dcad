@@ -6,15 +6,24 @@ import { FeatureTree } from "../components/FeatureTree";
 import { SketchEditor } from "../components/SketchEditor";
 import { downloadStl } from "../export/downloadStl";
 import { addSketchEntity, findFeature, getDependentFeatureIds, setPolygonVertexCorner } from "../model/document";
-import { createCircleEntity, createPolygonEntity, createRectangleEntity } from "../model/entity";
+import {
+  createCircleEntity,
+  createPolygonEntity,
+  createRectangleEntity,
+  createRegularPolygonEntity,
+  createSlotEntity,
+} from "../model/entity";
 import type { PolygonCorner } from "../model/types";
 import { rectangleFromCorners } from "../sketch/shapeFromPoints";
 import { useCadStore } from "../state/store";
 import { CadViewer, type SketchOverlayEntry } from "../viewer/CadViewer";
 import type { StandardView } from "../viewer/standardViews";
 
-/** ツールバーで選択中の作図ツール(未選択はnull)。line=既存の複数頂点線描画、rect/circleはPhase 14の2クリック作図。 */
-type DrawingTool = "line" | "rect" | "circle" | null;
+/**
+ * ツールバーで選択中の作図ツール(未選択はnull)。line=既存の複数頂点線描画、rect/circleはPhase 14の
+ * 2クリック作図、slot/regularPolygonはPhase 17の2クリック作図(幅/辺数はツール開始時に固定)。
+ */
+type DrawingTool = "line" | "rect" | "circle" | "slot" | "regularPolygon" | null;
 
 /** ツールバーの標準ビューボタン(正面/背面/左/右/上/下/等角、Phase 16)。 */
 const STANDARD_VIEW_BUTTONS: { view: StandardView; label: string; title: string }[] = [
@@ -71,6 +80,13 @@ export default function App() {
   const [cornerTool, setCornerTool] = useState<"fillet" | "chamfer" | null>(null);
   // フィレット/面取りツールで頂点クリック時に適用するサイズ(mm、デフォルト5)。
   const [cornerSize, setCornerSize] = useState(5);
+  // スロットツール開始時に固定する全幅(mm、デフォルト10、Phase 17)。
+  const [slotWidth, setSlotWidth] = useState(10);
+  // 正多角形ツール開始時に固定する辺数(3〜24、デフォルト6、Phase 17)。
+  const [polygonSides, setPolygonSides] = useState(6);
+  // 線描画モード中の円弧セグメント(Phase 17)トグルの見た目用状態(実体はCadViewer側が持つ。
+  // Aキーでも切り替わるため、onArcModeChangeコールバックで同期する)。
+  const [arcModeActive, setArcModeActive] = useState(false);
   // クリックコールバック(マウント時に一度だけ渡す)から最新のcornerSizeを参照するためのref。
   const cornerSizeRef = useRef(cornerSize);
   cornerSizeRef.current = cornerSize;
@@ -250,8 +266,30 @@ export default function App() {
     if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
     const sketchId = selectedFeature.id;
     viewerRef.current.startPolygonDrawing(selectedSketchPlane, gridSnap, selectedFeature.entities, {
-      onComplete: (points: [number, number][]) => {
-        const entity = createPolygonEntity({ points });
+      onComplete: (points: [number, number][], bulges) => {
+        const entity = createPolygonEntity({ points, bulges });
+        updateDocument((d) => addSketchEntity(d, sketchId, entity));
+        setActiveTool(null);
+        setDrawingSketchId(null);
+        setArcModeActive(false);
+      },
+      onCancel: () => {
+        setActiveTool(null);
+        setDrawingSketchId(null);
+        setArcModeActive(false);
+      },
+      onArcModeChange: (active) => setArcModeActive(active),
+    });
+    setDrawingSketchId(sketchId);
+    setActiveTool("line");
+  }
+
+  function handleStartSlotDrawing() {
+    if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
+    const sketchId = selectedFeature.id;
+    viewerRef.current.startSlotDrawing(selectedSketchPlane, gridSnap, selectedFeature.entities, slotWidth, {
+      onComplete: (start, end) => {
+        const entity = createSlotEntity({ start, end, width: slotWidth });
         updateDocument((d) => addSketchEntity(d, sketchId, entity));
         setActiveTool(null);
         setDrawingSketchId(null);
@@ -262,7 +300,31 @@ export default function App() {
       },
     });
     setDrawingSketchId(sketchId);
-    setActiveTool("line");
+    setActiveTool("slot");
+  }
+
+  function handleStartRegularPolygonDrawing() {
+    if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
+    const sketchId = selectedFeature.id;
+    viewerRef.current.startRegularPolygonDrawing(selectedSketchPlane, gridSnap, selectedFeature.entities, polygonSides, {
+      onComplete: (center, radius, rotation) => {
+        const entity = createRegularPolygonEntity({ center, radius, sides: polygonSides, rotation });
+        updateDocument((d) => addSketchEntity(d, sketchId, entity));
+        setActiveTool(null);
+        setDrawingSketchId(null);
+      },
+      onCancel: () => {
+        setActiveTool(null);
+        setDrawingSketchId(null);
+      },
+    });
+    setDrawingSketchId(sketchId);
+    setActiveTool("regularPolygon");
+  }
+
+  function handleToggleArcMode() {
+    const active = viewerRef.current?.togglePolygonArcMode() ?? false;
+    setArcModeActive(active);
   }
 
   function handleStartRectDrawing() {
@@ -450,6 +512,17 @@ export default function App() {
         >
           {activeTool === "line" ? "線描画キャンセル(Esc)" : "線描画"}
         </button>
+        {activeTool === "line" && (
+          <button
+            type="button"
+            data-testid="btn-toggle-arc-mode"
+            onClick={handleToggleArcMode}
+            title="次のセグメントを円弧(3点円弧)にします: クリック1=通過点、クリック2=終点(Aキーでも切替、確定後は直線モードに戻ります)"
+            style={arcModeActive ? { fontWeight: "bold", background: "#ff9800", color: "#000" } : undefined}
+          >
+            {arcModeActive ? "円弧セグメント中(A)" : "円弧(A)"}
+          </button>
+        )}
         <button
           type="button"
           data-testid="btn-draw-rect"
@@ -468,6 +541,58 @@ export default function App() {
         >
           {activeTool === "circle" ? "円キャンセル(Esc)" : "円"}
         </button>
+        <button
+          type="button"
+          data-testid="btn-draw-slot"
+          onClick={activeTool === "slot" ? handleCancelDrawing : handleStartSlotDrawing}
+          disabled={isToolDisabled("slot")}
+          title="2クリックでスロット(長円)を描きます(1点目=中心線の始点、2点目=終点。幅は右の入力欄。Escでキャンセル)"
+        >
+          {activeTool === "slot" ? "スロットキャンセル(Esc)" : "スロット"}
+        </button>
+        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }} title="スロットの全幅(mm)">
+          幅
+          <input
+            type="number"
+            data-testid="slot-width-input"
+            value={slotWidth}
+            min={0.1}
+            step="any"
+            disabled={activeTool === "slot"}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v) && v > 0) setSlotWidth(v);
+            }}
+            style={{ width: 44 }}
+          />
+          mm
+        </label>
+        <button
+          type="button"
+          data-testid="btn-draw-regular-polygon"
+          onClick={activeTool === "regularPolygon" ? handleCancelDrawing : handleStartRegularPolygonDrawing}
+          disabled={isToolDisabled("regularPolygon")}
+          title="2クリックで正多角形を描きます(1点目=中心、2点目=頂点位置。辺数は右の入力欄。Escでキャンセル)"
+        >
+          {activeTool === "regularPolygon" ? "正多角形キャンセル(Esc)" : "正多角形"}
+        </button>
+        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }} title="正多角形の辺数(3〜24)">
+          辺数
+          <input
+            type="number"
+            data-testid="polygon-sides-input"
+            value={polygonSides}
+            min={3}
+            max={24}
+            step={1}
+            disabled={activeTool === "regularPolygon"}
+            onChange={(e) => {
+              const v = Math.round(Number(e.target.value));
+              if (Number.isInteger(v) && v >= 3 && v <= 24) setPolygonSides(v);
+            }}
+            style={{ width: 40 }}
+          />
+        </label>
         <span
           style={{ display: "flex", gap: 4, alignItems: "center", paddingLeft: 8, borderLeft: "1px solid #444" }}
         >

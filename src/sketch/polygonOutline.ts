@@ -15,6 +15,7 @@
 // chamferの「脚の長さ」は直角(90度)の頂点でのみ size と一致する(それ以外の角度では
 // t = size / tan(interiorAngle/2) が脚の長さになる)。
 import type { PolygonCorner } from "../model/types";
+import { bulgeArcPoints, effectivePolygonBulges } from "./bulge";
 
 export type Point2 = [number, number];
 
@@ -119,20 +120,26 @@ function cornerOutputPoints(prev: Point2, curr: Point2, next: Point2, corner: Po
 export const DEFAULT_SEGMENTS_PER_ARC = 16;
 
 /**
- * polygonの頂点列(points)+頂点ごとのコーナー指定(corners)から、フィレット/面取り適用後の
- * 輪郭を近似する閉ポリライン(頂点列)を返す。points.length < 3 の場合は points をそのまま返す
- * (呼び出し側のバリデーションに委ねる)。
+ * polygonの頂点列(points)+頂点ごとのコーナー指定(corners)+辺ごとのふくらみ指定(bulges、Phase 17)
+ * から、フィレット/面取り・円弧辺適用後の輪郭を近似する閉ポリライン(頂点列)を返す。
+ * points.length < 3 の場合は points をそのまま返す(呼び出し側のバリデーションに委ねる)。
  * 戻り値は「閉じた輪郭」を表す頂点列であり、最後の点と最初の点の間の辺は暗黙(LineLoop等で
  * 描画する呼び出し側が閉じる)。
+ *
+ * corners と bulges が同じ頂点で衝突する場合(頂点にコーナー指定があり、かつそれを端点に持つ辺に
+ * ふくらみ指定がある場合)は corners を優先し、その辺のふくらみは無視する
+ * (src/sketch/bulge.ts の effectivePolygonBulges() 参照。evaluatorのpolygonDrawing()と同じ規則)。
  */
 export function polygonOutlinePoints(
   points: Point2[],
   corners: PolygonCorner[] | undefined,
+  bulges?: (number | null)[],
   segmentsPerArc: number = DEFAULT_SEGMENTS_PER_ARC,
 ): Point2[] {
   const n = points.length;
   if (n < 3) return points.slice();
 
+  const effectiveBulges = effectivePolygonBulges(n, corners, bulges);
   const result: Point2[] = [];
   for (let i = 0; i < n; i += 1) {
     const prev = points[(i - 1 + n) % n];
@@ -140,6 +147,16 @@ export function polygonOutlinePoints(
     const next = points[(i + 1) % n];
     const corner = corners?.[i] ?? null;
     result.push(...cornerOutputPoints(prev, curr, next, corner, segmentsPerArc));
+
+    // 辺i(curr→next)のふくらみ。corners優先ルールにより、curr/nextいずれかにコーナーがあれば
+    // 既にnullに強制されている(effectivePolygonBulges参照)。
+    const bulge = effectiveBulges[i];
+    if (bulge) {
+      const arcPoints = bulgeArcPoints(curr, next, bulge, segmentsPerArc);
+      // 始点(curr、今回のcornerOutputPointsで既に追加済み)と終点(next、次のループ反復で
+      // cornerOutputPoints(next)により追加される)は重複させない。
+      result.push(...arcPoints.slice(1, -1));
+    }
   }
   return result;
 }

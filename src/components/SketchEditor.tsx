@@ -1,7 +1,7 @@
 // スケッチフィーチャー選択時の編集パネル。矩形/円/多角形エンティティの追加(多角形は描画モード)・
 // 数値編集・削除を行う。多角形は頂点ごとのフィレット/面取り(コーナー)編集も提供する(Phase 11)。
 import { addSketchEntity, patchSketchFeature, removeSketchEntity, setPolygonVertexCorner, updateSketchEntity } from "../model/document";
-import { createCircleEntity, createRectangleEntity } from "../model/entity";
+import { createCircleEntity, createRectangleEntity, createRegularPolygonEntity, createSlotEntity } from "../model/entity";
 import type { FeatureId, PolygonCorner, SketchEntity, SketchFeature } from "../model/types";
 import { useCadStore } from "../state/store";
 
@@ -54,6 +54,16 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
     updateDocument((doc) => addSketchEntity(doc, sketch.id, entity));
   }
 
+  function handleAddSlot() {
+    const entity = createSlotEntity({ start: [-10, 0], end: [10, 0], width: 10 });
+    updateDocument((doc) => addSketchEntity(doc, sketch.id, entity));
+  }
+
+  function handleAddRegularPolygon() {
+    const entity = createRegularPolygonEntity({ radius: 10, sides: 6 });
+    updateDocument((doc) => addSketchEntity(doc, sketch.id, entity));
+  }
+
   function handleRemoveEntity(entityId: string) {
     updateDocument((doc) => removeSketchEntity(doc, sketch.id, entityId));
   }
@@ -62,6 +72,18 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
     const nextCenter: [number, number] = [...center];
     nextCenter[axis] = value;
     updateDocument((doc) => updateSketchEntity(doc, sketch.id, entityId, { center: nextCenter }));
+  }
+
+  function handlePointChange(
+    entityId: string,
+    field: "start" | "end",
+    axis: 0 | 1,
+    value: number,
+    point: [number, number],
+  ) {
+    const next: [number, number] = [...point];
+    next[axis] = value;
+    updateDocument((doc) => updateSketchEntity(doc, sketch.id, entityId, { [field]: next }));
   }
 
   return (
@@ -84,12 +106,23 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
         ビューア上部のツールバーの「矩形」「円」ボタンでクリック作図するのがおすすめです。
         下のボタンは既定サイズの図形を数値で追加します(後から数値編集できます)。
       </p>
-      <div style={{ display: "flex", gap: 8 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         <button type="button" data-testid="btn-add-rectangle" onClick={handleAddRectangle} title="20x20mmの矩形を原点に追加します">
           矩形を数値で追加
         </button>
         <button type="button" data-testid="btn-add-circle" onClick={handleAddCircle} title="半径10mmの円を原点に追加します">
           円を数値で追加
+        </button>
+        <button type="button" data-testid="btn-add-slot" onClick={handleAddSlot} title="幅10mmのスロット(長円)を原点付近に追加します">
+          スロットを数値で追加
+        </button>
+        <button
+          type="button"
+          data-testid="btn-add-regular-polygon"
+          onClick={handleAddRegularPolygon}
+          title="外接円半径10mm・6角形の正多角形を原点に追加します"
+        >
+          正多角形を数値で追加
         </button>
       </div>
 
@@ -114,7 +147,15 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
           >
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <strong style={{ fontSize: 12 }}>
-                {entity.kind === "rectangle" ? "矩形" : entity.kind === "circle" ? "円" : "多角形"}
+                {entity.kind === "rectangle"
+                  ? "矩形"
+                  : entity.kind === "circle"
+                    ? "円"
+                    : entity.kind === "slot"
+                      ? "スロット"
+                      : entity.kind === "regularPolygon"
+                        ? "正多角形"
+                        : "多角形"}
               </strong>
               <button
                 type="button"
@@ -128,6 +169,78 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
             </div>
             {entity.kind === "polygon" ? (
               <PolygonVertexEditor sketchId={sketch.id} entityIndex={index} entity={entity} />
+            ) : entity.kind === "slot" ? (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                <NumberField
+                  label="始点X (mm)"
+                  value={entity.start[0]}
+                  testId={`entity-${entity.kind}-${index}-start-x`}
+                  onChange={(v) => handlePointChange(entity.id, "start", 0, v, entity.start)}
+                />
+                <NumberField
+                  label="始点Y (mm)"
+                  value={entity.start[1]}
+                  testId={`entity-${entity.kind}-${index}-start-y`}
+                  onChange={(v) => handlePointChange(entity.id, "start", 1, v, entity.start)}
+                />
+                <NumberField
+                  label="終点X (mm)"
+                  value={entity.end[0]}
+                  testId={`entity-${entity.kind}-${index}-end-x`}
+                  onChange={(v) => handlePointChange(entity.id, "end", 0, v, entity.end)}
+                />
+                <NumberField
+                  label="終点Y (mm)"
+                  value={entity.end[1]}
+                  testId={`entity-${entity.kind}-${index}-end-y`}
+                  onChange={(v) => handlePointChange(entity.id, "end", 1, v, entity.end)}
+                />
+                <NumberField
+                  label="幅 (mm)"
+                  value={entity.width}
+                  testId={`entity-${entity.kind}-${index}-width`}
+                  onChange={(v) => updateDocument((doc) => updateSketchEntity(doc, sketch.id, entity.id, { width: v }))}
+                />
+              </div>
+            ) : entity.kind === "regularPolygon" ? (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                <NumberField
+                  label="中心X (mm)"
+                  value={entity.center[0]}
+                  testId={`entity-${entity.kind}-${index}-center-x`}
+                  onChange={(v) => handleCenterChange(entity.id, 0, v, entity.center)}
+                />
+                <NumberField
+                  label="中心Y (mm)"
+                  value={entity.center[1]}
+                  testId={`entity-${entity.kind}-${index}-center-y`}
+                  onChange={(v) => handleCenterChange(entity.id, 1, v, entity.center)}
+                />
+                <NumberField
+                  label="外接円半径 (mm)"
+                  value={entity.radius}
+                  testId={`entity-${entity.kind}-${index}-radius`}
+                  onChange={(v) => updateDocument((doc) => updateSketchEntity(doc, sketch.id, entity.id, { radius: v }))}
+                />
+                <NumberField
+                  label="辺数 (3〜24)"
+                  value={entity.sides}
+                  testId={`entity-${entity.kind}-${index}-sides`}
+                  onChange={(v) => {
+                    const sides = Math.round(v);
+                    if (sides < 3 || sides > 24) return;
+                    updateDocument((doc) => updateSketchEntity(doc, sketch.id, entity.id, { sides }));
+                  }}
+                />
+                <NumberField
+                  label="回転 (度)"
+                  value={((entity.rotation ?? 0) * 180) / Math.PI}
+                  testId={`entity-${entity.kind}-${index}-rotation`}
+                  onChange={(v) =>
+                    updateDocument((doc) => updateSketchEntity(doc, sketch.id, entity.id, { rotation: (v * Math.PI) / 180 }))
+                  }
+                />
+              </div>
             ) : (
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
                 <NumberField

@@ -178,7 +178,7 @@ export function computeSketchDimensions(
         radius: entity.radius,
         anchor: [entity.center[0], entity.center[1] + labelOffset],
       });
-    } else {
+    } else if (entity.kind === "polygon") {
       for (let i = 0; i < entity.points.length; i += 1) {
         dimensions.push({
           kind: "polygon-edge",
@@ -190,6 +190,7 @@ export function computeSketchDimensions(
         });
       }
     }
+    // slot/regularPolygon(Phase 17)の寸法ラベルは今回のスコープ外(数値編集はSketchEditorで行う)。
   }
   return dimensions;
 }

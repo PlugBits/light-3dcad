@@ -59,6 +59,32 @@ function validateEntity(entity: SketchEntity, featureId: FeatureId): ValidationE
       errors.push(...validatePolygonCorners(entity.id, entity.points, entity.corners, featureId));
       break;
     }
+    case "slot": {
+      if (!entity.start.every((c) => Number.isFinite(c)) || !entity.end.every((c) => Number.isFinite(c))) {
+        errors.push({ featureId, message: `スロット(${entity.id})の始点・終点座標が不正です` });
+        break;
+      }
+      if (!isPositiveFiniteNumber(entity.width)) {
+        errors.push({ featureId, message: `スロット(${entity.id})の幅は正の数である必要があります` });
+      }
+      const len = Math.hypot(entity.end[0] - entity.start[0], entity.end[1] - entity.start[1]);
+      if (len <= POLYGON_MIN_VERTEX_DISTANCE) {
+        errors.push({ featureId, message: `スロット(${entity.id})の始点と終点が一致しています` });
+      }
+      break;
+    }
+    case "regularPolygon": {
+      if (!isPositiveFiniteNumber(entity.radius)) {
+        errors.push({ featureId, message: `正多角形(${entity.id})の半径は正の数である必要があります` });
+      }
+      if (!entity.center.every((c) => Number.isFinite(c))) {
+        errors.push({ featureId, message: `図形(${entity.id})の中心座標が不正です` });
+      }
+      if (!Number.isInteger(entity.sides) || entity.sides < 3 || entity.sides > 24) {
+        errors.push({ featureId, message: `正多角形(${entity.id})の辺数は3〜24の整数である必要があります` });
+      }
+      break;
+    }
   }
   return errors;
 }

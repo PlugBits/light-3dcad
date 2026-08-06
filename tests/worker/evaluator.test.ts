@@ -16,6 +16,8 @@ import {
   createEmptyDocument,
   createPolygonEntity,
   createRectangleEntity,
+  createRegularPolygonEntity,
+  createSlotEntity,
   patchExtrudeFeature,
 } from "../../src/model";
 import { evaluateDocument } from "../../src/worker/evaluator";
@@ -1064,6 +1066,125 @@ describe("evaluateDocument (WASM統合): スケッチ・オン・フェイス", 
     expect(result.sketchPlanes).toHaveLength(2);
     const ids = result.sketchPlanes.map((p) => p.sketchId).sort();
     expect(ids).toEqual([boxSketch.id, unusedSketch.id].sort());
+
+    result.shape.delete();
+  });
+
+  it("Phase 17: スロット(長円)を押し出すと体積が (直線部の面積+円の面積)*高さ になる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const width = 10;
+    const length = 30; // start-end間の距離(直線部の長さ)。
+    const height = 5;
+    const slot = createSlotEntity({ start: [-length / 2, 0], end: [length / 2, 0], width });
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [slot],
+    });
+    const { doc } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: height,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const r = width / 2;
+    const expectedArea = length * width + Math.PI * r * r;
+    const volume = measureVolume(result.shape);
+    expect(volume).toBeCloseTo(expectedArea * height, 1);
+
+    const bbox = result.shape.boundingBox;
+    expect(bbox.width).toBeCloseTo(length + width, 3);
+    expect(bbox.height).toBeCloseTo(width, 3);
+    expect(bbox.depth).toBeCloseTo(height, 6);
+    bbox.delete();
+
+    result.shape.delete();
+  });
+
+  it("Phase 17: 正六角形(外接円半径10)を押し出すと体積が正六角形の面積*高さになる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const radius = 10;
+    const sides = 6;
+    const height = 4;
+    const hexagon = createRegularPolygonEntity({ radius, sides });
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [hexagon],
+    });
+    const { doc } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: height,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    // 正n角形(外接円半径r)の面積 = (1/2) n r^2 sin(2π/n)。
+    const expectedArea = 0.5 * sides * radius * radius * Math.sin((2 * Math.PI) / sides);
+    const volume = measureVolume(result.shape);
+    expect(volume).toBeCloseTo(expectedArea * height, 1);
+
+    const faces = result.shape.faces;
+    // 六角柱: 側面6+上下2=8面。
+    expect(faces.length).toBe(8);
+    faces.forEach((f) => f.delete());
+
+    result.shape.delete();
+  });
+
+  it("Phase 17: polygonの1辺をbulge=1(半円)にすると体積が半円分増える(半円+半正方形)", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const height = 3;
+    const side = 20;
+    // 正方形(0,0)(20,0)(20,20)(0,20)の下辺(頂点0→1)を、外側(-Y方向)に膨らむ半円にする。
+    // 半円の弦=20、半径=10。bulge=+1(または-1)は辺の向きに応じて外向きの半円になる。
+    // 実際にどちら向きに膨らむかは幾何(circumcircle)で決まるため、体積の符号ではなく
+    // 「正方形単体の体積との差の絶対値が半円の面積*高さに一致する」ことで検証する。
+    const bulgedSquare = createPolygonEntity({
+      points: [
+        [0, 0],
+        [side, 0],
+        [side, side],
+        [0, side],
+      ],
+      bulges: [1, null, null, null],
+    });
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [bulgedSquare],
+    });
+    const { doc } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: height,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const r = side / 2;
+    const semicircleArea = (Math.PI * r * r) / 2;
+    const squareVolume = side * side * height;
+    const volume = measureVolume(result.shape);
+    expect(Math.abs(volume - squareVolume)).toBeCloseTo(semicircleArea * height, 0);
 
     result.shape.delete();
   });
