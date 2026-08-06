@@ -15,9 +15,14 @@ import {
   type SnapKind,
 } from "../sketch/snapping";
 
-const BASE_COLOR = 0x5b8def;
+/** SolidWorks風の明るいグレー系ボディ色。 */
+const BASE_COLOR = 0xc8ccd2;
 /** 選択面のハイライト色(通常より明るい黄系)。 */
 const HIGHLIGHT_COLOR = 0xffd54f;
+/** ホバー中の面のハイライト色(選択色より控えめな薄い水色)。 */
+const HOVER_COLOR = 0x9fd8ff;
+/** エッジ線の色(濃いグレー〜黒)。 */
+const EDGE_COLOR = 0x0a0a0a;
 
 /** 選択中スケッチの線色(オレンジ)。 */
 const SKETCH_SELECTED_COLOR = 0xff9800;
@@ -321,10 +326,14 @@ export class CadViewer {
   private camera: THREE.PerspectiveCamera;
   private controls: OrbitControls;
   private mesh: THREE.Mesh | null = null;
+  /** ソリッドのエッジ線(setMesh()でmesh.edgesから構築)。メッシュ更新時に破棄・再構築する。 */
+  private edgesMesh: THREE.LineSegments | null = null;
   private faceGroups: FaceGroup[] = [];
   private faceInfo: FaceInfo[] = [];
   private materials: THREE.MeshStandardMaterial[] = [];
   private selectedGroupIndex: number | null = null;
+  /** マウスオーバー中の面のmaterialIndex(選択面とは独立、選択時は選択色を優先)。 */
+  private hoveredGroupIndex: number | null = null;
   private raycaster = new THREE.Raycaster();
   private container: HTMLElement;
   private resizeObserver: ResizeObserver;
@@ -333,6 +342,8 @@ export class CadViewer {
   private onFaceSelect?: (face: FaceInfo | null) => void;
   /** 現在のメッシュのバウンディングボックスから求めた半径目安(mm)。グリッド範囲の基準に使う。 */
   private meshHalfExtent = 50;
+  /** 初回メッシュ受信時にfitToView()を自動実行するためのフラグ(2回目以降は視点を維持する)。 */
+  private hasReceivedMesh = false;
 
   /** スケッチ線・グリッドを乗せるグループ。表示/非表示はこのgroup.visibleで切り替える。 */
   private sketchOverlayGroup: THREE.Group;
@@ -404,10 +415,14 @@ export class CadViewer {
     this.controls.target.set(0, 0, 0);
     this.controls.enableDamping = true;
 
-    const ambient = new THREE.AmbientLight(0xffffff, 0.6);
-    const directional = new THREE.DirectionalLight(0xffffff, 0.8);
-    directional.position.set(1, 1, 1);
-    this.scene.add(ambient, directional);
+    // SolidWorks風の陰影: 控えめなHemisphere(空色/地色)+ カメラ斜め上からのキーライト
+    // + 反対側からの弱いフィルライト(陰影が付く面でも真っ暗にならない程度の補助光)。
+    const hemiLight = new THREE.HemisphereLight(0xcfe0ff, 0x4a4a42, 0.55);
+    const keyLight = new THREE.DirectionalLight(0xffffff, 0.85);
+    keyLight.position.set(120, 180, 220);
+    const fillLight = new THREE.DirectionalLight(0xffffff, 0.25);
+    fillLight.position.set(-150, -80, -100);
+    this.scene.add(hemiLight, keyLight, fillLight);
 
     const grid = new THREE.GridHelper(200, 20);
     grid.rotation.x = Math.PI / 2;
@@ -462,6 +477,7 @@ export class CadViewer {
 
     this.renderer.domElement.addEventListener("click", this.handleClick);
     this.renderer.domElement.addEventListener("mousemove", this.handleDrawingMouseMove);
+    this.renderer.domElement.addEventListener("mouseleave", this.handleMouseLeave);
     window.addEventListener("keydown", this.handleKeyDown);
 
     this.resizeObserver = new ResizeObserver(() => this.handleResize());
@@ -643,22 +659,93 @@ export class CadViewer {
     this.onFaceSelect?.(info);
   };
 
-  /** materialIndex = groupIndex のマテリアル色をハイライト色に、前回選択分は基本色に戻す。 */
+  /** materialIndex = groupIndex のマテリアル色をハイライト色に、前回選択分は基本色(またはホバー中ならホバー色)に戻す。 */
   private selectGroup(groupIndex: number) {
     if (this.selectedGroupIndex != null) {
-      this.materials[this.selectedGroupIndex]?.color.setHex(BASE_COLOR);
+      this.materials[this.selectedGroupIndex]?.color.setHex(
+        this.selectedGroupIndex === this.hoveredGroupIndex ? HOVER_COLOR : BASE_COLOR,
+      );
     }
     this.selectedGroupIndex = groupIndex;
     this.materials[groupIndex]?.color.setHex(HIGHLIGHT_COLOR);
   }
 
-  /** 面の選択を解除し、ハイライトを元の色に戻す。onFaceSelect(null)を呼ぶ。 */
+  /** 面の選択を解除し、ハイライトを元の色(またはホバー中ならホバー色)に戻す。onFaceSelect(null)を呼ぶ。 */
   clearSelection() {
     if (this.selectedGroupIndex != null) {
-      this.materials[this.selectedGroupIndex]?.color.setHex(BASE_COLOR);
+      this.materials[this.selectedGroupIndex]?.color.setHex(
+        this.selectedGroupIndex === this.hoveredGroupIndex ? HOVER_COLOR : BASE_COLOR,
+      );
       this.selectedGroupIndex = null;
       this.onFaceSelect?.(null);
     }
+  }
+
+  /**
+   * 描画モード外でのマウス移動時、レイキャストでカーソル下の面を求めてホバーハイライトを更新する。
+   * 選択中の面はホバー色より選択色を優先する(setHoverGroup内で判定)。
+   */
+  private handleHoverMouseMove(event: MouseEvent) {
+    if (!this.mesh) {
+      this.setHoverGroup(null);
+      return;
+    }
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const pointer = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(pointer, this.camera);
+    const intersections = this.raycaster.intersectObject(this.mesh, false);
+    if (intersections.length === 0) {
+      this.setHoverGroup(null);
+      return;
+    }
+    const triangleIndex = intersections[0].faceIndex;
+    if (triangleIndex == null) {
+      this.setHoverGroup(null);
+      return;
+    }
+    const triangleOffset = triangleIndex * 3;
+    const groupIndex = this.faceGroups.findIndex(
+      (g) => triangleOffset >= g.start && triangleOffset < g.start + g.count,
+    );
+    this.setHoverGroup(groupIndex === -1 ? null : groupIndex);
+  }
+
+  /** キャンバスからマウスが離れたら、ホバーハイライトを解除する。 */
+  private handleMouseLeave = () => {
+    this.setHoverGroup(null);
+  };
+
+  /**
+   * ホバー中の面(materialIndex)を更新する。選択中の面(selectedGroupIndex)はホバー色より
+   * 選択色を優先するため、色の書き換えは行わない(選択が外れた時点でHOVER_COLORに切り替わる)。
+   */
+  private setHoverGroup(groupIndex: number | null) {
+    if (this.hoveredGroupIndex === groupIndex) return;
+    if (this.hoveredGroupIndex != null && this.hoveredGroupIndex !== this.selectedGroupIndex) {
+      this.materials[this.hoveredGroupIndex]?.color.setHex(BASE_COLOR);
+    }
+    this.hoveredGroupIndex = groupIndex;
+    if (groupIndex != null && groupIndex !== this.selectedGroupIndex) {
+      this.materials[groupIndex]?.color.setHex(HOVER_COLOR);
+    }
+  }
+
+  /** 面材質の共通見た目設定(SolidWorks風の明るいグレー、安っぽく見えない程度のroughness/metalness)。 */
+  private createFaceMaterial(): THREE.MeshStandardMaterial {
+    return new THREE.MeshStandardMaterial({
+      color: BASE_COLOR,
+      side: THREE.DoubleSide,
+      roughness: 0.55,
+      metalness: 0.12,
+      // エッジ線(this.edgesMesh)をZ-fighting無しで手前に見せるため、ソリッド側をわずかに
+      // 奥へオフセットする(標準的な「ポリゴンオフセット+同一深度のエッジ線」の手法)。
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
+    });
   }
 
   setMesh(data: MeshData, faceInfo: FaceInfo[] = []) {
@@ -673,6 +760,12 @@ export class CadViewer {
       }
       this.mesh = null;
     }
+    if (this.edgesMesh) {
+      this.scene.remove(this.edgesMesh);
+      this.edgesMesh.geometry.dispose();
+      (this.edgesMesh.material as THREE.Material).dispose();
+      this.edgesMesh = null;
+    }
 
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.BufferAttribute(data.positions, 3));
@@ -685,20 +778,27 @@ export class CadViewer {
     const materials: THREE.MeshStandardMaterial[] = [];
     data.faceGroups.forEach((group, materialIndex) => {
       geometry.addGroup(group.start, group.count, materialIndex);
-      materials.push(
-        new THREE.MeshStandardMaterial({ color: BASE_COLOR, side: THREE.DoubleSide }),
-      );
+      materials.push(this.createFaceMaterial());
     });
 
     this.faceGroups = data.faceGroups;
     this.faceInfo = faceInfo;
     this.materials = materials;
-    // メッシュが再生成されるとfaceGroupsのインデックス対応も変わりうるため選択状態はリセットする。
+    // メッシュが再生成されるとfaceGroupsのインデックス対応も変わりうるため選択・ホバー状態はリセットする。
     // (ストア側の選択面はfaceInfoに残っているかどうかで呼び出し元が判断する)
     this.selectedGroupIndex = null;
+    this.hoveredGroupIndex = null;
 
-    this.mesh = new THREE.Mesh(geometry, materials.length > 0 ? materials : new THREE.MeshStandardMaterial({ color: BASE_COLOR }));
+    this.mesh = new THREE.Mesh(geometry, materials.length > 0 ? materials : this.createFaceMaterial());
     this.scene.add(this.mesh);
+
+    if (data.edges && data.edges.length > 0) {
+      const edgeGeometry = new THREE.BufferGeometry();
+      edgeGeometry.setAttribute("position", new THREE.BufferAttribute(data.edges, 3));
+      const edgeMaterial = new THREE.LineBasicMaterial({ color: EDGE_COLOR });
+      this.edgesMesh = new THREE.LineSegments(edgeGeometry, edgeMaterial);
+      this.scene.add(this.edgesMesh);
+    }
 
     geometry.computeBoundingBox();
     const bbox = geometry.boundingBox;
@@ -707,6 +807,42 @@ export class CadViewer {
       bbox.getSize(size);
       this.meshHalfExtent = Math.max(size.x, size.y, size.z, 20) / 2;
     }
+
+    // 初回メッシュ受信時のみ自動フィットする(2回目以降の再評価では現在の視点を維持する)。
+    if (!this.hasReceivedMesh) {
+      this.hasReceivedMesh = true;
+      this.fitToView();
+    }
+  }
+
+  /**
+   * 現在のメッシュのバウンディングスフィアが画角に収まる距離までカメラを移動する
+   * (「フィット」ボタン、初回メッシュ受信時に使用)。カメラの視線方向は維持し、距離のみ調整する。
+   * メッシュが無ければ何もしない。
+   */
+  fitToView() {
+    if (!this.mesh) return;
+    this.mesh.geometry.computeBoundingSphere();
+    const sphere = this.mesh.geometry.boundingSphere;
+    if (!sphere || sphere.radius <= 0) return;
+
+    const center = sphere.center.clone();
+    const radius = Math.max(sphere.radius, 1);
+    const vFov = (this.camera.fov * Math.PI) / 180;
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * this.camera.aspect);
+    const fitFov = Math.min(vFov, hFov);
+    // 少し余白を持たせる(1.15倍)。
+    const distance = (radius / Math.sin(fitFov / 2)) * 1.15;
+
+    let direction = this.camera.position.clone().sub(this.controls.target);
+    if (direction.lengthSq() < 1e-6) {
+      direction = new THREE.Vector3(1, 1, 1);
+    }
+    direction.normalize();
+
+    this.camera.position.copy(center.clone().addScaledVector(direction, distance));
+    this.controls.target.copy(center);
+    this.controls.update();
   }
 
   /** 直前のsetSketchOverlay()呼び出しで生成した線・グリッドをsceneから取り除き、リソースを解放する。 */
@@ -810,6 +946,7 @@ export class CadViewer {
   startPolygonDrawing(basis: PlaneBasis, snap: boolean, existingEntities: SketchEntity[], callbacks: PolygonDrawingCallbacks) {
     this.cancelPolygonDrawing();
     this.clearSelection();
+    this.setHoverGroup(null);
     this.drawingActive = true;
     this.drawingBasis = basis;
     this.drawingSnap = snap;
@@ -892,9 +1029,15 @@ export class CadViewer {
     this.updateCoordOverlay(px, py, resolved.point);
   }
 
-  /** マウス移動時、描画モード中であればスナップ・軸ロックを適用したラバーバンド・ガイド・座標表示を更新する。 */
+  /**
+   * マウス移動時、描画モード中であればスナップ・軸ロックを適用したラバーバンド・ガイド・座標表示を
+   * 更新し、描画モード外であれば面ホバーハイライトを更新する。
+   */
   private handleDrawingMouseMove = (event: MouseEvent) => {
-    if (!this.drawingActive || !this.drawingBasis) return;
+    if (!this.drawingActive || !this.drawingBasis) {
+      this.handleHoverMouseMove(event);
+      return;
+    }
     const basis = this.drawingBasis;
     const rect = this.renderer.domElement.getBoundingClientRect();
     const px = event.clientX - rect.left;
@@ -1096,6 +1239,7 @@ export class CadViewer {
     this.resizeObserver.disconnect();
     this.renderer.domElement.removeEventListener("click", this.handleClick);
     this.renderer.domElement.removeEventListener("mousemove", this.handleDrawingMouseMove);
+    this.renderer.domElement.removeEventListener("mouseleave", this.handleMouseLeave);
     window.removeEventListener("keydown", this.handleKeyDown);
     this.frameCallbacks.clear();
     this.controls.dispose();
@@ -1107,6 +1251,10 @@ export class CadViewer {
       } else {
         material.dispose();
       }
+    }
+    if (this.edgesMesh) {
+      this.edgesMesh.geometry.dispose();
+      (this.edgesMesh.material as THREE.Material).dispose();
     }
     this.clearSketchOverlay();
     this.clearDrawingPreview();

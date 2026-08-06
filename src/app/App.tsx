@@ -230,6 +230,14 @@ export default function App() {
         </button>
         <button
           type="button"
+          data-testid="btn-fit-view"
+          onClick={() => viewerRef.current?.fitToView()}
+          title="モデル全体が画面に収まるようにカメラを調整します"
+        >
+          フィット
+        </button>
+        <button
+          type="button"
           data-testid="btn-align-to-plane"
           onClick={handleAlignToPlane}
           disabled={!selectedSketchPlane}
