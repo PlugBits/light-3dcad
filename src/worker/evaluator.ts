@@ -14,7 +14,20 @@
 //     弾く粗い事前バリデーションを行う)
 //   - extrude: operation "newBody"(最初の1回のみ) / "cut"(既存ボディが必要) / "add"(既存ボディが必要。fuseで結合)
 //   - direction: -1 は逆向き押し出し(面参照の場合は面法線の逆方向)
-import { Plane, draw, drawCircle, drawRectangle, type Drawing, type Edge, type Face, type Shape3D } from "replicad";
+import {
+  loft,
+  makeCylinder,
+  Plane,
+  draw,
+  drawCircle,
+  drawRectangle,
+  type Drawing,
+  type Edge,
+  type Face,
+  type Sketch,
+  type Shape3D,
+  type Wire,
+} from "replicad";
 
 import type {
   CadDocument,
@@ -27,12 +40,15 @@ import type {
   SketchEntity,
   SketchFeature,
   SketchSegment,
+  ThreadFeature,
 } from "../model/types";
 import { validatePolygonCorners } from "../model/validation";
 import { effectivePolygonBulges } from "../sketch/bulge";
 import { classifySketchEntities } from "../sketch/containment";
+import { computeFacePlaneBasis, facePlaneRawXDir } from "../sketch/facePlaneBasis";
 import { findClosedRegions, loopPolyline } from "../sketch/regions";
 import { regularPolygonVertices, slotAxisNormal, SLOT_CAP_BULGE } from "../sketch/shapeFromPoints";
+import { MALE_THREAD_MAX_LENGTH, THREAD_PRESET_TABLE, threadDrillDiameter } from "../model/threadPresets";
 import type { ReferenceEdgeLine, ReferenceEdgeSet, SketchPlaneInfo } from "../protocol/messages";
 
 export interface EvaluationSuccess {
@@ -618,23 +634,164 @@ function applyShell3D(body: Shape3D, feature: ShellFeature): Shape3D {
 }
 
 /**
- * 面の法線から、決定的なxDir(未正規化)を求める。
- * xDir は 法線とグローバルZの外積(normal × Z)。ほぼ平行(Z軸自体を向く面)な場合はグローバルXにフォールバックする。
- * buildFacePlane() と facePlaneBasis() の両方がこの関数を使うことで、
- * evaluatorが実際に押し出しに使うPlaneの基底とsketchPlanes応答の基底を一致させる。
+ * ISO並目ねじの外ねじ実効かみ合い深さ係数(h3 ≈ 0.61343*pitch)。理論山高さ(0.866*pitch、鋭いV形状)
+ * ではなくISO 68-1の外ねじ実用値に近い、より浅い値を使う(Phase 25c)。事前スパイクで理論山高さの
+ * 鋭いV形状を使うと、ヘリカル形状の構築(後述のbuildMaleThreadSolidLocal)が自己交差ぎみになり
+ * 体積計算・ブーリアン演算が不安定になる(バウンディングボックスが理論値の2倍以上に膨らむ、
+ * 体積が負値になる等)ことが判明したため、浅い実用値を採用した。
  */
-function facePlaneRawXDir(normal: Tuple3): Tuple3 {
-  const GLOBAL_Z: Tuple3 = [0, 0, 1];
-  const xDir = cross(normal, GLOBAL_Z);
-  if (length(xDir) < 1e-8) {
-    return [1, 0, 0];
+const THREAD_ENGAGEMENT_FACTOR = 0.61343;
+
+/**
+ * 雄ねじの実ねじ山リブを離散断面のloft(輪列、replicadのloft()=BRepOffsetAPI_ThruSections)で
+ * 近似する際の、ねじ山1回転あたりの断面数(Phase 25c)。
+ *
+ * 事前スパイクの結論は「sketchHelix()でヘリックスを作りSketch#sweepSketch()でスパインに沿って
+ * 三角プロファイルを掃引する」方式だったが、実装検証の結果、このプロジェクトが使用する
+ * replicad/OpenCascade WASMの組み合わせでは実際の掃引結果(sweepSketch内部でtwistExtrude()を
+ * 使う経路も含む)が幾何的に破綻する(バウンディングボックスが理論値の2倍以上に膨らむ、
+ * 体積が負値になる等。半径・ピッチの値に関わらず再現)ことが確認されたため、この実装では
+ * 採用していない。代わりに、三角プロファイル(底辺=ピッチ、根本=谷径、先端=呼び径)を
+ * 少しずつ回転・上昇させた断面群を作り、loft(ruled: true)で結んでリブ形状を作る方式にした。
+ * 16は実装検証で「10以下では隣接断面の間隔が広すぎてリブが自己交差し、体積が負値・過小値になる」
+ * ことを確認した上での安全側の値(16回転で常に正しい形状[外形半径どおりのbounding box、
+ * 体積が円柱単体より大きい]になることを確認済み)。
+ */
+const THREAD_SECTIONS_PER_TURN = 16;
+
+/**
+ * 雄ねじの実ねじ山ソリッドを、ローカル座標系(原点=ねじ開始点、+Z=ねじが伸びる方向、
+ * 谷径の円柱がz=0〜lengthに乗る)で構築する(Phase 25c)。呼び出し側でワールド座標
+ * (配置面の位置・法線)へtranslate/rotate()して配置する。
+ * 実測(M6×5mm、16断面/回転): loft構築が数百ms、rod.fuse()がoptimisation:"sameFace"で
+ * 十数秒程度(ねじが長い=断面数が多いほど比例して増える。MALE_THREAD_MAX_LENGTHで上限を設けている)。
+ */
+function buildMaleThreadSolidLocal(preset: ThreadFeature["preset"], length: number): Shape3D {
+  const { nominal, pitch } = THREAD_PRESET_TABLE[preset];
+  const majorRadius = nominal / 2;
+  const threadHeight = THREAD_ENGAGEMENT_FACTOR * pitch;
+  const minorRadius = majorRadius - threadHeight;
+
+  const rod = makeCylinder(minorRadius, length, [0, 0, 0], [0, 0, 1]);
+
+  const nTurns = length / pitch;
+  const totalSections = Math.max(2, Math.round(THREAD_SECTIONS_PER_TURN * nTurns) + 1);
+  const wires: Wire[] = [];
+  for (let i = 0; i < totalSections; i += 1) {
+    const frac = i / (totalSections - 1);
+    const z = frac * length;
+    const angleDeg = frac * nTurns * 360;
+    const plane = new Plane([0, 0, z], [1, 0, 0], [0, 0, 1]);
+    // 単一の閉ループ(コンパウンドではない)の.sketchOnPlane(Plane)は常に具象のSketchを返すため、
+    // .wire(具象クラスのみが持つプロパティ、SketchInterfaceには無い)を使うためにキャストする。
+    const sketch = draw([minorRadius, -pitch / 2])
+      .lineTo([majorRadius, 0])
+      .lineTo([minorRadius, pitch / 2])
+      .close()
+      .rotate(angleDeg, [0, 0])
+      .sketchOnPlane(plane) as Sketch;
+    wires.push(sketch.wire.clone());
+    sketch.delete();
+    plane.delete();
   }
-  return xDir;
+
+  let threadRidge: Shape3D;
+  try {
+    threadRidge = loft(wires, { ruled: true });
+  } finally {
+    wires.forEach((w) => w.delete());
+  }
+
+  try {
+    const fused = rod.fuse(threadRidge, { optimisation: "sameFace" });
+    return fused;
+  } finally {
+    rod.delete();
+    threadRidge.delete();
+  }
+}
+
+/**
+ * ローカル座標系(原点=配置基準点、+Z=軸方向)で構築した回転体(円柱・ねじ山ソリッド等)を、
+ * ワールド座標(position/axisDir)へ配置する(Phase 25c)。+Zをaxisdir(単位ベクトル)へ向ける
+ * 回転(axis-angle、cross(+Z, axisDir)を回転軸に取る。ほぼ平行/反平行の場合はそれぞれ
+ * 無回転/垂直な軸まわり180度回転にフォールバックする)を行った後、positionへ平行移動する。
+ * shapeはこの関数内でconsumeされる(rotate/translateはreplicadのShape3D APIどおり、
+ * 呼び出し側のshapeをdelete()して新しいインスタンスを返す)。
+ */
+function orientLocalSolidToWorld(shape: Shape3D, position: Tuple3, axisDir: Tuple3): Shape3D {
+  const dir = normalize(axisDir);
+  const zAxis: Tuple3 = [0, 0, 1];
+  const cosAngle = dot(zAxis, dir);
+  let result = shape;
+  if (cosAngle < 1 - 1e-9) {
+    if (cosAngle < -1 + 1e-9) {
+      // ほぼ真逆(-Z)。回転軸の向きが定まらないため、Z軸に垂直な任意軸(+X)まわりに180度回転する。
+      result = result.rotate(180, [0, 0, 0], [1, 0, 0]);
+    } else {
+      const axis = cross(zAxis, dir);
+      const angleDeg = (Math.acos(Math.min(1, Math.max(-1, cosAngle))) * 180) / Math.PI;
+      result = result.rotate(angleDeg, [0, 0, 0], axis);
+    }
+  }
+  return result.translate(position);
+}
+
+/**
+ * ねじフィーチャーを現在のボディに適用し、新しいボディを返す(古いボディはこの関数内でdelete()する、
+ * Phase 25c)。配置面はShellFeatureと同様resolveFaceGeometry()で現在のボディから幾何マッチングして
+ * 再解決する(featureId参照ではなく、直前までの「現在ボディ」に対して解決する)。
+ * 雄(hand:"male")は呼び径の谷径円柱+実ねじ山リブ(buildMaleThreadSolidLocal)をfuseで追加する。
+ * 雌(hand:"female")は規格の下穴径(呼び径−ピッチ)の円柱をcutする簡易表現にとどめる(v1では
+ * 雌ねじの実ねじ山cutは評価時間が実用的でなくなることがスパイクで判明したため、下穴のみ)。
+ */
+function applyThread(body: Shape3D, feature: ThreadFeature): Shape3D {
+  const resolved = resolveFaceGeometry(body, feature.face.faceId, feature.face.center, feature.face.normal);
+  const basis = computeFacePlaneBasis(resolved.center, resolved.normal);
+  const [u, v] = feature.position;
+  const position: Tuple3 = [
+    basis.origin[0] + u * basis.xDir[0] + v * basis.yDir[0],
+    basis.origin[1] + u * basis.xDir[1] + v * basis.yDir[1],
+    basis.origin[2] + u * basis.xDir[2] + v * basis.yDir[2],
+  ];
+  const axisDir: Tuple3 = [
+    resolved.normal[0] * feature.direction,
+    resolved.normal[1] * feature.direction,
+    resolved.normal[2] * feature.direction,
+  ];
+
+  if (feature.hand === "male") {
+    if (feature.length > MALE_THREAD_MAX_LENGTH) {
+      throw new Error(`雄ねじの長さは${MALE_THREAD_MAX_LENGTH}mm以下である必要があります`);
+    }
+    const localSolid = buildMaleThreadSolidLocal(feature.preset, feature.length);
+    const worldSolid = orientLocalSolidToWorld(localSolid, position, axisDir);
+    try {
+      const newBody = body.fuse(worldSolid);
+      body.delete();
+      return newBody;
+    } finally {
+      worldSolid.delete();
+    }
+  }
+
+  // hand === "female": 下穴径の円柱をcutする簡易表現(実ねじ山は作らない)。
+  const drillRadius = threadDrillDiameter(feature.preset) / 2;
+  const localHole = makeCylinder(drillRadius, feature.length, [0, 0, 0], [0, 0, 1]);
+  const worldHole = orientLocalSolidToWorld(localHole, position, axisDir);
+  try {
+    const newBody = body.cut(worldHole);
+    body.delete();
+    return newBody;
+  } finally {
+    worldHole.delete();
+  }
 }
 
 /**
  * 面の中心・法線から、決定的なxDirを持つスケッチ平面(Plane)を構築する。
- * 呼び出し側で使用後に plane.delete() すること。
+ * 呼び出し側で使用後に plane.delete() すること。xDirの決定則はsrc/sketch/facePlaneBasis.tsの
+ * facePlaneRawXDir()(ビューア側の面クリック点ローカル2D化と共通)。
  */
 function buildFacePlane(center: Tuple3, normal: Tuple3): Plane {
   return new Plane(center, facePlaneRawXDir(normal), normal);
@@ -643,14 +800,10 @@ function buildFacePlane(center: Tuple3, normal: Tuple3): Plane {
 /**
  * buildFacePlane()が構築するreplicad Planeと同一の基底を、プレーンなタプルとして計算する
  * (sketchPlanes応答用。Plane自身はOCCTオブジェクトを保持するため使い回さない)。
- * replicadのPlaneコンストラクタと同じ正規化手順(zDir=normalize(normal),
- * xDir=normalize(rawXDir), yDir=normalize(zDir×xDir))を踏襲する。
+ * 実体はsrc/sketch/facePlaneBasis.tsのcomputeFacePlaneBasis()(ビューア側と共通の純粋関数)。
  */
 function facePlaneBasis(center: Tuple3, normal: Tuple3): PlaneBasis {
-  const zDir = normalize(normal);
-  const xDir = normalize(facePlaneRawXDir(normal));
-  const yDir = normalize(cross(zDir, xDir));
-  return { origin: center, xDir, yDir, normal: zDir };
+  return computeFacePlaneBasis(center, normal);
 }
 
 /**
@@ -943,6 +1096,15 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
           throw new Error("シェルの対象となるボディがありません");
         }
         body = applyShell3D(body, feature);
+        snapshots.set(feature.id, body.clone());
+        continue;
+      }
+
+      if (feature.type === "thread") {
+        if (!body) {
+          throw new Error("ねじの対象となるボディがありません");
+        }
+        body = applyThread(body, feature);
         snapshots.set(feature.id, body.clone());
         continue;
       }

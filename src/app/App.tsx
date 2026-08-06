@@ -8,6 +8,7 @@ import { Fillet3DEditor } from "../components/Fillet3DEditor";
 import { RevolveEditor } from "../components/RevolveEditor";
 import { ShellEditor } from "../components/ShellEditor";
 import { SketchEditor } from "../components/SketchEditor";
+import { ThreadEditor } from "../components/ThreadEditor";
 import { downloadStl } from "../export/downloadStl";
 import {
   addSketchEntity,
@@ -31,7 +32,8 @@ import {
   createRectangleEntity,
   createSlotEntity,
 } from "../model/entity";
-import type { FilletEdgeRef, PolygonCorner, ShellFaceRef } from "../model/types";
+import type { FilletEdgeRef, PolygonCorner, ShellFaceRef, ThreadPreset } from "../model/types";
+import { MALE_THREAD_MAX_LENGTH, THREAD_PRESET_LIST } from "../model/threadPresets";
 import {
   addConcentricConstraint,
   addPerpendicularConstraint,
@@ -127,6 +129,7 @@ export default function App() {
   const removeFeature = useCadStore((s) => s.removeFeature);
   const addFillet3D = useCadStore((s) => s.addFillet3D);
   const addShell3D = useCadStore((s) => s.addShell3D);
+  const addThread = useCadStore((s) => s.addThread);
   const exportStl = useCadStore((s) => s.exportStl);
   const setShowSketches = useCadStore((s) => s.setShowSketches);
   const updateDocument = useCadStore((s) => s.updateDocument);
@@ -159,6 +162,20 @@ export default function App() {
   const [shellToolThickness, setShellToolThickness] = useState(2);
   // シェルツールで現在選択中の面集合(選択した順、Phase 25b)。
   const [shellSelection, setShellSelection] = useState<ShellFaceRef[]>([]);
+  // 現在アクティブなねじツール(未選択はfalse、Phase 25c)。trueの間はミニフォームを表示し、
+  // 平面のクリックで即座にフィーチャーが追加される(適用ボタンは無い、面/エッジツールと異なる)。
+  const [threadTool, setThreadTool] = useState(false);
+  // ねじツールのミニフォームの値(プリセット・雄雌・長さ)。クリックコールバックからは
+  // ref経由で最新値を読む(cornerSizeRefと同じパターン)。
+  const [threadPreset, setThreadPreset] = useState<ThreadPreset>("M6");
+  const [threadHand, setThreadHand] = useState<"male" | "female">("male");
+  const [threadLength, setThreadLength] = useState(10);
+  const threadPresetRef = useRef(threadPreset);
+  threadPresetRef.current = threadPreset;
+  const threadHandRef = useRef(threadHand);
+  threadHandRef.current = threadHand;
+  const threadLengthRef = useRef(threadLength);
+  threadLengthRef.current = threadLength;
   // トリムツール(未選択はfalse、Phase 19b)。
   const [trimTool, setTrimTool] = useState(false);
   // 寸法ツール(未選択はfalse、Phase 20b)。segmentをクリックしてlength/radius/distance拘束を作成する。
@@ -600,7 +617,7 @@ export default function App() {
 
   /** 指定ツールのボタンをdisabledにすべきか(他のツールが実行中、または対象スケッチ平面が未確定)。 */
   function isToolDisabled(tool: Exclude<DrawingTool, null>): boolean {
-    if (cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool) return true;
+    if (cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool) return true;
     if (activeTool) return activeTool !== tool;
     return !selectedSketchPlane;
   }
@@ -655,7 +672,7 @@ export default function App() {
 
   /** フィレット/面取りボタンをdisabledにすべきか(他の作図ツール実行中、または対象スケッチ平面が未確定)。 */
   function isCornerToolDisabled(kind: "fillet" | "chamfer"): boolean {
-    if (activeTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool) return true;
+    if (activeTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool) return true;
     if (cornerTool) return cornerTool !== kind;
     return !selectedSketchPlane;
   }
@@ -722,8 +739,46 @@ export default function App() {
 
   /** シェルボタンをdisabledにすべきか(他のツール実行中、またはボディが存在しない)。 */
   function isShellToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || threadTool) return true;
     if (shellTool) return false;
+    return !hasBody;
+  }
+
+  /**
+   * ねじツール(Phase 25c)を開始する。ボディのエッジ/面選択ツールと違い、平面を1回クリックした
+   * 時点で(「適用」ボタン無しに)即座にaddThread()が呼ばれてフィーチャーが追加される。
+   * プリセット・雄雌・長さはミニフォーム(ツールバー)で変更でき、クリック時点の最新値を
+   * ref(threadPresetRef等)経由で読む(startEdgeSelectTool呼び出し時に一度だけ渡す
+   * コールバックのため、古いクロージャを掴まないようにする、cornerSizeRefと同じパターン)。
+   */
+  function handleStartThreadTool() {
+    if (!viewerRef.current || !hasBody) return;
+    viewerRef.current.startThreadPlaceTool({
+      onPick: (ref) => {
+        addThread({
+          preset: threadPresetRef.current,
+          hand: threadHandRef.current,
+          length: threadLengthRef.current,
+          face: { faceId: ref.faceId, center: ref.center, normal: ref.normal },
+          position: ref.position,
+        });
+        setThreadTool(false);
+      },
+      onCancel: () => {
+        setThreadTool(false);
+      },
+    });
+    setThreadTool(true);
+  }
+
+  function handleCancelThreadTool() {
+    viewerRef.current?.cancelThreadPlaceTool();
+  }
+
+  /** ねじボタンをdisabledにすべきか(他のツール実行中、またはボディが存在しない)。 */
+  function isThreadToolDisabled(): boolean {
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool) return true;
+    if (threadTool) return false;
     return !hasBody;
   }
 
@@ -768,7 +823,7 @@ export default function App() {
 
   /** トリムボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isTrimToolDisabled(): boolean {
-    if (activeTool || cornerTool || dimensionTool || constraintTool || edgeTool || shellTool) return true;
+    if (activeTool || cornerTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool) return true;
     if (trimTool) return false;
     return !selectedSketchPlane;
   }
@@ -918,7 +973,7 @@ export default function App() {
 
   /** 寸法ツールボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isDimensionToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || constraintTool || edgeTool || shellTool) return true;
+    if (activeTool || cornerTool || trimTool || constraintTool || edgeTool || shellTool || threadTool) return true;
     if (dimensionTool) return false;
     return !selectedSketchPlane;
   }
@@ -1056,14 +1111,14 @@ export default function App() {
 
   /** 拘束ツールボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isConstraintToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || edgeTool || shellTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || edgeTool || shellTool || threadTool) return true;
     if (constraintTool) return false;
     return !selectedSketchPlane;
   }
 
   /** 3Dフィレット/面取りボタンをdisabledにすべきか(他のツール実行中、またはボディが無い)。 */
   function isEdgeToolDisabled(kind: "fillet" | "chamfer"): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || shellTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || shellTool || threadTool) return true;
     if (edgeTool) return edgeTool !== kind;
     return !hasBody;
   }
@@ -1472,6 +1527,71 @@ export default function App() {
                 </button>
               </>
             )}
+            <button
+              type="button"
+              data-testid="btn-thread"
+              className={threadTool ? "toolbar-btn-active" : undefined}
+              onClick={threadTool ? handleCancelThreadTool : handleStartThreadTool}
+              disabled={isThreadToolDisabled()}
+              title="プリセット・雄/雌・長さを選び、平面をクリックしてねじフィーチャーを配置します(Escで終了)"
+            >
+              {threadTool ? "ねじキャンセル(Esc)" : "ねじ"}
+            </button>
+            {threadTool && (
+              <>
+                <select
+                  data-testid="thread-tool-preset"
+                  value={threadPreset}
+                  onChange={(e) => setThreadPreset(e.target.value as ThreadPreset)}
+                  title="呼び径"
+                >
+                  {THREAD_PRESET_LIST.map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </select>
+                <label style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 12 }}>
+                  <input
+                    type="radio"
+                    name="thread-tool-hand"
+                    data-testid="thread-tool-hand-male"
+                    checked={threadHand === "male"}
+                    onChange={() => setThreadHand("male")}
+                  />
+                  雄
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 12 }}>
+                  <input
+                    type="radio"
+                    name="thread-tool-hand"
+                    data-testid="thread-tool-hand-female"
+                    checked={threadHand === "female"}
+                    onChange={() => setThreadHand("female")}
+                  />
+                  雌
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }} title="長さ(mm)">
+                  <input
+                    type="number"
+                    data-testid="thread-tool-length"
+                    value={threadLength}
+                    min={0.1}
+                    max={threadHand === "male" ? MALE_THREAD_MAX_LENGTH : undefined}
+                    step="any"
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      if (!Number.isFinite(v) || v <= 0) return;
+                      if (threadHand === "male" && v > MALE_THREAD_MAX_LENGTH) return;
+                      setThreadLength(v);
+                    }}
+                    style={{ width: 50 }}
+                  />
+                  mm
+                </label>
+                <span style={{ fontSize: 12, opacity: 0.8 }}>平面をクリックして配置</span>
+              </>
+            )}
           </div>
 
           <div className="toolbar-group" style={{ marginLeft: "auto" }}>
@@ -1645,6 +1765,7 @@ export default function App() {
               {selectedFeature.type === "fillet3d" && <Fillet3DEditor fillet={selectedFeature} />}
               {selectedFeature.type === "shell" && <ShellEditor shell={selectedFeature} />}
               {selectedFeature.type === "revolve" && <RevolveEditor revolve={selectedFeature} doc={doc} />}
+              {selectedFeature.type === "thread" && <ThreadEditor thread={selectedFeature} />}
             </div>
           )}
 

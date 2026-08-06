@@ -15,6 +15,7 @@ import {
   addRevolveFeature,
   addShellFeature,
   addSketchFeature,
+  addThreadFeature,
   createArcSegment,
   createCircleEntity,
   createEmptyDocument,
@@ -1907,6 +1908,125 @@ describe("evaluateDocument (WASM統合): シェル(中抜き、Phase 25b)", () =
       name: "シェル1",
       thickness: 100,
       faces: [topFace],
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.featureId).toBe(feature.id);
+    expect(result.message.length).toBeGreaterThan(0);
+  });
+});
+
+describe("evaluateDocument (WASM統合): ねじ(Phase 25c)", () => {
+  /** 60x40x20の箱(XY原点中心、Z方向に押し出し)のドキュメントを作る共通セットアップ。 */
+  function buildBoxDoc(distance = 20) {
+    const empty = createEmptyDocument();
+    const rect = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+    });
+    const { doc, feature: extrude } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance,
+      direction: 1,
+      operation: "newBody",
+    });
+    return { doc, extrude };
+  }
+
+  // M6の谷径(evaluator.tsのTHREAD_ENGAGEMENT_FACTOR=0.61343と同じ式)。「円柱のみをfuseした場合」との
+  // 体積比較に使う(テスト側で独自に計算し、evaluator内部の値と一致させる)。
+  const M6_NOMINAL = 6;
+  const M6_PITCH = 1.0;
+  const M6_MINOR_RADIUS = M6_NOMINAL / 2 - 0.61343 * M6_PITCH;
+
+  it("箱の上面にM6雄ねじ(5mm)を配置すると、谷径円柱のみをfuseした場合より体積が大きい(ねじ山分)", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: boxDoc } = buildBoxDoc(20);
+    const boxResult = evaluateDocument(boxDoc);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const boxVolume = measureVolume(boxResult.shape);
+    const topFace = findTopFace(boxResult.shape);
+    boxResult.shape.delete();
+
+    const { doc, feature } = addThreadFeature(boxDoc, {
+      name: "M6ねじ1",
+      hand: "male",
+      preset: "M6",
+      length: 5,
+      face: topFace,
+      position: [0, 0],
+      direction: 1,
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const volume = measureVolume(result.shape);
+    result.shape.delete();
+
+    const rodOnlyVolume = boxVolume + Math.PI * M6_MINOR_RADIUS * M6_MINOR_RADIUS * 5;
+    expect(volume).toBeGreaterThan(rodOnlyVolume);
+    // ねじ山ぶんの上乗せが極端に大きすぎない(明らかな破綻形状でない)ことも粗くチェックする。
+    expect(volume).toBeLessThan(rodOnlyVolume + 30);
+    void feature;
+  }, 45000);
+
+  it("箱の上面にM6雌ねじ(下穴)を配置すると、規格下穴径(呼び径-ピッチ=5.0mm)ぶん体積が減る", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: boxDoc } = buildBoxDoc(20);
+    const boxResult = evaluateDocument(boxDoc);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const boxVolume = measureVolume(boxResult.shape);
+    const topFace = findTopFace(boxResult.shape);
+    boxResult.shape.delete();
+
+    const { doc, feature } = addThreadFeature(boxDoc, {
+      name: "M6ねじ穴1(簡易表現・下穴φ5.0)",
+      hand: "female",
+      preset: "M6",
+      length: 5,
+      face: topFace,
+      position: [15, 10],
+      direction: -1,
+    });
+    expect(feature.name).toContain("下穴φ5.0");
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const volume = measureVolume(result.shape);
+    result.shape.delete();
+
+    const drillRadius = (6 - 1.0) / 2; // 呼び径6 - ピッチ1.0、半分が半径
+    expect(drillRadius).toBeCloseTo(2.5, 6);
+    const expectedVolume = boxVolume - Math.PI * drillRadius * drillRadius * 5;
+    expect(volume).toBeCloseTo(expectedVolume, 1);
+  });
+
+  it("雄ねじの長さが上限(20mm)を超えるとfeatureId付きのエラーになる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: boxDoc } = buildBoxDoc(20);
+    const boxResult = evaluateDocument(boxDoc);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const topFace = findTopFace(boxResult.shape);
+    boxResult.shape.delete();
+
+    const { doc, feature } = addThreadFeature(boxDoc, {
+      name: "M6ねじ1",
+      hand: "male",
+      preset: "M6",
+      length: 25,
+      face: topFace,
+      position: [0, 0],
+      direction: 1,
     });
 
     const result = evaluateDocument(doc);

@@ -18,6 +18,8 @@ import type {
   SketchEntity,
   SketchFeature,
   SketchSegment,
+  ThreadFaceRef,
+  ThreadFeature,
 } from "./types";
 import { validateFeature, type ValidationError } from "./validation";
 
@@ -154,6 +156,42 @@ export function patchRevolveFeature(
   patch: Partial<Pick<RevolveFeature, "name" | "sketchId" | "axis" | "angle" | "operation">>,
 ): CadDocument {
   return updateFeature<RevolveFeature>(doc, featureId, (f) => ({ ...f, ...patch }));
+}
+
+/** 新しいねじフィーチャーを作成して末尾に追加する。IDは自動生成される(Phase 25c)。 */
+export function addThreadFeature(
+  doc: CadDocument,
+  params: {
+    name: string;
+    hand: ThreadFeature["hand"];
+    preset: ThreadFeature["preset"];
+    length: number;
+    face: ThreadFaceRef;
+    position: [number, number];
+    direction: 1 | -1;
+  },
+): { doc: CadDocument; feature: ThreadFeature } {
+  const feature: ThreadFeature = {
+    type: "thread",
+    id: generateId("thread"),
+    name: params.name,
+    hand: params.hand,
+    preset: params.preset,
+    length: params.length,
+    face: params.face,
+    position: params.position,
+    direction: params.direction,
+  };
+  return { doc: addFeature(doc, feature), feature };
+}
+
+/** thread フィーチャーの一部フィールド(name, preset, length, hand)を更新する。face/position/directionは再選択が必要なため対象外(v1)。 */
+export function patchThreadFeature(
+  doc: CadDocument,
+  featureId: FeatureId,
+  patch: Partial<Pick<ThreadFeature, "name" | "preset" | "length" | "hand">>,
+): CadDocument {
+  return updateFeature<ThreadFeature>(doc, featureId, (f) => ({ ...f, ...patch }));
 }
 
 /** 指定IDのフィーチャーを探す。見つからなければ undefined。 */

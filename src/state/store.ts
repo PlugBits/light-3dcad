@@ -8,6 +8,7 @@ import {
   addRevolveFeature,
   addShellFeature,
   addSketchFeature,
+  addThreadFeature,
   createEmptyDocument,
   effectiveFeatureCount,
   findFeature,
@@ -16,12 +17,15 @@ import {
   setRollbackIndex as setDocRollbackIndex,
 } from "../model/document";
 import { createRectangleEntity } from "../model/entity";
+import { threadDrillDiameter } from "../model/threadPresets";
 import type {
   CadDocument,
   ExtrudeFeature,
   FeatureId,
   FilletEdgeRef,
   ShellFaceRef,
+  ThreadFaceRef,
+  ThreadPreset,
   WorldPlaneName,
 } from "../model/types";
 import type { EdgeInfo, FaceInfo, MeshData, MeshQuality, ReferenceEdgeSet, SketchPlaneInfo, WorkerResponse } from "../protocol/messages";
@@ -200,6 +204,12 @@ interface CadStoreState {
   addShell3D: (thickness: number, faces: ShellFaceRef[]) => void;
   /** 指定スケッチを対象にした回転体フィーチャーを追加し、選択状態にする(Phase 25b)。 */
   addRevolve: (sketchId: FeatureId) => void;
+  /**
+   * ねじ配置ツール(ビューアで平面をクリックして確定した面・位置)を対象に、ねじフィーチャーを
+   * 追加し、選択状態にする(Phase 25c)。directionは省略時、雄は面法線方向(+1、外側へボスが
+   * 伸びる)、雌は面法線と逆方向(-1、内側へ穴が伸びる)をデフォルトにする。
+   */
+  addThread: (params: { preset: ThreadPreset; hand: "male" | "female"; length: number; face: ThreadFaceRef; position: [number, number] }) => void;
 }
 
 function applyEvaluated(
@@ -412,6 +422,27 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
       axis: "x",
       angle: 360,
       operation: hasBody ? "add" : "newBody",
+    });
+    get().updateDocument(() => nextDoc);
+    set({ selectedFeatureId: feature.id });
+  },
+
+  addThread: ({ preset, hand, length, face, position }) => {
+    const doc = get().doc;
+    const count = doc.features.filter((f) => f.type === "thread").length + 1;
+    const name =
+      hand === "male"
+        ? `${preset}ねじ${count}`
+        : `${preset}ねじ穴${count}(簡易表現・下穴φ${threadDrillDiameter(preset).toFixed(1)})`;
+    const { doc: nextDoc, feature } = addThreadFeature(doc, {
+      name,
+      hand,
+      preset,
+      length,
+      face,
+      position,
+      // 雄はボスが面から外側(法線方向)へ伸び、雌は穴が面から内側(法線と逆方向)へ伸びる。
+      direction: hand === "male" ? 1 : -1,
     });
     get().updateDocument(() => nextDoc);
     set({ selectedFeatureId: feature.id });

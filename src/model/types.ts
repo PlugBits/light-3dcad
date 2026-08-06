@@ -304,8 +304,48 @@ export interface RevolveFeature {
   operation: "newBody" | "add" | "cut";
 }
 
+/** ねじフィーチャー(Phase 25c)のISO並目ねじプリセット名。呼び径・ピッチはsrc/model/threadPresets.ts参照。 */
+export type ThreadPreset = "M3" | "M4" | "M5" | "M6" | "M8" | "M10" | "M12";
+
+/**
+ * ねじフィーチャーの配置面のスナップショット(Phase 25c)。ShellFaceRefと同じ考え方
+ * (faceId第一候補+center/normalによる幾何マッチングのフォールバック、
+ * src/worker/evaluator.tsのresolveFaceGeometryをそのまま流用する。単一面のみが対象)。
+ */
+export interface ThreadFaceRef {
+  faceId: number;
+  center: [number, number, number];
+  normal: [number, number, number];
+}
+
+/**
+ * ねじフィーチャー(Phase 25c)。事前スパイクの結論により、雄ねじ(hand:"male")は実際の
+ * ヘリカルねじ山ソリッド(呼び径の円柱+三角プロファイルのヘリカルsweep)をボディにfuseする。
+ * 雌ねじ(hand:"female")は実ねじ山を切らず、規格の下穴径(呼び径−ピッチ)の円柱をボディから
+ * cutする簡易表現にとどめる(雌ねじの実ねじ山cutは3回転超で評価時間が破綻的に悪化することが
+ * スパイクで判明したため)。
+ *
+ * preset(呼び径・ピッチ)はsrc/model/threadPresets.tsのテーブルを参照する。lengthはmm、
+ * 雄ねじはMALE_THREAD_MAX_LENGTH(20mm)が上限(evaluator.tsで検証、超過時はfeatureId付きエラー)。
+ * faceは配置面のスナップショット(evaluator.tsのresolveFaceGeometryで再解決する、ShellFeatureと
+ * 同様に直前までの「現在ボディ」に対して解決する。特定のfeatureIdを参照しない)。
+ * positionは配置面ローカル2D座標(faceのcenter/normalから求めた平面基底上の、配置クリック点)。
+ * directionは面法線に対するねじ軸の向き(1=法線方向、-1=法線と逆方向)。
+ */
+export interface ThreadFeature {
+  type: "thread";
+  id: FeatureId;
+  name: string;
+  hand: "male" | "female";
+  preset: ThreadPreset;
+  length: number;
+  face: ThreadFaceRef;
+  position: [number, number];
+  direction: 1 | -1;
+}
+
 /** フィーチャー(履歴列の1要素)。 */
-export type Feature = SketchFeature | ExtrudeFeature | Fillet3DFeature | ShellFeature | RevolveFeature;
+export type Feature = SketchFeature | ExtrudeFeature | Fillet3DFeature | ShellFeature | RevolveFeature | ThreadFeature;
 
 /**
  * CADドキュメント全体。features は順序付き(=編集履歴)。

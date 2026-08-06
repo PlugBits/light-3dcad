@@ -6,6 +6,7 @@ import type { EdgeGroup, EdgeInfo, FaceGroup, FaceInfo, MeshData, ReferenceEdgeL
 import { bulgeArcPoints, bulgeFromThreePoints, DEFAULT_BULGE_SEGMENTS } from "../sketch/bulge";
 import { findEntityDimensionHit, type EntityDimensionHit } from "../sketch/entityDimensionPick";
 import type { Segment as DimensionLineSegment } from "./dimensionGraphics";
+import { computeFacePlaneBasis } from "../sketch/facePlaneBasis";
 import { polygonOutlinePoints } from "../sketch/polygonOutline";
 import {
   circleRadiusFromPoints,
@@ -273,6 +274,31 @@ export interface FaceSelectToolCallbacks {
    */
   onSelectionChange: (faces: ShellFaceRef[]) => void;
   /** Escapeキーまたはcancel呼び出しで終了したときに呼ばれる。 */
+  onCancel: () => void;
+}
+
+/**
+ * ねじ配置ツール(Phase 25c)がクリックで確定する配置情報。faceId/center/normalはFaceSelectToolCallbacks
+ * と同じ面スナップショット、positionは面基底(src/sketch/facePlaneBasis.tsのcomputeFacePlaneBasis)上に
+ * 投影したクリック点のローカル2D座標(mm)。evaluator側もこの基底で位置を解釈する。
+ */
+export interface ThreadPlaceRef {
+  faceId: number;
+  center: [number, number, number];
+  normal: [number, number, number];
+  position: [number, number];
+}
+
+/**
+ * ねじ配置ツール(Phase 25c)の開始/終了時、および配置クリックが確定したときに呼ばれるコールバック。
+ * 面選択ツールと違い複数選択できず、平面な面を1回クリックした時点でonPickが呼ばれ、
+ * ツール自体は(onCancelを呼ばずに)そのまま終了する(呼び出し側=App.tsxがonPick内で
+ * フィーチャー追加とツール終了状態への更新を両方行う想定)。
+ */
+export interface ThreadPlaceToolCallbacks {
+  /** 平面な面がクリックされ、配置位置が確定したときに呼ばれる。 */
+  onPick: (ref: ThreadPlaceRef) => void;
+  /** Escapeキーまたはcancel呼び出しで(確定前に)中断したときに呼ばれる。 */
   onCancel: () => void;
 }
 
@@ -943,6 +969,14 @@ export class CadViewer {
    */
   private hoveredFaceSelectIndex: number | null = null;
 
+  /**
+   * ねじ配置ツール(Phase 25c)。faceSelectActiveと同じ既存のfaceGroups/materialsを流用するが、
+   * 複数選択ではなく単一クリックで即確定する点が異なる(選択集合・ハイライト用のSetは持たず、
+   * 通常のホバーハイライト機構[hoveredGroupIndex/setHoverGroup]をそのまま使う)。
+   */
+  private threadPlaceActive = false;
+  private threadPlaceCallbacks: ThreadPlaceToolCallbacks | null = null;
+
   constructor(
     container: HTMLElement,
     onFaceSelect?: (face: FaceInfo | null) => void,
@@ -1150,6 +1184,12 @@ export class CadViewer {
       }
       return;
     }
+    if (this.threadPlaceActive) {
+      if (event.key === "Escape") {
+        this.cancelThreadPlaceTool();
+      }
+      return;
+    }
     if (this.drawingActive) {
       const isChainShape = this.drawingShape === "polygon" || this.drawingShape === "segment";
       if (event.key === "Escape") {
@@ -1260,6 +1300,10 @@ export class CadViewer {
     }
     if (this.faceSelectActive) {
       this.handleFaceSelectClick(event);
+      return;
+    }
+    if (this.threadPlaceActive) {
+      this.handleThreadPlaceClick(event);
       return;
     }
     if (this.drawingActive) {
@@ -1854,6 +1898,7 @@ export class CadViewer {
     this.cancelConstraintTool();
     this.cancelEdgeSelectTool();
     this.cancelFaceSelectTool();
+    this.cancelThreadPlaceTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.drawingActive = true;
@@ -1982,6 +2027,7 @@ export class CadViewer {
     this.cancelConstraintTool();
     this.cancelEdgeSelectTool();
     this.cancelFaceSelectTool();
+    this.cancelThreadPlaceTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.cornerToolActive = true;
@@ -2105,6 +2151,7 @@ export class CadViewer {
     this.cancelConstraintTool();
     this.cancelEdgeSelectTool();
     this.cancelFaceSelectTool();
+    this.cancelThreadPlaceTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.trimActive = true;
@@ -2255,6 +2302,7 @@ export class CadViewer {
     this.cancelTrimTool();
     this.cancelEdgeSelectTool();
     this.cancelFaceSelectTool();
+    this.cancelThreadPlaceTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.dimensionToolActive = true;
@@ -3146,6 +3194,10 @@ export class CadViewer {
       this.handleFaceSelectMouseMove(event);
       return;
     }
+    if (this.threadPlaceActive) {
+      this.handleThreadPlaceMouseMove(event);
+      return;
+    }
     // フィレット/面取りツール中は面ホバーハイライトも描画プレビューも不要(クリックのみで完結する)。
     if (this.cornerToolActive) return;
     if (!this.drawingActive || !this.drawingBasis) {
@@ -3599,6 +3651,7 @@ export class CadViewer {
     this.cancelDimensionTool();
     this.cancelEdgeSelectTool();
     this.cancelFaceSelectTool();
+    this.cancelThreadPlaceTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.constraintToolActive = true;
@@ -3741,6 +3794,7 @@ export class CadViewer {
     this.cancelDimensionTool();
     this.cancelConstraintTool();
     this.cancelFaceSelectTool();
+    this.cancelThreadPlaceTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.edgeSelectActive = true;
@@ -3916,6 +3970,7 @@ export class CadViewer {
     this.cancelDimensionTool();
     this.cancelConstraintTool();
     this.cancelEdgeSelectTool();
+    this.cancelThreadPlaceTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.faceSelectActive = true;
@@ -4009,6 +4064,103 @@ export class CadViewer {
         this.materials[groupIndex]?.color.setHex(HOVER_COLOR);
       }
     }
+  }
+
+  // ---- ねじ配置ツール(Phase 25c) ----
+  // 面選択ツールと同じfaceGroups/materials/faceInfoを使うが、複数選択ではなく平面な面への
+  // 単一クリックで即座にonPickが呼ばれて終了する(選択集合を持たず、通常の単一面ホバー
+  // ハイライト機構[hoveredGroupIndex/setHoverGroup]をそのまま使い回す)。
+
+  /**
+   * ねじ配置ツールを開始する。以後、平面な面上でのマウス移動はホバー強調(水色)、
+   * 平面な面のクリックはその点を配置位置として`callbacks.onPick`を呼び、ツールを終了する
+   * (onCancelは呼ばれない)。平面でない面のクリックは無視する(ツールは継続する)。
+   * Escapeまたはcancel呼び出しで(確定前に)終了した場合はcallbacks.onCancelが呼ばれる。
+   */
+  startThreadPlaceTool(callbacks: ThreadPlaceToolCallbacks) {
+    this.cancelThreadPlaceTool();
+    this.cancelPolygonDrawing();
+    this.cancelTrimTool();
+    this.cancelCornerTool();
+    this.cancelDimensionTool();
+    this.cancelConstraintTool();
+    this.cancelEdgeSelectTool();
+    this.cancelFaceSelectTool();
+    this.clearSelection();
+    this.setHoverGroup(null);
+    this.threadPlaceActive = true;
+    this.threadPlaceCallbacks = callbacks;
+  }
+
+  isThreadPlaceToolActive(): boolean {
+    return this.threadPlaceActive;
+  }
+
+  /** ねじ配置ツールを終了する(まだアクティブな場合のみonCancelが呼ばれる)。非アクティブなら何もしない。 */
+  cancelThreadPlaceTool() {
+    if (!this.threadPlaceActive) return;
+    const callbacks = this.threadPlaceCallbacks;
+    this.threadPlaceActive = false;
+    this.threadPlaceCallbacks = null;
+    this.setHoverGroup(null);
+    this.renderer.domElement.style.cursor = "";
+    callbacks?.onCancel();
+  }
+
+  private handleThreadPlaceMouseMove(event: MouseEvent) {
+    const groupIndex = this.raycastFaceGroupAt(event);
+    if (groupIndex == null) {
+      this.setHoverGroup(null);
+      this.renderer.domElement.style.cursor = "";
+      return;
+    }
+    const faceId = this.faceGroups[groupIndex].faceId;
+    const info = this.faceInfo.find((f) => f.faceId === faceId);
+    if (!info || !info.isPlanar) {
+      this.setHoverGroup(null);
+      this.renderer.domElement.style.cursor = "";
+      return;
+    }
+    this.setHoverGroup(groupIndex);
+    this.renderer.domElement.style.cursor = "pointer";
+  }
+
+  /**
+   * 平面な面がクリックされたら、交点(ワールド座標)を面基底(computeFacePlaneBasis)でローカル2D化し、
+   * callbacks.onPickを呼んでツールを終了する(onCancelは呼ばない)。平面でない面・空クリックは
+   * 無視する(ツールは継続する)。raycastFaceGroupAt()はgroupIndexのみを返すため、交点自体を
+   * 得るためにここで独立にレイキャストする。
+   */
+  private handleThreadPlaceClick(event: MouseEvent) {
+    if (!this.mesh) return;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const pointer = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(pointer, this.camera);
+    const intersections = this.raycaster.intersectObject(this.mesh, false);
+    if (intersections.length === 0) return;
+    const triangleIndex = intersections[0].faceIndex;
+    if (triangleIndex == null) return;
+    const triangleOffset = triangleIndex * 3;
+    const groupIndex = this.faceGroups.findIndex((g) => triangleOffset >= g.start && triangleOffset < g.start + g.count);
+    if (groupIndex === -1) return;
+    const faceId = this.faceGroups[groupIndex].faceId;
+    const info = this.faceInfo.find((f) => f.faceId === faceId);
+    if (!info || !info.isPlanar) return;
+
+    const point = intersections[0].point;
+    const world: Tuple3 = [point.x, point.y, point.z];
+    const basis = computeFacePlaneBasis(info.center, info.normal);
+    const position = planeWorldToLocal(basis, world);
+
+    const callbacks = this.threadPlaceCallbacks;
+    this.threadPlaceActive = false;
+    this.threadPlaceCallbacks = null;
+    this.setHoverGroup(null);
+    this.renderer.domElement.style.cursor = "";
+    callbacks?.onPick({ faceId: info.faceId, center: info.center, normal: info.normal, position });
   }
 
   /**

@@ -12,6 +12,7 @@ const ICONS: Record<Feature["type"], string> = {
   fillet3d: "◠", // 3Dフィレット/面取り(Phase 25a)
   shell: "▨", // シェル(中抜き、Phase 25b)
   revolve: "◍", // 回転体(Phase 25b)
+  thread: "⚙", // ねじ(Phase 25c)
 };
 
 const TYPE_LABEL: Record<Feature["type"], string> = {
@@ -20,11 +21,13 @@ const TYPE_LABEL: Record<Feature["type"], string> = {
   fillet3d: "フィレット/面取り",
   shell: "シェル",
   revolve: "回転体",
+  thread: "ねじ",
 };
 
 /**
  * フィーチャーツリーに表示する種別ラベル。face参照スケッチは「面上スケッチ」、
  * fillet3dはkindに応じて「フィレット」/「面取り」と表示する(Phase 25a)。
+ * threadはhandに応じて「ねじ(雄)」/「ねじ穴(雌・簡易表現)」と表示する(Phase 25c)。
  */
 function typeLabel(feature: Feature): string {
   if (feature.type === "sketch" && feature.plane.kind === "face") {
@@ -32,6 +35,9 @@ function typeLabel(feature: Feature): string {
   }
   if (feature.type === "fillet3d") {
     return feature.kind === "fillet" ? "フィレット" : "面取り";
+  }
+  if (feature.type === "thread") {
+    return feature.hand === "male" ? "ねじ(雄)" : "ねじ穴(雌・簡易表現)";
   }
   return TYPE_LABEL[feature.type];
 }
