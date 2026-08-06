@@ -17,7 +17,8 @@ export async function waitForReady(page: Page, timeout = 120_000) {
 /**
  * ビューアのcanvas上で、ワールド座標 (0,0,z) の点がおおよそ投影される画面の垂直位置(0=上端,1=下端)を返す。
  *
- * 導出: CadViewerの既定カメラは position (150,150,150) / target (0,0,0) / up (0,0,1) / fov 45度。
+ * 導出: CadViewerの既定カメラは position (150,150,150) / target (0,0,0) / up (0,0,1) / fov 30度
+ * (遠近感緩和のユーザー報告対応でfovを45→30度に変更、src/viewer/CadViewer.ts参照)。
  * カメラ位置・注視点・upが対称的なため、点 (0,0,z) は常にNDC上で x=0(水平中央)に投影される
  * (view space の x 成分が常に0になる)。垂直方向はビュー空間への射影から計算する。
  * これにより、初期ボックス(60x40x20、原点中心・Z=0〜20)の上面中心 (0,0,20) を
@@ -25,7 +26,7 @@ export async function waitForReady(page: Page, timeout = 120_000) {
  */
 export function verticalFractionForZ(z: number): number {
   const eye = { x: 150, y: 150, z: 150 };
-  const fovRad = (45 * Math.PI) / 180;
+  const fovRad = (30 * Math.PI) / 180;
   const tanHalfFov = Math.tan(fovRad / 2);
 
   const zLen = Math.sqrt(eye.x ** 2 + eye.y ** 2 + eye.z ** 2);

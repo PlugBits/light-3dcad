@@ -13,6 +13,7 @@ import {
   computeConstraintDimensions,
   constraintDimensionKey,
   formatConstraintDimensionLabel,
+  removeConstraint,
   upsertAngleLineLineConstraint,
   upsertDistanceConstraint,
   upsertDistanceEntityEntityConstraint,
@@ -371,6 +372,21 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
     setEditingConstraint(null);
   }
 
+  /**
+   * 拘束寸法ラベルの編集ポップアップの「削除」ボタン(ユーザー報告対応)。該当拘束を削除して閉じる。
+   * 拘束一覧パネル(SketchEditor.tsxのConstraintListPanel)の削除ボタンと同じremoveConstraint経路
+   * を使う。削除は拘束を緩めるだけなので矛盾を新たに生むことはなく、巻き戻しは不要。
+   */
+  function deleteConstraintDimension(dimension: ConstraintDimension) {
+    updateDocument((doc) => {
+      const feature = doc.features.find((f) => f.id === sketch.id);
+      if (feature?.type !== "sketch") return doc;
+      const constraints = feature.constraints ?? [];
+      return setSketchConstraints(doc, sketch.id, removeConstraint(constraints, dimension.constraintId));
+    });
+    setEditingConstraint(null);
+  }
+
   function applyDimension(dimension: SketchDimension, fields: { length?: number; angleDeg?: number; value?: number }) {
     updateDocument((doc) => {
       if (dimension.kind === "polygon-edge") {
@@ -461,6 +477,7 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
               : undefined
           }
           onCancel={() => setEditingConstraint(null)}
+          onDelete={() => deleteConstraintDimension(editingConstraint.dimension)}
           onApply={(value, axis) => applyConstraintDimension(editingConstraint.dimension, value, axis)}
         />
       )}

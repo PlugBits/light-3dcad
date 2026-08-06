@@ -11,6 +11,7 @@ export function DimensionToolPopup({
   axisOptions,
   initialAxis,
   quantityOptions,
+  onDelete,
   onApply,
   onCancel,
 }: {
@@ -33,6 +34,12 @@ export function DimensionToolPopup({
    * (Phase 24項目3、UI改善)。切り替えるとtitleLabel/入力値がdistanceValue/angleValueに差し替わる。
    */
   quantityOptions?: { distanceValue: number; angleValue: number; initial: "distance" | "angle" };
+  /**
+   * 指定時のみ「削除」ボタンを表示する(拘束由来の寸法ラベル編集時、ユーザー報告対応)。
+   * 該当拘束を削除してポップアップを閉じる想定(既存の拘束一覧の削除と同じ処理)。
+   * 寸法ツールでの新規作成時(App.tsx側の使用)は未指定で、削除ボタンは出ない。
+   */
+  onDelete?: () => void;
   onApply: (value: number, axis?: "direct" | "x" | "y", quantity?: "distance" | "angle") => void;
   onCancel: () => void;
 }) {
@@ -151,13 +158,28 @@ export function DimensionToolPopup({
           {error}
         </p>
       )}
-      <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-        <button type="button" onClick={onCancel} style={{ fontSize: 11 }}>
-          キャンセル
-        </button>
-        <button type="submit" data-testid="dimension-tool-popup-apply" style={{ fontSize: 11 }}>
-          適用
-        </button>
+      <div style={{ display: "flex", gap: 6, justifyContent: "space-between", alignItems: "center" }}>
+        {onDelete ? (
+          <button
+            type="button"
+            data-testid="dimension-tool-popup-delete"
+            title="この拘束を削除します"
+            onClick={onDelete}
+            style={{ fontSize: 11, color: "#ff6b6b" }}
+          >
+            削除
+          </button>
+        ) : (
+          <span />
+        )}
+        <div style={{ display: "flex", gap: 6 }}>
+          <button type="button" onClick={onCancel} style={{ fontSize: 11 }}>
+            キャンセル
+          </button>
+          <button type="submit" data-testid="dimension-tool-popup-apply" style={{ fontSize: 11 }}>
+            適用
+          </button>
+        </div>
       </div>
     </form>
   );

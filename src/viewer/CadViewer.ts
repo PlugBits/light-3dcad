@@ -858,7 +858,10 @@ export class CadViewer {
 
     const { clientWidth, clientHeight } = container;
     this.camera = new THREE.PerspectiveCamera(
-      45,
+      // 望遠寄り(CADらしい見え方)にするため30度に設定(ユーザー報告: 遠近感が強すぎる)。
+      // pxToMm()・fitToView()・setStandardView()はいずれもthis.camera.fovを毎回参照して
+      // 距離・スケールを導出するため、ここを変えるだけで自動的に追従する(ハードコード箇所なし)。
+      30,
       Math.max(clientWidth, 1) / Math.max(clientHeight, 1),
       0.1,
       10000,

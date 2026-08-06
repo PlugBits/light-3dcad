@@ -1,6 +1,8 @@
 // スケッチフィーチャー選択時の編集パネル。矩形/円/多角形エンティティの追加(多角形は描画モード)・
 // 数値編集・削除を行う。多角形は頂点ごとのフィレット/面取り(コーナー)編集も提供する(Phase 11)。
 // 各エンティティは「分解」で等価なsegments(線分・円弧)に変換できる(Phase 19b、トリム対象になる)。
+import { useEffect, useState } from "react";
+
 import { explodeEntity } from "../sketch/explode";
 import {
   addSketchEntity,
@@ -15,9 +17,16 @@ import {
 import { createCircleEntity, createRectangleEntity, createRegularPolygonEntity, createSlotEntity } from "../model/entity";
 import type { FeatureId, PointRef, PolygonCorner, SketchConstraint, SketchEntity, SketchFeature } from "../model/types";
 import { isEntityFixed, removeConstraint, setEntityFixed } from "../sketch/constraintDimensions";
+import { formatMm } from "../sketch/format";
 import { updateDocumentWithConflictRollback } from "../state/constraintUpdate";
 import { useCadStore } from "../state/store";
 
+/**
+ * 数値入力欄。表示は小数3桁に丸める(formatMm)が、内部値(onChangeで渡す値)はフル精度のまま。
+ * フォーカス中は入力途中の生文字列をそのまま表示する(=丸め表示がユーザーの入力を上書きしない)ため、
+ * 小数3桁を超える値を入力してもその値が尊重される。フォーカスを外すと表示は丸め値に戻る
+ * (ユーザー報告対応: 左パネルの数値表示を小数3桁にする)。
+ */
 function NumberField({
   label,
   value,
@@ -31,15 +40,28 @@ function NumberField({
   testId?: string;
   disabled?: boolean;
 }) {
+  const [focused, setFocused] = useState(false);
+  const [text, setText] = useState(() => String(formatMm(value)));
+
+  useEffect(() => {
+    if (!focused) setText(String(formatMm(value)));
+  }, [value, focused]);
+
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
       {label}
       <input
         type="number"
-        value={value}
+        value={text}
         data-testid={testId}
         disabled={disabled}
+        onFocus={() => setFocused(true)}
+        onBlur={() => {
+          setFocused(false);
+          setText(String(formatMm(value)));
+        }}
         onChange={(e) => {
+          setText(e.target.value);
           const num = Number(e.target.value);
           if (Number.isNaN(num)) return;
           onChange(num);
@@ -424,33 +446,33 @@ function describeConstraint(
     case "vertical":
       return segmentLabel(segments, constraint.segmentId);
     case "length":
-      return `${segmentLabel(segments, constraint.segmentId)} = ${constraint.value.toFixed(2)}mm`;
+      return `${segmentLabel(segments, constraint.segmentId)} = ${formatMm(constraint.value)}mm`;
     case "radius":
-      return `${segmentLabel(segments, constraint.segmentId)} = R${constraint.value.toFixed(2)}mm`;
+      return `${segmentLabel(segments, constraint.segmentId)} = R${formatMm(constraint.value)}mm`;
     case "distance":
-      return `${pointRefLabel(segments, constraint.a)} - ${pointRefLabel(segments, constraint.b)} = ${constraint.value.toFixed(2)}mm`;
+      return `${pointRefLabel(segments, constraint.a)} - ${pointRefLabel(segments, constraint.b)} = ${formatMm(constraint.value)}mm`;
     case "fix":
       return pointRefLabel(segments, constraint.point);
     case "distanceEntityOrigin":
-      return `${entityLabel(entities, constraint.entity.entityId)} - 原点 = ${constraint.value.toFixed(2)}mm`;
+      return `${entityLabel(entities, constraint.entity.entityId)} - 原点 = ${formatMm(constraint.value)}mm`;
     case "distanceEntityEntity": {
       const axisPrefix = constraint.axis === "x" ? "X:" : constraint.axis === "y" ? "Y:" : "";
-      return `${entityLabel(entities, constraint.a.entityId)} - ${entityLabel(entities, constraint.b.entityId)} = ${axisPrefix}${constraint.value.toFixed(2)}mm`;
+      return `${entityLabel(entities, constraint.a.entityId)} - ${entityLabel(entities, constraint.b.entityId)} = ${axisPrefix}${formatMm(constraint.value)}mm`;
     }
     case "distanceEntityLine":
-      return `${entityLabel(entities, constraint.entity.entityId)} - 辺 = ${constraint.value.toFixed(2)}mm`;
+      return `${entityLabel(entities, constraint.entity.entityId)} - 辺 = ${formatMm(constraint.value)}mm`;
     case "fixEntity":
       return entityLabel(entities, constraint.entity.entityId);
     case "perpendicular":
       return `${segmentLabel(segments, constraint.a)} ⊥ ${segmentLabel(segments, constraint.b)}`;
     case "distanceLineLine":
-      return `${segmentLabel(segments, constraint.a)} // ${segmentLabel(segments, constraint.b)} = ${constraint.value.toFixed(2)}mm`;
+      return `${segmentLabel(segments, constraint.a)} // ${segmentLabel(segments, constraint.b)} = ${formatMm(constraint.value)}mm`;
     case "angleLineLine":
-      return `${segmentLabel(segments, constraint.a)} ∠ ${segmentLabel(segments, constraint.b)} = ${constraint.value.toFixed(2)}°`;
+      return `${segmentLabel(segments, constraint.a)} ∠ ${segmentLabel(segments, constraint.b)} = ${formatMm(constraint.value)}°`;
     case "distanceLineRefEdge":
-      return `${segmentLabel(segments, constraint.segmentId)} // 参照エッジ = ${constraint.value.toFixed(2)}mm`;
+      return `${segmentLabel(segments, constraint.segmentId)} // 参照エッジ = ${formatMm(constraint.value)}mm`;
     case "angleLineRefEdge":
-      return `${segmentLabel(segments, constraint.segmentId)} ∠ 参照エッジ = ${constraint.value.toFixed(2)}°`;
+      return `${segmentLabel(segments, constraint.segmentId)} ∠ 参照エッジ = ${formatMm(constraint.value)}°`;
     case "concentric":
       return `${entityLabel(entities, constraint.a.entityId)} = ${entityLabel(entities, constraint.b.entityId)}`;
     case "tangent": {
