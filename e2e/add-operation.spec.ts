@@ -3,7 +3,7 @@
 // e2e/helpers.ts の面上スケッチフロー(clickTopFace等)を流用する。
 import { expect, test } from "@playwright/test";
 
-import { clickTopFace, collectPageErrors, waitForReady, waitForStatus } from "./helpers";
+import { clickTopFace, collectPageErrors, waitForReady } from "./helpers";
 
 test("上面に円スケッチ→Add操作でエラーなく再評価が完了する", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
@@ -25,12 +25,9 @@ test("上面に円スケッチ→Add操作でエラーなく再評価が完了�
   await expect(page.getByTestId("entity-circle-0-radius")).toHaveValue("10");
 
   await page.getByTestId("btn-add-extrude").click();
-  // デフォルトのoperationは"newBody"であり、既にボディが存在するため一旦エラーになる。
-  await waitForStatus(page, "error");
-  await expect(page.getByTestId("eval-error")).toBeVisible();
-
-  // 修正: 操作をAddに変更する。distance(10)・direction(+1、上面法線=外向き)はデフォルトのままでよい。
-  await page.getByTestId("extrude-operation-select").selectOption("add");
+  // 既にボディが存在するためデフォルトのoperationは"add"であり、直ちに評価が成功する(Phase 13)。
+  // distance(10)・direction(+1、上面法線=外向き)もデフォルトのままでよい。
+  await expect(page.getByTestId("extrude-operation-select")).toHaveValue("add");
   await expect(page.getByTestId("extrude-distance-input")).toHaveValue("10");
   await expect(page.getByTestId("extrude-direction-select")).toHaveValue("1");
   await waitForReady(page);

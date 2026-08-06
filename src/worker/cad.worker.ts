@@ -79,6 +79,17 @@ function postResponse(response: WorkerResponse, transfer: Transferable[] = []) {
   (self as unknown as DedicatedWorkerGlobalScope).postMessage(response, transfer);
 }
 
+/** ボディが存在しない(押し出しフィーチャーが無い)場合の空メッシュ。ビューア側は既存メッシュ・エッジを消去する。 */
+function emptyMeshData(): MeshData {
+  return {
+    positions: new Float32Array(0),
+    normals: new Float32Array(0),
+    indices: new Uint32Array(0),
+    faceGroups: [],
+    edges: new Float32Array(0),
+  };
+}
+
 function evaluateAndRespond(requestId: string, doc: CadDocument, quality: MeshQuality) {
   const result = evaluateDocument(doc);
   if (!result.ok) {
@@ -92,6 +103,12 @@ function evaluateAndRespond(requestId: string, doc: CadDocument, quality: MeshQu
   }
 
   const { shape, sketchPlanes } = result;
+  if (!shape) {
+    // ボディなし(Phase 13): 正常ケースとして空メッシュ+空faceInfoを返す。
+    // sketchPlanesは解決済みのため、スケッチだけの状態でもスケッチ線表示は継続する。
+    postResponse({ kind: "evaluated", requestId, mesh: emptyMeshData(), faceInfo: [], sketchPlanes });
+    return;
+  }
   try {
     const mesh = toMeshData(shape, quality);
     const faceInfo = computeFaceInfo(shape);
@@ -117,6 +134,15 @@ function exportStlAndRespond(requestId: string, doc: CadDocument, quality: MeshQ
   }
 
   const { shape } = result;
+  if (!shape) {
+    // STLエクスポートにはボディが必要(ボディなしは表示上は正常だが、出力対象が無い)。
+    postResponse({
+      kind: "error",
+      requestId,
+      message: "ドキュメントに有効なボディがありません(押し出しフィーチャーがありません)",
+    });
+    return;
+  }
   try {
     const blob = shape.blobSTL({ tolerance: quality.tolerance, angularTolerance: quality.angularTolerance });
     postResponse({ kind: "stl", requestId, blob });

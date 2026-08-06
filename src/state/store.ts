@@ -10,7 +10,7 @@ import {
   removeFeatureCascade,
 } from "../model/document";
 import { createRectangleEntity } from "../model/entity";
-import type { CadDocument, ExtrudeFeature, FeatureId } from "../model/types";
+import type { CadDocument, ExtrudeFeature, FeatureId, WorldPlaneName } from "../model/types";
 import type { FaceInfo, MeshData, MeshQuality, SketchPlaneInfo, WorkerResponse } from "../protocol/messages";
 
 export type EvalStatus = "initializing" | "evaluating" | "ready" | "error";
@@ -120,8 +120,8 @@ interface CadStoreState {
   updateDocument: (updater: (doc: CadDocument) => CadDocument) => void;
   /** フィーチャーツリーの選択を変更する。 */
   selectFeature: (featureId: FeatureId | null) => void;
-  /** XY平面固定の空スケッチフィーチャーを追加し、選択状態にする。 */
-  addSketch: () => void;
+  /** 指定平面(省略時XY)の空スケッチフィーチャーを追加し、選択状態にする。 */
+  addSketch: (plane?: WorldPlaneName) => void;
   /** 指定スケッチを対象にした押し出しフィーチャーを追加し、選択状態にする。 */
   addExtrude: (sketchId: FeatureId) => void;
   /** フィーチャーを削除する(依存する後続フィーチャーもカスケード削除)。 */
@@ -202,11 +202,11 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
 
   selectFeature: (featureId) => set({ selectedFeatureId: featureId }),
 
-  addSketch: () => {
+  addSketch: (plane = "XY") => {
     const doc = get().doc;
     const { doc: nextDoc, feature } = addSketchFeature(doc, {
       name: nextFeatureName(doc, "Sketch"),
-      plane: { kind: "world", plane: "XY" },
+      plane: { kind: "world", plane },
       entities: [],
     });
     get().updateDocument(() => nextDoc);
@@ -215,12 +215,15 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
 
   addExtrude: (sketchId) => {
     const doc = get().doc;
+    // ボディが既に存在する(=extrudeフィーチャーが1つ以上ある)場合は"add"、
+    // 無ければ"newBody"をデフォルトにする(Phase 13)。追加直後の一時的なエラーを避けるため。
+    const hasBody = doc.features.some((f) => f.type === "extrude");
     const { doc: nextDoc, feature } = addExtrudeFeature(doc, {
       name: nextFeatureName(doc, "Extrude"),
       sketchId,
       distance: 10,
       direction: 1,
-      operation: "newBody",
+      operation: hasBody ? "add" : "newBody",
     });
     get().updateDocument(() => nextDoc);
     set({ selectedFeatureId: feature.id });

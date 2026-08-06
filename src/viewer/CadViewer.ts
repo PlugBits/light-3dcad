@@ -24,6 +24,18 @@ const HOVER_COLOR = 0x9fd8ff;
 /** エッジ線の色(濃いグレー〜黒)。 */
 const EDGE_COLOR = 0x0a0a0a;
 
+/** 基準平面(Phase 13)の一辺(mm)。ボディが存在しない空ドキュメント状態で表示する。 */
+const REFERENCE_PLANE_SIZE = 60;
+/** 基準平面の通常時/ホバー時の不透明度。 */
+const REFERENCE_PLANE_OPACITY = 0.22;
+const REFERENCE_PLANE_HOVER_OPACITY = 0.45;
+/** 基準平面の色分け: XY=青系 / XZ=緑系 / YZ=赤系。 */
+const REFERENCE_PLANE_COLORS: Record<"XY" | "XZ" | "YZ", number> = {
+  XY: 0x4a90e2,
+  XZ: 0x4caf50,
+  YZ: 0xe57373,
+};
+
 /** 選択中スケッチの線色(オレンジ)。 */
 const SKETCH_SELECTED_COLOR = 0xff9800;
 /** 非選択スケッチの線色(控えめなグレー、半透明)。 */
@@ -340,6 +352,17 @@ export class CadViewer {
   private animationFrameId = 0;
   /** 面がクリックで選択/解除されたときに呼ばれる(解除時はnull)。 */
   private onFaceSelect?: (face: FaceInfo | null) => void;
+  /** 基準平面(XY/XZ/YZ)がクリックで選択されたときに呼ばれる(Phase 13)。 */
+  private onPlaneSelect?: (plane: "XY" | "XZ" | "YZ") => void;
+  /** 基準平面(ボディなし時に表示する半透明の3枚)を乗せるグループ。visibleで表示/非表示を切り替える。 */
+  private referencePlaneGroup: THREE.Group;
+  private referencePlaneEntries: {
+    plane: "XY" | "XZ" | "YZ";
+    mesh: THREE.Mesh;
+    material: THREE.MeshBasicMaterial;
+  }[] = [];
+  /** ホバー中の基準平面(未ホバーはnull)。 */
+  private hoveredReferencePlane: "XY" | "XZ" | "YZ" | null = null;
   /** 現在のメッシュのバウンディングボックスから求めた半径目安(mm)。グリッド範囲の基準に使う。 */
   private meshHalfExtent = 50;
   /** 初回メッシュ受信時にfitToView()を自動実行するためのフラグ(2回目以降は視点を維持する)。 */
@@ -389,9 +412,14 @@ export class CadViewer {
    */
   private frameCallbacks = new Set<() => void>();
 
-  constructor(container: HTMLElement, onFaceSelect?: (face: FaceInfo | null) => void) {
+  constructor(
+    container: HTMLElement,
+    onFaceSelect?: (face: FaceInfo | null) => void,
+    onPlaneSelect?: (plane: "XY" | "XZ" | "YZ") => void,
+  ) {
     this.container = container;
     this.onFaceSelect = onFaceSelect;
+    this.onPlaneSelect = onPlaneSelect;
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x222630);
@@ -433,6 +461,12 @@ export class CadViewer {
 
     this.drawingGroup = new THREE.Group();
     this.scene.add(this.drawingGroup);
+
+    this.referencePlaneGroup = new THREE.Group();
+    this.referencePlaneGroup.visible = false;
+    this.referencePlaneEntries = this.buildReferencePlanes();
+    this.referencePlaneEntries.forEach((entry) => this.referencePlaneGroup.add(entry.mesh));
+    this.scene.add(this.referencePlaneGroup);
 
     // コンテナを絶対配置の基準にする(座標オーバーレイをcanvas上にpxで重ねるため)。
     // containerは既存レイアウト上は幅・高さ100%のプレーンなdivであり、position指定を持たない
@@ -619,6 +653,10 @@ export class CadViewer {
       this.handlePolygonClick(event);
       return;
     }
+    if (this.referencePlaneGroup.visible) {
+      this.handleReferencePlaneClick(event);
+      return;
+    }
     if (!this.mesh) return;
 
     const rect = this.renderer.domElement.getBoundingClientRect();
@@ -686,6 +724,10 @@ export class CadViewer {
    * 選択中の面はホバー色より選択色を優先する(setHoverGroup内で判定)。
    */
   private handleHoverMouseMove(event: MouseEvent) {
+    if (this.referencePlaneGroup.visible) {
+      this.handleReferencePlaneHover(event);
+      return;
+    }
     if (!this.mesh) {
       this.setHoverGroup(null);
       return;
@@ -716,7 +758,82 @@ export class CadViewer {
   /** キャンバスからマウスが離れたら、ホバーハイライトを解除する。 */
   private handleMouseLeave = () => {
     this.setHoverGroup(null);
+    this.setHoveredReferencePlane(null);
   };
+
+  /** 基準平面(XY/XZ/YZ)を60x60mmの半透明四角として構築する(Phase 13)。色分け: XY=青系/XZ=緑系/YZ=赤系。 */
+  private buildReferencePlanes(): { plane: "XY" | "XZ" | "YZ"; mesh: THREE.Mesh; material: THREE.MeshBasicMaterial }[] {
+    const planes: ("XY" | "XZ" | "YZ")[] = ["XY", "XZ", "YZ"];
+    return planes.map((plane) => {
+      const geometry = new THREE.PlaneGeometry(REFERENCE_PLANE_SIZE, REFERENCE_PLANE_SIZE);
+      const material = new THREE.MeshBasicMaterial({
+        color: REFERENCE_PLANE_COLORS[plane],
+        transparent: true,
+        opacity: REFERENCE_PLANE_OPACITY,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(geometry, material);
+      // PlaneGeometryはデフォルトでXY平面(法線+Z)上にある。XZ/YZはそれぞれX軸/Y軸回りに90度回転させる。
+      if (plane === "XZ") mesh.rotation.x = Math.PI / 2;
+      if (plane === "YZ") mesh.rotation.y = Math.PI / 2;
+      mesh.userData.planeName = plane;
+      return { plane, mesh, material };
+    });
+  }
+
+  /**
+   * ボディが存在しない(空ドキュメント)状態で基準平面3枚の表示/非表示を切り替える。
+   * ボディがある場合は呼び出し側(App)がfalseを渡すこと(従来どおり面選択のみになる)。
+   */
+  setReferencePlanesVisible(visible: boolean) {
+    this.referencePlaneGroup.visible = visible;
+    if (!visible) {
+      this.setHoveredReferencePlane(null);
+      this.renderer.domElement.style.cursor = "";
+    }
+  }
+
+  /** canvas内のイベント位置から基準平面をレイキャストし、最も手前でヒットした平面名を返す(未ヒットはnull)。 */
+  private raycastReferencePlane(event: MouseEvent): "XY" | "XZ" | "YZ" | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const pointer = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(pointer, this.camera);
+    const meshes = this.referencePlaneEntries.map((e) => e.mesh);
+    const intersections = this.raycaster.intersectObjects(meshes, false);
+    if (intersections.length === 0) return null;
+    const hit = intersections[0].object as THREE.Mesh;
+    return (hit.userData.planeName as "XY" | "XZ" | "YZ" | undefined) ?? null;
+  }
+
+  /** 基準平面のホバー中強調を更新する(マウス移動のたびに呼ばれる)。 */
+  private handleReferencePlaneHover(event: MouseEvent) {
+    this.setHoveredReferencePlane(this.raycastReferencePlane(event));
+  }
+
+  private setHoveredReferencePlane(plane: "XY" | "XZ" | "YZ" | null) {
+    if (this.hoveredReferencePlane === plane) return;
+    if (this.hoveredReferencePlane) {
+      const prev = this.referencePlaneEntries.find((e) => e.plane === this.hoveredReferencePlane);
+      if (prev) prev.material.opacity = REFERENCE_PLANE_OPACITY;
+    }
+    this.hoveredReferencePlane = plane;
+    if (plane) {
+      const entry = this.referencePlaneEntries.find((e) => e.plane === plane);
+      if (entry) entry.material.opacity = REFERENCE_PLANE_HOVER_OPACITY;
+    }
+    this.renderer.domElement.style.cursor = plane ? "pointer" : "";
+  }
+
+  /** 基準平面クリック: ヒットした平面をonPlaneSelectで通知する(未ヒットは何もしない)。 */
+  private handleReferencePlaneClick(event: MouseEvent) {
+    const plane = this.raycastReferencePlane(event);
+    if (!plane) return;
+    this.onPlaneSelect?.(plane);
+  }
 
   /**
    * ホバー中の面(materialIndex)を更新する。選択中の面(selectedGroupIndex)はホバー色より
@@ -765,6 +882,17 @@ export class CadViewer {
       this.edgesMesh.geometry.dispose();
       (this.edgesMesh.material as THREE.Material).dispose();
       this.edgesMesh = null;
+    }
+
+    // ボディなし(Phase 13: positionsが空)の場合は、既存メッシュ・エッジを消去するのみで
+    // 新しいジオメトリは作らない(clearSelection相当のリセットのみ行う)。
+    if (data.positions.length === 0) {
+      this.faceGroups = [];
+      this.faceInfo = faceInfo;
+      this.materials = [];
+      this.selectedGroupIndex = null;
+      this.hoveredGroupIndex = null;
+      return;
     }
 
     const geometry = new THREE.BufferGeometry();
@@ -1258,6 +1386,10 @@ export class CadViewer {
     }
     this.clearSketchOverlay();
     this.clearDrawingPreview();
+    this.referencePlaneEntries.forEach((entry) => {
+      entry.mesh.geometry.dispose();
+      entry.material.dispose();
+    });
     if (import.meta.env.DEV && window.__cadViewerDebug) {
       delete window.__cadViewerDebug;
     }

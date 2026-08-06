@@ -104,9 +104,8 @@ export async function buildFaceCutFlow(page: Page) {
   await expect(page.getByTestId("entity-circle-0-radius")).toHaveValue("10");
 
   await page.getByTestId("btn-add-extrude").click();
-  // デフォルトのoperationは"newBody"であり、既にボディが存在するため一旦エラーになる。
-  await waitForStatus(page, "error");
-  await expect(page.getByTestId("eval-error")).toBeVisible();
+  // 既にボディが存在するためデフォルトのoperationは"add"であり、直ちに評価が成功する(Phase 13)。
+  await waitForReady(page);
 
   await page.getByTestId("extrude-operation-select").selectOption("cut");
   await page.getByTestId("extrude-distance-input").fill("10");

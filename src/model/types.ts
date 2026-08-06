@@ -5,9 +5,12 @@
 /** フィーチャーの一意識別子。 */
 export type FeatureId = string;
 
-/** スケッチが乗る平面の参照。 */
+/** world平面(基準平面)の名前。Phase 13でXZ/YZを追加。 */
+export type WorldPlaneName = "XY" | "XZ" | "YZ";
+
+/** スケッチが乗る平面の参照。world平面はXY/XZ/YZの3枚の基準平面をサポートする(Phase 13)。 */
 export type PlaneRef =
-  | { kind: "world"; plane: "XY" }
+  | { kind: "world"; plane: WorldPlaneName }
   | {
       kind: "face";
       featureId: FeatureId;

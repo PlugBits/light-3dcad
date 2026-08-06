@@ -116,9 +116,7 @@ export function validateFeature(feature: Feature, allFeatures: readonly Feature[
   const errors: ValidationError[] = [];
 
   if (feature.type === "sketch") {
-    if (feature.plane.kind === "world" && feature.plane.plane !== "XY") {
-      errors.push({ featureId: feature.id, message: "対応していないワールド平面です" });
-    }
+    // world平面はXY/XZ/YZの3枚(PlaneRefの型で保証済み)。追加のバリデーションは不要。
     if (feature.plane.kind === "face") {
       if (!feature.plane.featureId) {
         errors.push({ featureId: feature.id, message: "参照フィーチャーIDが指定されていません" });

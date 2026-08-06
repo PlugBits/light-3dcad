@@ -2,7 +2,7 @@
 // Worker内でのみimportすること(Replicad = OpenCascade WASM への依存を持つため)。
 //
 // サポート範囲:
-//   - sketch: plane は world XY / 面参照(face)の両方
+//   - sketch: plane は world XY/XZ/YZ(基準平面) / 面参照(face)の両方
 //     - face参照は、参照先フィーチャー評価直後のボディ・スナップショットから面を再解決する。
 //       1. 第一候補: face.hashCode(選択時点のfaceId)が一致する面
 //       2. フォールバック: 平面(isPlanar)かつ法線がほぼ一致(cos>0.999)し、
@@ -22,7 +22,12 @@ import type { SketchPlaneInfo } from "../protocol/messages";
 
 export interface EvaluationSuccess {
   ok: true;
-  shape: Shape3D;
+  /**
+   * 押し出しフィーチャーが1つも無い(=ボディが存在しない)場合はnull。
+   * これはエラーではなく正常なドキュメント状態(空ドキュメント/スケッチのみ)として扱う(Phase 13)。
+   * 呼び出し側(Worker)はnullのとき空メッシュを返す。
+   */
+  shape: Shape3D | null;
   /**
    * 各スケッチフィーチャーの解決済み平面基底(ワールド座標系)。
    * doc.features中の全スケッチが対象(押し出しに使われていないスケッチも含む)。
@@ -75,12 +80,18 @@ interface PlaneBasis {
   normal: Tuple3;
 }
 
-/** world XY平面の解決済み基底(sketchPlanes用)。replicadの名前付き平面"XY"の定義と一致させる。 */
-const WORLD_XY_PLANE: PlaneBasis = {
-  origin: [0, 0, 0],
-  xDir: [1, 0, 0],
-  yDir: [0, 1, 0],
-  normal: [0, 0, 1],
+/**
+ * world平面(XY/XZ/YZ)の解決済み基底(sketchPlanes用)。
+ * replicadのPLANES_CONFIG(node_modules/replicad/dist/replicad.js)が定義する
+ * 名前付き平面と厳密に一致させる(xDir/normalがconfig値、yDir = normalize(normal) × normalize(xDir))。
+ *   XY: xDir=[1,0,0] normal=[0,0,1]  -> yDir=[0,1,0]
+ *   XZ: xDir=[1,0,0] normal=[0,-1,0] -> yDir=[0,0,1]
+ *   YZ: xDir=[0,1,0] normal=[1,0,0]  -> yDir=[0,0,1]
+ */
+const WORLD_PLANE_BASES: Record<"XY" | "XZ" | "YZ", PlaneBasis> = {
+  XY: { origin: [0, 0, 0], xDir: [1, 0, 0], yDir: [0, 1, 0], normal: [0, 0, 1] },
+  XZ: { origin: [0, 0, 0], xDir: [1, 0, 0], yDir: [0, 0, 1], normal: [0, -1, 0] },
+  YZ: { origin: [0, 0, 0], xDir: [0, 1, 0], yDir: [0, 0, 1], normal: [1, 0, 0] },
 };
 
 /**
@@ -273,7 +284,8 @@ function extrudeSketchFeature(
   const drawing = buildDrawing(sketch.entities);
 
   if (sketch.plane.kind === "world") {
-    const sketched = drawing.sketchOnPlane("XY");
+    // replicadは"XY"/"XZ"/"YZ"を名前付き平面としてそのまま受け付ける(sketchOnPlane参照)。
+    const sketched = drawing.sketchOnPlane(sketch.plane.plane);
     // sketchOnPlane() の戻り値は型上 SketchInterface | Sketches に分かれ、
     // extrude() の戻り値もそれぞれ Shape3D / AnyShape に広がるため明示キャストする。
     // 実際には押し出しは常に立体(Shape3D)を生む。
@@ -318,9 +330,7 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
 
       if (feature.type === "sketch") {
         if (feature.plane.kind === "world") {
-          if (feature.plane.plane !== "XY") {
-            throw new Error("対応していないワールド平面です");
-          }
+          // world平面はXY/XZ/YZの3枚(PlaneRefの型で保証済み)。追加の検証は不要。
         } else {
           const refShape = snapshots.get(feature.plane.featureId);
           if (!refShape) {
@@ -393,16 +403,14 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
 
   for (const snap of snapshots.values()) snap.delete();
 
-  if (!body) {
-    return { ok: false, message: "ドキュメントに有効なボディがありません(押し出しフィーチャーがありません)" };
-  }
-
+  // body===null(押し出しフィーチャーが1つも無い)は、空ドキュメント/スケッチのみの
+  // ドキュメントとして正常なケースである(Phase 13)。エラーにはしない。
   // ここに到達した時点でループは最後まで例外なく完走しているため、
   // sketchesに登録された全スケッチ(world/faceいずれも)の平面基底が解決済みである。
   const sketchPlanes: SketchPlaneInfo[] = [];
   for (const [sketchId, sketch] of sketches) {
     if (sketch.plane.kind === "world") {
-      sketchPlanes.push({ sketchId, ...WORLD_XY_PLANE });
+      sketchPlanes.push({ sketchId, ...WORLD_PLANE_BASES[sketch.plane.plane] });
       continue;
     }
     const resolved = resolvedFacePlanes.get(sketchId);

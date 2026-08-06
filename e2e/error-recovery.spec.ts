@@ -18,13 +18,18 @@ test("2つ目のNew Bodyはエラーになり、Cutへの変更で復帰する",
   await page.getByTestId("btn-add-rectangle").click();
   await waitForReady(page);
 
-  // 押し出しを追加する。デフォルトのoperationは"newBody"であり、
-  // 既に初期ボディ(Extrude1)が存在するため「単一ボディのみ対応」エラーになる。
+  // 押し出しを追加する。既に初期ボディ(Extrude1)が存在するためデフォルトのoperationは
+  // "add"であり、直ちに評価が成功する(Phase 13)。
   await page.getByTestId("btn-add-extrude").click();
+  await waitForReady(page);
+  await expect(page.getByTestId("feature-item-Extrude2")).toBeVisible();
+  await expect(page.getByTestId("eval-error")).toHaveCount(0);
+
+  // 明示的にoperationをNew Bodyへ変更すると「単一ボディのみ対応」エラーになる。
+  await page.getByTestId("extrude-operation-select").selectOption("newBody");
   await waitForStatus(page, "error");
   await expect(page.getByTestId("eval-error")).toBeVisible();
   await expect(page.getByTestId("eval-error")).toContainText("単一ボディ");
-  await expect(page.getByTestId("feature-item-Extrude2")).toBeVisible();
 
   // 修正: 操作をCutに変更する。矩形は原点付近(20x20)で初期ボディと重なるため、
   // カットとして成立し評価が成功する。
@@ -42,18 +47,20 @@ test("面が無い状態でカットするとエラーになる(スケッチが�
   await page.goto("/");
   await waitForReady(page);
 
-  // 新しい空のXYスケッチに図形を入れずに押し出し(Cut)しようとするとエラーになる。
+  // 新しい空のXYスケッチに図形を入れずに押し出ししようとするとエラーになる。
   await page.getByTestId("btn-add-sketch").click();
   await waitForReady(page);
 
   await page.getByTestId("btn-add-extrude").click();
-  // 空スケッチ+newBody(既にボディがある)なので、いずれにせよエラーになる。
+  // 既にボディがあるためデフォルトのoperationは"add"だが、スケッチが空なので
+  // 「スケッチに図形がありません」エラーになる(Phase 13)。
   await waitForStatus(page, "error");
   await expect(page.getByTestId("eval-error")).toBeVisible();
+  await expect(page.getByTestId("eval-error")).toContainText("図形がありません");
 
   await page.getByTestId("extrude-operation-select").selectOption("cut");
   await waitForStatus(page, "error");
-  // 空スケッチのため「スケッチに図形がありません」エラーに変わる。
+  // Cutに変更しても空スケッチのため引き続き「スケッチに図形がありません」エラー。
   await expect(page.getByTestId("eval-error")).toContainText("図形がありません");
 
   // 修正: 矩形を追加すれば復帰する。

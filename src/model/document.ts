@@ -47,7 +47,7 @@ export function addExtrudeFeature(
     sketchId: FeatureId;
     distance: number;
     direction: 1 | -1;
-    operation: "newBody" | "cut";
+    operation: ExtrudeFeature["operation"];
   },
 ): { doc: CadDocument; feature: ExtrudeFeature } {
   const feature: ExtrudeFeature = {

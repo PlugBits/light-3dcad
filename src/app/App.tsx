@@ -43,6 +43,8 @@ export default function App() {
   const [drawingSketchId, setDrawingSketchId] = useState<string | null>(null);
   // 1mmグリッドスナップ(デフォルトON)。
   const [gridSnap, setGridSnap] = useState(true);
+  // 「スケッチ追加」ボタンで使う平面選択(Phase 13)。基準平面クリックと同等の機能をUIからも操作できるようにする。
+  const [newSketchPlane, setNewSketchPlane] = useState<"XY" | "XZ" | "YZ">("XY");
 
   // Workerを起動し、初期ドキュメントの評価を1回だけ要求する。
   useEffect(() => {
@@ -54,9 +56,16 @@ export default function App() {
   // (依存配列は空のまま=マウント時に一度だけ生成するビューアに対して安定した参照を渡す)。
   useEffect(() => {
     if (!viewerContainerRef.current) return;
-    const viewer = new CadViewer(viewerContainerRef.current, (face) => {
-      useCadStore.getState().selectFace(face);
-    });
+    const viewer = new CadViewer(
+      viewerContainerRef.current,
+      (face) => {
+        useCadStore.getState().selectFace(face);
+      },
+      (plane) => {
+        // 基準平面クリック(Phase 13): その平面で新規スケッチを作り、選択状態にする。
+        useCadStore.getState().addSketch(plane);
+      },
+    );
     viewerRef.current = viewer;
     return () => {
       viewer.dispose();
@@ -65,11 +74,19 @@ export default function App() {
   }, []);
 
   // ストアのmesh/faceInfoが更新されるたびにビューアへ反映する。
+  // mesh===nullは初回未評価のみ(Phase 13以降、ボディなしは空配列のmeshとして届くため、
+  // ここでのnullチェックは「まだ一度もWorkerから応答が無い」ケースのみを意味する)。
   useEffect(() => {
     if (mesh) {
       viewerRef.current?.setMesh(mesh, faceInfo);
     }
   }, [mesh, faceInfo]);
+
+  // ドキュメントに1つもフィーチャーが無い(=空ドキュメント、ボディなし)間だけ基準平面3枚を表示する。
+  // 基準平面クリック等で最初のスケッチが作られた時点(features.length>0)で非表示になる(Phase 13)。
+  useEffect(() => {
+    viewerRef.current?.setReferencePlanesVisible(doc.features.length === 0);
+  }, [doc.features.length]);
 
   // doc(スケッチのentities)とsketchPlanes(Workerが解決した平面基底)を突き合わせて
   // ビューア描画用のオーバーレイ入力を作る。平面解決に失敗したスケッチ(sketchPlanesに無い)は
@@ -206,7 +223,19 @@ export default function App() {
         }}
       >
         <h1 style={{ fontSize: 16, margin: 0 }}>light-3dcad — Phase 5</h1>
-        <button type="button" data-testid="btn-add-sketch" onClick={addSketch}>
+        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+          <select
+            data-testid="new-sketch-plane-select"
+            value={newSketchPlane}
+            onChange={(e) => setNewSketchPlane(e.target.value as "XY" | "XZ" | "YZ")}
+            title="新規スケッチを作成する基準平面(基準平面クリックと同等)"
+          >
+            <option value="XY">XY</option>
+            <option value="XZ">XZ</option>
+            <option value="YZ">YZ</option>
+          </select>
+        </label>
+        <button type="button" data-testid="btn-add-sketch" onClick={() => addSketch(newSketchPlane)}>
           スケッチ追加
         </button>
         <button

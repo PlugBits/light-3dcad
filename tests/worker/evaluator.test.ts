@@ -330,7 +330,7 @@ describe("evaluateDocument (WASM統合)", () => {
     expect(result.featureId).toBe(extrude.id);
   });
 
-  it("フィーチャーが無い(押し出しが存在しない)ドキュメントはエラーになる", (ctx) => {
+  it("フィーチャーが無い(押し出しが存在しない)ドキュメントはボディなしの正常ケースとして返る(Phase 13)", (ctx) => {
     ctx.skip(!wasmLoaded, SKIP_NOTE);
     const empty = createEmptyDocument();
     const { doc } = addSketchFeature(empty, {
@@ -340,7 +340,58 @@ describe("evaluateDocument (WASM統合)", () => {
     });
 
     const result = evaluateDocument(doc);
-    expect(result.ok).toBe(false);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.shape).toBeNull();
+    // ボディが無くても、スケッチの平面基底(sketchPlanes)は解決済みとして返る(スケッチ線表示継続のため)。
+    expect(result.sketchPlanes).toHaveLength(1);
+    expect(result.sketchPlanes[0].sketchId).toBe(doc.features[0].id);
+  });
+
+  it("空ドキュメント(フィーチャー0件)もボディなしの正常ケースとして返る(Phase 13)", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const result = evaluateDocument(empty);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.shape).toBeNull();
+    expect(result.sketchPlanes).toEqual([]);
+  });
+
+  it("XZ/YZ平面のスケッチを押し出せる(Phase 13)", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const rect = createRectangleEntity({ width: 20, height: 10 });
+    const { doc: doc1, feature: xzSketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XZ" },
+      entities: [rect],
+    });
+    const { doc } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: xzSketch.id,
+      distance: 5,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.shape).not.toBeNull();
+    const shape = result.shape as Shape3D;
+    // replicadの名前付きXZ平面はnormal=[0,-1,0]。sketchPlanesの基底がそれと一致することを確認する。
+    const plane = result.sketchPlanes.find((p) => p.sketchId === xzSketch.id);
+    expect(plane).toBeDefined();
+    expect(plane?.origin).toEqual([0, 0, 0]);
+    expect(plane?.xDir).toEqual([1, 0, 0]);
+    expect(plane?.yDir).toEqual([0, 0, 1]);
+    expect(plane?.normal).toEqual([0, -1, 0]);
+    // XZ平面(y=0)に20x10の矩形をdistance5だけ押し出した直方体。バウンディングボックスのY方向が5mm。
+    const bbox = shape.boundingBox;
+    expect(bbox.height).toBeCloseTo(5, 6);
+    bbox.delete();
+    shape.delete();
   });
 
   it("L字型polygonを押し出すとバウンディングボックス40x40x20で、矩形40x40x20より体積が小さい", (ctx) => {
