@@ -5,8 +5,17 @@
 // 毎フレーム呼んでも計算コストは無視できる。既存の描画モードのライブ座標オーバーレイと同じ方針)。
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { updateSketchEntity } from "../model/document";
+import { setSketchConstraints, updateSketchEntity } from "../model/document";
 import type { SketchFeature } from "../model/types";
+import {
+  computeConstraintDimensions,
+  constraintDimensionKey,
+  formatConstraintDimensionLabel,
+  upsertDistanceConstraint,
+  upsertLengthConstraint,
+  upsertRadiusConstraint,
+  type ConstraintDimension,
+} from "../sketch/constraintDimensions";
 import {
   applyEdgeAngle,
   applyEdgeLength,
@@ -15,8 +24,10 @@ import {
   formatDimensionLabel,
   type SketchDimension,
 } from "../sketch/dimensions";
+import { updateDocumentWithConflictRollback } from "../state/constraintUpdate";
 import { useCadStore } from "../state/store";
 import type { CadViewer, PlaneBasis } from "../viewer/CadViewer";
+import { DimensionToolPopup } from "./DimensionToolPopup";
 
 interface DimensionOverlayProps {
   sketch: SketchFeature;
@@ -24,6 +35,8 @@ interface DimensionOverlayProps {
   viewerRef: React.RefObject<CadViewer | null>;
   /** false のときは何も描画しない(スケッチ表示OFF、または線描画モード中)。 */
   visible: boolean;
+  /** 拘束編集で矛盾が検出され自動的に巻き戻したときに呼ばれる(一時メッセージ表示用、Phase 20b)。 */
+  onConflictRollback: (message: string) => void;
 }
 
 interface EditingState {
@@ -48,15 +61,42 @@ const labelStyle: React.CSSProperties = {
   whiteSpace: "nowrap",
 };
 
-export function DimensionOverlay({ sketch, basis, viewerRef, visible }: DimensionOverlayProps) {
+/** 拘束駆動の寸法ラベルの色(実測ラベルのオレンジと区別する黒/強調系、Phase 20b)。 */
+const constraintLabelStyle: React.CSSProperties = {
+  ...labelStyle,
+  background: "#000",
+  color: "#fff",
+  border: "2px solid #e0e0e0",
+  fontWeight: "bold",
+};
+
+interface ConstraintEditingState {
+  dimension: ConstraintDimension;
+  screen: { x: number; y: number };
+}
+
+const CONSTRAINT_DIMENSION_LABELS: Record<ConstraintDimension["kind"], string> = {
+  "seg-length": "長さ (mm)",
+  "seg-radius": "半径 (mm)",
+  "seg-distance": "距離 (mm)",
+};
+
+export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflictRollback }: DimensionOverlayProps) {
   const updateDocument = useCadStore((s) => s.updateDocument);
   const labelRefs = useRef(new Map<string, HTMLButtonElement>());
   const [editing, setEditing] = useState<EditingState | null>(null);
+  const [editingConstraint, setEditingConstraint] = useState<ConstraintEditingState | null>(null);
 
   const dimensions = useMemo(() => computeSketchDimensions(sketch.entities), [sketch.entities]);
+  const constraintDimensions = useMemo(
+    () => computeConstraintDimensions(sketch.segments ?? [], sketch.constraints ?? []),
+    [sketch.segments, sketch.constraints],
+  );
   // onFrameコールバックはマウント時に一度だけ登録するため、最新の寸法一覧・平面基底はrefで参照する。
   const dimensionsRef = useRef(dimensions);
   dimensionsRef.current = dimensions;
+  const constraintDimensionsRef = useRef(constraintDimensions);
+  constraintDimensionsRef.current = constraintDimensions;
   const basisRef = useRef(basis);
   basisRef.current = basis;
 
@@ -64,8 +104,12 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible }: Dimensio
     const viewer = viewerRef.current;
     if (!viewer) return;
     const update = () => {
-      for (const dimension of dimensionsRef.current) {
-        const el = labelRefs.current.get(dimensionKey(dimension));
+      const allDims: { key: string; anchor: [number, number] }[] = [
+        ...dimensionsRef.current.map((d) => ({ key: dimensionKey(d), anchor: d.anchor })),
+        ...constraintDimensionsRef.current.map((d) => ({ key: constraintDimensionKey(d), anchor: d.anchor })),
+      ];
+      for (const dimension of allDims) {
+        const el = labelRefs.current.get(dimension.key);
         if (!el) continue;
         const world = viewer.localToWorld(basisRef.current, dimension.anchor[0], dimension.anchor[1]);
         const screen = viewer.projectPoint(world);
@@ -84,6 +128,7 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible }: Dimensio
   // 選択中スケッチが切り替わったら開いていた編集ポップアップは閉じる。
   useEffect(() => {
     setEditing(null);
+    setEditingConstraint(null);
   }, [sketch.id]);
 
   if (!visible) return null;
@@ -93,6 +138,34 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible }: Dimensio
       dimension,
       screen: { x: el.offsetLeft + el.offsetWidth / 2, y: el.offsetTop + el.offsetHeight },
     });
+  }
+
+  function openConstraintEditor(dimension: ConstraintDimension, el: HTMLButtonElement) {
+    setEditingConstraint({
+      dimension,
+      screen: { x: el.offsetLeft + el.offsetWidth / 2, y: el.offsetTop + el.offsetHeight },
+    });
+  }
+
+  /** 拘束寸法ラベルの編集(既存拘束の値の差し替え)。矛盾したら自動的に巻き戻す(Phase 20b)。 */
+  function applyConstraintDimension(dimension: ConstraintDimension, value: number) {
+    updateDocumentWithConflictRollback(
+      sketch.id,
+      (doc) => {
+        const feature = doc.features.find((f) => f.id === sketch.id);
+        if (feature?.type !== "sketch") return doc;
+        const constraints = feature.constraints ?? [];
+        const next =
+          dimension.kind === "seg-length"
+            ? upsertLengthConstraint(constraints, dimension.segmentId, value)
+            : dimension.kind === "seg-radius"
+              ? upsertRadiusConstraint(constraints, dimension.segmentId, value)
+              : upsertDistanceConstraint(constraints, dimension.a, dimension.b, value);
+        return setSketchConstraints(doc, sketch.id, next);
+      },
+      onConflictRollback,
+    );
+    setEditingConstraint(null);
   }
 
   function applyDimension(dimension: SketchDimension, fields: { length?: number; angleDeg?: number; value?: number }) {
@@ -143,6 +216,26 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible }: Dimensio
           </button>
         );
       })}
+      {constraintDimensions.map((dimension) => {
+        const key = constraintDimensionKey(dimension);
+        return (
+          <button
+            key={key}
+            type="button"
+            className="cad-dim-label"
+            ref={(el) => {
+              if (el) labelRefs.current.set(key, el);
+              else labelRefs.current.delete(key);
+            }}
+            data-testid={`dim-label-${key}`}
+            title="拘束による寸法(クリックして数値を編集)"
+            onClick={(e) => openConstraintEditor(dimension, e.currentTarget)}
+            style={constraintLabelStyle}
+          >
+            {formatConstraintDimensionLabel(dimension)}
+          </button>
+        );
+      })}
       {editing && (
         <DimensionEditPopup
           key={dimensionKey(editing.dimension)}
@@ -150,6 +243,16 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible }: Dimensio
           screen={editing.screen}
           onCancel={() => setEditing(null)}
           onApply={(fields) => applyDimension(editing.dimension, fields)}
+        />
+      )}
+      {editingConstraint && (
+        <DimensionToolPopup
+          key={constraintDimensionKey(editingConstraint.dimension)}
+          titleLabel={CONSTRAINT_DIMENSION_LABELS[editingConstraint.dimension.kind]}
+          initialValue={editingConstraint.dimension.value}
+          screen={editingConstraint.screen}
+          onCancel={() => setEditingConstraint(null)}
+          onApply={(value) => applyConstraintDimension(editingConstraint.dimension, value)}
         />
       )}
     </div>

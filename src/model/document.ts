@@ -174,6 +174,15 @@ export function setSketchSegments(doc: CadDocument, sketchId: FeatureId, segment
 }
 
 /**
+ * sketch の拘束(SketchConstraint、Phase 20a)配列を丸ごと置き換える(Phase 20b、寸法ツール・
+ * 拘束一覧パネルの追加/更新/削除で使う。実際の増分計算はsrc/sketch/constraintDimensions.tsの
+ * upsert系関数・removeConstraint()が行い、ここでは置き換えのみを行う)。
+ */
+export function setSketchConstraints(doc: CadDocument, sketchId: FeatureId, constraints: SketchConstraint[]): CadDocument {
+  return updateFeature<SketchFeature>(doc, sketchId, (sketch) => ({ ...sketch, constraints }));
+}
+
+/**
  * sketch にセグメント(Phase 19a)を追加する(線分作図ツール・分解の確定時に使う、Phase 19b)。
  * constraints(Phase 20a)を同時に渡すと、追加されたセグメントに対する自動拘束
  * (src/sketch/autoConstraints.ts参照)も一緒に既存constraintsへ追記する(省略可、後方互換)。

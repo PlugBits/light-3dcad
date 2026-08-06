@@ -8,11 +8,13 @@ import {
   patchSketchFeature,
   removeSketchEntity,
   setPolygonVertexCorner,
+  setSketchConstraints,
   setSketchSegments,
   updateSketchEntity,
 } from "../model/document";
 import { createCircleEntity, createRectangleEntity, createRegularPolygonEntity, createSlotEntity } from "../model/entity";
-import type { FeatureId, PolygonCorner, SketchEntity, SketchFeature } from "../model/types";
+import type { FeatureId, PointRef, PolygonCorner, SketchConstraint, SketchEntity, SketchFeature } from "../model/types";
+import { removeConstraint } from "../sketch/constraintDimensions";
 import { useCadStore } from "../state/store";
 
 function NumberField({
@@ -343,6 +345,114 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
           </button>
         </div>
       </div>
+
+      <ConstraintListPanel sketch={sketch} />
+    </div>
+  );
+}
+
+/** セグメントidから「セグメント1」のような表示用の短いラベルを作る(順序はsketch.segments配列準拠)。 */
+function segmentLabel(segments: SketchFeature["segments"], segmentId: string): string {
+  const index = (segments ?? []).findIndex((s) => s.id === segmentId);
+  return index >= 0 ? `セグメント${index + 1}` : segmentId;
+}
+
+function pointRefLabel(segments: SketchFeature["segments"], ref: PointRef): string {
+  return `${segmentLabel(segments, ref.segmentId)}.${ref.end}`;
+}
+
+/** 拘束種別の日本語ラベル。 */
+const CONSTRAINT_KIND_LABELS: Record<SketchConstraint["kind"], string> = {
+  coincident: "一致",
+  horizontal: "水平",
+  vertical: "垂直",
+  length: "長さ",
+  distance: "距離",
+  radius: "半径",
+  fix: "固定",
+};
+
+/** 拘束の対象・値を1行で表す説明文を作る。 */
+function describeConstraint(segments: SketchFeature["segments"], constraint: SketchConstraint): string {
+  switch (constraint.kind) {
+    case "coincident":
+      return `${pointRefLabel(segments, constraint.a)} = ${pointRefLabel(segments, constraint.b)}`;
+    case "horizontal":
+    case "vertical":
+      return segmentLabel(segments, constraint.segmentId);
+    case "length":
+      return `${segmentLabel(segments, constraint.segmentId)} = ${constraint.value.toFixed(2)}mm`;
+    case "radius":
+      return `${segmentLabel(segments, constraint.segmentId)} = R${constraint.value.toFixed(2)}mm`;
+    case "distance":
+      return `${pointRefLabel(segments, constraint.a)} - ${pointRefLabel(segments, constraint.b)} = ${constraint.value.toFixed(2)}mm`;
+    case "fix":
+      return pointRefLabel(segments, constraint.point);
+  }
+}
+
+/**
+ * 拘束一覧パネル(Phase 20b)。種類・対象・値の簡易表示+削除ボタン。値なし拘束(coincident/
+ * horizontal/vertical/fix)も表示・削除できる。削除後の再ソルブ・再評価はstore.tsのupdateDocument
+ * 経由で自動的に行われる(削除は拘束を緩めるだけなので矛盾を新たに生むことはなく、巻き戻しは不要)。
+ */
+function ConstraintListPanel({ sketch }: { sketch: SketchFeature }) {
+  const updateDocument = useCadStore((s) => s.updateDocument);
+  const constraints = sketch.constraints ?? [];
+
+  function handleRemove(constraintId: string) {
+    updateDocument((doc) => setSketchConstraints(doc, sketch.id, removeConstraint(constraints, constraintId)));
+  }
+
+  return (
+    <div
+      style={{
+        borderTop: "1px solid #444",
+        paddingTop: 10,
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+      }}
+    >
+      <h3 style={{ margin: 0, fontSize: 13 }}>拘束一覧</h3>
+      {constraints.length === 0 ? (
+        <p style={{ fontSize: 11, opacity: 0.7, margin: 0 }} data-testid="constraint-list-empty">
+          拘束はありません。線分ツールで自動付与されるか、寸法ツールで作成できます。
+        </p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          {constraints.map((constraint, index) => (
+            <div
+              key={constraint.id}
+              data-testid={`constraint-${index}`}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 6,
+                fontSize: 11,
+                border: "1px solid #333",
+                borderRadius: 4,
+                padding: "4px 6px",
+              }}
+            >
+              <span>
+                <strong>{CONSTRAINT_KIND_LABELS[constraint.kind]}</strong>{" "}
+                <span style={{ opacity: 0.8 }}>{describeConstraint(sketch.segments, constraint)}</span>
+              </span>
+              <button
+                type="button"
+                data-testid={`constraint-${index}-delete`}
+                onClick={() => handleRemove(constraint.id)}
+                title="削除"
+                style={{ fontSize: 10 }}
+              >
+                削除
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

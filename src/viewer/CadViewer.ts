@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
-import type { FeatureId, SketchEntity, SketchSegment } from "../model/types";
+import type { FeatureId, PointRef, SketchEntity, SketchSegment } from "../model/types";
 import type { FaceGroup, FaceInfo, MeshData } from "../protocol/messages";
 import { bulgeArcPoints, bulgeFromThreePoints, DEFAULT_BULGE_SEGMENTS } from "../sketch/bulge";
 import { polygonOutlinePoints } from "../sketch/polygonOutline";
@@ -227,6 +227,34 @@ const CORNER_HIT_TOLERANCE_PX = 10;
 const TRIM_PREVIEW_COLOR = 0xff1744;
 /** トリムツールでホバー対象とみなす許容スクリーン距離(px)。 */
 const TRIM_HOVER_TOLERANCE_PX = 16;
+
+/**
+ * 寸法ツール(Phase 20b)がヒットした対象。値の確定・拘束の作成/更新は行わず、
+ * 「何をクリックしたか」の情報のみを持つ(実際の拘束データ生成・現在値の計算はApp側の責務。
+ * src/sketch/constraintDimensions.tsのupsert系関数・segmentLength/segmentRadius/distanceBetweenRefs
+ * を使う想定)。
+ */
+export type DimensionToolTarget =
+  | { kind: "length"; segmentId: string }
+  | { kind: "radius"; segmentId: string }
+  | { kind: "distance"; a: PointRef; b: PointRef };
+
+/** 寸法ツール(Phase 20b)の開始/終了時に呼ばれるコールバック。 */
+export interface DimensionToolCallbacks {
+  /**
+   * ヒット対象が確定したときに呼ばれる(screenX/screenYは値入力ポップアップの位置決めに使う
+   * canvas内px座標)。実際の拘束の作成/更新・値のデフォルト計算はApp側の責務とする
+   * (CadViewerはヒット判定のみを行い、ドキュメントの正本は持たないため)。
+   */
+  onTargetPicked: (target: DimensionToolTarget, screenX: number, screenY: number) => void;
+  /** Escapeキーまたはcancel呼び出しで終了したときに呼ばれる。 */
+  onCancel: () => void;
+}
+
+/** 寸法ツールの端点ヒット判定の許容スクリーン距離(px)。セグメント本体より優先してヒットさせる。 */
+const DIMENSION_ENDPOINT_TOLERANCE_PX = 10;
+/** 寸法ツールのセグメント本体ヒット判定の許容スクリーン距離(px、ローカルmmへ概算換算して使う)。 */
+const DIMENSION_SEGMENT_TOLERANCE_PX = 14;
 
 declare global {
   interface Window {
@@ -593,6 +621,15 @@ export class CadViewer {
   /** 直近のホバーで求めた削除候補区間の元セグメントid(ヒット無しはnull)。クリック時にこれをonTrimClickへ渡す。 */
   private trimHoverTargetId: string | null = null;
 
+  /** 寸法ツール(Phase 20b)がアクティブかどうか。trueの間はクリックを面選択でなく寸法対象クリックとして扱う。 */
+  private dimensionToolActive = false;
+  private dimensionToolBasis: PlaneBasis | null = null;
+  /** ヒット判定対象のセグメント(対象スケッチのsegments)。 */
+  private dimensionToolSegments: SketchSegment[] = [];
+  private dimensionToolCallbacks: DimensionToolCallbacks | null = null;
+  /** distance拘束の1点目としてクリック済みの端点(未選択はnull)。2点目のクリックでonTargetPickedを呼ぶ。 */
+  private dimensionPendingPoint: PointRef | null = null;
+
   constructor(
     container: HTMLElement,
     onFaceSelect?: (face: FaceInfo | null) => void,
@@ -763,6 +800,12 @@ export class CadViewer {
       }
       return;
     }
+    if (this.dimensionToolActive) {
+      if (event.key === "Escape") {
+        this.cancelDimensionTool();
+      }
+      return;
+    }
     if (this.drawingActive) {
       const isChainShape = this.drawingShape === "polygon" || this.drawingShape === "segment";
       if (event.key === "Escape") {
@@ -857,6 +900,10 @@ export class CadViewer {
     }
     if (this.cornerToolActive) {
       this.handleCornerToolClick(event);
+      return;
+    }
+    if (this.dimensionToolActive) {
+      this.handleDimensionToolClick(event);
       return;
     }
     if (this.drawingActive) {
@@ -1360,6 +1407,7 @@ export class CadViewer {
     this.cancelPolygonDrawing();
     this.cancelTrimTool();
     this.cancelCornerTool();
+    this.cancelDimensionTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.drawingActive = true;
@@ -1486,6 +1534,7 @@ export class CadViewer {
     this.cancelCornerTool();
     this.cancelPolygonDrawing();
     this.cancelTrimTool();
+    this.cancelDimensionTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.cornerToolActive = true;
@@ -1565,6 +1614,7 @@ export class CadViewer {
     this.cancelTrimTool();
     this.cancelPolygonDrawing();
     this.cancelCornerTool();
+    this.cancelDimensionTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.trimActive = true;
@@ -1675,6 +1725,141 @@ export class CadViewer {
     this.drawingGroup.add(line);
     this.drawingPreviewGeometries.push(geometry);
     this.drawingPreviewMaterials.push(material);
+  }
+
+  /**
+   * 寸法ツール(Phase 20b)を開始する。既存の線描画モード・フィレット/面取りツール・トリムツール・
+   * 面選択は中断/解除する。以後のクリックは、まず全segmentsの端点をスクリーン距離
+   * DIMENSION_ENDPOINT_TOLERANCE_PX以内で探し(優先)、無ければセグメント本体を
+   * DIMENSION_SEGMENT_TOLERANCE_PX以内で探す。端点を2つ順にクリックするとdistance、
+   * セグメント本体(線分)をクリックするとlength、円弧をクリックするとradiusのターゲットとして
+   * `callbacks.onTargetPicked`が呼ばれる(実際の拘束の作成/更新はApp側の責務)。
+   */
+  startDimensionTool(basis: PlaneBasis, segments: SketchSegment[], callbacks: DimensionToolCallbacks) {
+    this.cancelDimensionTool();
+    this.cancelPolygonDrawing();
+    this.cancelCornerTool();
+    this.cancelTrimTool();
+    this.clearSelection();
+    this.setHoverGroup(null);
+    this.dimensionToolActive = true;
+    this.dimensionToolBasis = basis;
+    this.dimensionToolSegments = segments;
+    this.dimensionToolCallbacks = callbacks;
+    this.dimensionPendingPoint = null;
+    this.renderer.domElement.style.cursor = "crosshair";
+  }
+
+  /**
+   * ヒット判定対象のsegments一覧を更新する(拘束追加・値変更でsegments座標が変わった後、
+   * 呼び出し側の最新値を反映するために使う想定)。1点目の保留状態・プレビューはリセットする
+   * (更新前のsegmentIdを参照したままにしないため)。ツール非アクティブ時は何もしない。
+   */
+  updateDimensionToolSegments(segments: SketchSegment[]) {
+    if (!this.dimensionToolActive) return;
+    this.dimensionToolSegments = segments;
+    this.clearDrawingPreview();
+    this.dimensionPendingPoint = null;
+  }
+
+  isDimensionToolActive(): boolean {
+    return this.dimensionToolActive;
+  }
+
+  /** 寸法ツールを終了する(onCancelが呼ばれる)。非アクティブなら何もしない。 */
+  cancelDimensionTool() {
+    if (!this.dimensionToolActive) return;
+    const callbacks = this.dimensionToolCallbacks;
+    this.dimensionToolActive = false;
+    this.dimensionToolBasis = null;
+    this.dimensionToolSegments = [];
+    this.dimensionToolCallbacks = null;
+    this.dimensionPendingPoint = null;
+    this.renderer.domElement.style.cursor = "";
+    this.clearDrawingPreview();
+    callbacks?.onCancel();
+  }
+
+  /** 1点目として保留中の端点を示すマーカー(頂点スナップと同じ四角マーカー)を表示する。 */
+  private drawDimensionPendingMarker(basis: PlaneBasis, local: [number, number]) {
+    this.clearDrawingPreview();
+    for (const obj of buildSnapMarkerObjects(basis, "vertex", local)) {
+      this.drawingGroup.add(obj);
+      this.drawingPreviewGeometries.push(obj.geometry);
+      this.drawingPreviewMaterials.push(obj.material as THREE.Material);
+    }
+  }
+
+  /**
+   * 寸法ツール中のクリック処理。まず全segmentsの端点をスクリーン距離
+   * DIMENSION_ENDPOINT_TOLERANCE_PX以内で探索し、最も近いものがあれば端点ヒットとして扱う
+   * (セグメント本体より優先)。1点目のクリックではdimensionPendingPointに保存してマーカー表示のみ、
+   * 2点目のクリック(異なる点)でdistanceターゲットとしてonTargetPickedを呼ぶ。
+   * 端点ヒットが無ければセグメント本体をDIMENSION_SEGMENT_TOLERANCE_PX以内で探し、見つかれば
+   * kindがarcならradius、それ以外はlengthのターゲットとしてonTargetPickedを呼ぶ(保留中の1点目は破棄する)。
+   */
+  private handleDimensionToolClick(event: MouseEvent) {
+    if (!this.dimensionToolBasis) return;
+    const basis = this.dimensionToolBasis;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+
+    type PointHit = { ref: PointRef; local: [number, number]; distSq: number };
+    let bestPoint: PointHit | null = null;
+    for (const seg of this.dimensionToolSegments) {
+      for (const end of ["p1", "p2"] as const) {
+        const local = end === "p1" ? seg.p1 : seg.p2;
+        const world = planeLocalToWorld(basis, local[0], local[1]);
+        const screen = this.projectPoint(world);
+        if (!screen) continue;
+        const dx = screen.x - px;
+        const dy = screen.y - py;
+        const distSq = dx * dx + dy * dy;
+        if (distSq > DIMENSION_ENDPOINT_TOLERANCE_PX * DIMENSION_ENDPOINT_TOLERANCE_PX) continue;
+        if (bestPoint === null || distSq < bestPoint.distSq) {
+          bestPoint = { ref: { segmentId: seg.id, end }, local, distSq };
+        }
+      }
+    }
+
+    if (bestPoint) {
+      const pending = this.dimensionPendingPoint;
+      if (pending && !(pending.segmentId === bestPoint.ref.segmentId && pending.end === bestPoint.ref.end)) {
+        this.dimensionPendingPoint = null;
+        this.clearDrawingPreview();
+        this.dimensionToolCallbacks?.onTargetPicked({ kind: "distance", a: pending, b: bestPoint.ref }, px, py);
+        return;
+      }
+      this.dimensionPendingPoint = bestPoint.ref;
+      this.drawDimensionPendingMarker(basis, bestPoint.local);
+      return;
+    }
+
+    const hit = this.raycastDrawingPlane(basis, px, py, rect);
+    if (!hit) return;
+    const local = planeWorldToLocal(basis, hit);
+    const toleranceMm = this.pxToMm(DIMENSION_SEGMENT_TOLERANCE_PX, hit);
+    let nearestId: string | null = null;
+    let nearestDist = Infinity;
+    for (const seg of this.dimensionToolSegments) {
+      const d = distPointToSegmentShape(local, seg);
+      if (d < nearestDist) {
+        nearestDist = d;
+        nearestId = seg.id;
+      }
+    }
+    if (nearestId === null || nearestDist > toleranceMm) return;
+
+    this.dimensionPendingPoint = null;
+    this.clearDrawingPreview();
+    const seg = this.dimensionToolSegments.find((s) => s.id === nearestId);
+    if (!seg) return;
+    if (seg.kind === "arc" && seg.bulge) {
+      this.dimensionToolCallbacks?.onTargetPicked({ kind: "radius", segmentId: nearestId }, px, py);
+    } else {
+      this.dimensionToolCallbacks?.onTargetPicked({ kind: "length", segmentId: nearestId }, px, py);
+    }
   }
 
   /** 描画モード中のスナップ(グリッド+点スナップ)有効/無効をリアルタイムに切り替える。軸ロックはこれと独立。 */
@@ -1973,8 +2158,9 @@ export class CadViewer {
       this.handleTrimMouseMove(event);
       return;
     }
-    // フィレット/面取りツール中は面ホバーハイライトも描画プレビューも不要(クリックのみで完結する)。
+    // フィレット/面取りツール・寸法ツール中は面ホバーハイライトも描画プレビューも不要(クリックのみで完結する)。
     if (this.cornerToolActive) return;
+    if (this.dimensionToolActive) return;
     if (!this.drawingActive || !this.drawingBasis) {
       this.handleHoverMouseMove(event);
       return;

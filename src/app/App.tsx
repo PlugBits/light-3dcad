@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { DimensionOverlay } from "../components/DimensionOverlay";
+import { DimensionToolPopup } from "../components/DimensionToolPopup";
 import { ExtrudeEditor } from "../components/ExtrudeEditor";
 import { FeatureTree } from "../components/FeatureTree";
 import { SketchEditor } from "../components/SketchEditor";
 import { downloadStl } from "../export/downloadStl";
-import { addSketchEntity, addSketchSegments, findFeature, getDependentFeatureIds, setPolygonVertexCorner, setSketchSegments } from "../model/document";
+import { addSketchEntity, addSketchSegments, findFeature, getDependentFeatureIds, setPolygonVertexCorner, setSketchConstraints, setSketchSegments } from "../model/document";
 import { buildAutoConstraintsForChain } from "../sketch/autoConstraints";
 import {
   createArcSegment,
@@ -17,10 +18,19 @@ import {
   createSlotEntity,
 } from "../model/entity";
 import type { PolygonCorner } from "../model/types";
+import {
+  distanceBetweenRefs,
+  segmentLength,
+  segmentRadius,
+  upsertDistanceConstraint,
+  upsertLengthConstraint,
+  upsertRadiusConstraint,
+} from "../sketch/constraintDimensions";
 import { rectangleFromCorners } from "../sketch/shapeFromPoints";
 import { trimSegmentAtPoint } from "../sketch/trim";
+import { updateDocumentWithConflictRollback } from "../state/constraintUpdate";
 import { useCadStore } from "../state/store";
-import { CadViewer, type SketchOverlayEntry } from "../viewer/CadViewer";
+import { CadViewer, type DimensionToolTarget, type SketchOverlayEntry } from "../viewer/CadViewer";
 import type { StandardView } from "../viewer/standardViews";
 
 /**
@@ -85,6 +95,28 @@ export default function App() {
   const [cornerTool, setCornerTool] = useState<"fillet" | "chamfer" | null>(null);
   // トリムツール(未選択はfalse、Phase 19b)。
   const [trimTool, setTrimTool] = useState(false);
+  // 寸法ツール(未選択はfalse、Phase 20b)。segmentをクリックしてlength/radius/distance拘束を作成する。
+  const [dimensionTool, setDimensionTool] = useState(false);
+  // 寸法ツールがヒット対象を確定した後に表示する値入力ポップアップ(未表示はnull、Phase 20b)。
+  const [dimensionPopup, setDimensionPopup] = useState<{
+    target: DimensionToolTarget;
+    titleLabel: string;
+    initialValue: number;
+    screen: { x: number; y: number };
+  } | null>(null);
+  // 拘束の矛盾で自動巻き戻しが起きたときの一時メッセージ(Phase 20b)。数秒後に自動で消える。
+  const [transientMessage, setTransientMessage] = useState<string | null>(null);
+  const transientMessageTimer = useRef<number | null>(null);
+  function showTransientMessage(message: string) {
+    setTransientMessage(message);
+    if (transientMessageTimer.current !== null) window.clearTimeout(transientMessageTimer.current);
+    transientMessageTimer.current = window.setTimeout(() => setTransientMessage(null), 3000);
+  }
+  useEffect(() => {
+    return () => {
+      if (transientMessageTimer.current !== null) window.clearTimeout(transientMessageTimer.current);
+    };
+  }, []);
   // フィレット/面取りツールで頂点クリック時に適用するサイズ(mm、デフォルト5)。
   const [cornerSize, setCornerSize] = useState(5);
   // スロットツール開始時に固定する全幅(mm、デフォルト10、Phase 17)。
@@ -190,7 +222,10 @@ export default function App() {
     if (trimTool && selectedFeatureId !== drawingSketchId) {
       viewerRef.current?.cancelTrimTool();
     }
-  }, [activeTool, cornerTool, trimTool, selectedFeatureId, drawingSketchId]);
+    if (dimensionTool && selectedFeatureId !== drawingSketchId) {
+      viewerRef.current?.cancelDimensionTool();
+    }
+  }, [activeTool, cornerTool, trimTool, dimensionTool, selectedFeatureId, drawingSketchId]);
 
   // フィレット/面取りツール中、対象スケッチのentitiesが変わった場合はヒット判定対象を更新する
   // (フィレット/面取りは頂点座標自体は変えないため必須ではないが、将来の変更に備えて同期しておく)。
@@ -211,6 +246,16 @@ export default function App() {
       viewerRef.current?.updateTrimSegments(feature.segments ?? []);
     }
   }, [trimTool, doc, selectedFeatureId]);
+
+  // 寸法ツール中、対象スケッチのsegmentsが変わった場合(拘束適用・アンドゥ等)はヒット判定対象を
+  // 最新化する(Phase 20b)。
+  useEffect(() => {
+    if (!dimensionTool) return;
+    const feature = selectedFeatureId ? findFeature(doc, selectedFeatureId) : undefined;
+    if (feature?.type === "sketch") {
+      viewerRef.current?.updateDimensionToolSegments(feature.segments ?? []);
+    }
+  }, [dimensionTool, doc, selectedFeatureId]);
 
   // Ctrl+Z(Mac: Cmd+Z)でアンドゥ、Ctrl+Shift+Z(Mac: Cmd+Shift+Z)でリドゥ(Phase 14)。
   // テキスト入力欄にフォーカスがある間はブラウザ標準のテキスト編集アンドゥを優先し、何もしない。
@@ -440,7 +485,7 @@ export default function App() {
 
   /** 指定ツールのボタンをdisabledにすべきか(他のツールが実行中、または対象スケッチ平面が未確定)。 */
   function isToolDisabled(tool: Exclude<DrawingTool, null>): boolean {
-    if (cornerTool || trimTool) return true;
+    if (cornerTool || trimTool || dimensionTool) return true;
     if (activeTool) return activeTool !== tool;
     return !selectedSketchPlane;
   }
@@ -481,7 +526,7 @@ export default function App() {
 
   /** フィレット/面取りボタンをdisabledにすべきか(他の作図ツール実行中、または対象スケッチ平面が未確定)。 */
   function isCornerToolDisabled(kind: "fillet" | "chamfer"): boolean {
-    if (activeTool || trimTool) return true;
+    if (activeTool || trimTool || dimensionTool) return true;
     if (cornerTool) return cornerTool !== kind;
     return !selectedSketchPlane;
   }
@@ -517,9 +562,82 @@ export default function App() {
 
   /** トリムボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isTrimToolDisabled(): boolean {
-    if (activeTool || cornerTool) return true;
+    if (activeTool || cornerTool || dimensionTool) return true;
     if (trimTool) return false;
     return !selectedSketchPlane;
+  }
+
+  /**
+   * 寸法ツール(Phase 20b)を開始する。ビューア上でセグメント本体をクリックするとlength/radius、
+   * 端点を2つ順にクリックするとdistanceのヒット対象として`onTargetPicked`が呼ばれ、現在値を
+   * デフォルトにした値入力ポップアップを開く。適用は`handleApplyDimensionTarget`が行う。
+   */
+  function handleStartDimensionTool() {
+    if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
+    const sketchId = selectedFeature.id;
+    viewerRef.current.startDimensionTool(selectedSketchPlane, selectedFeature.segments ?? [], {
+      onTargetPicked: (target, screenX, screenY) => {
+        const currentDoc = useCadStore.getState().doc;
+        const feature = findFeature(currentDoc, sketchId);
+        const segments = feature?.type === "sketch" ? (feature.segments ?? []) : [];
+        let titleLabel = "距離 (mm)";
+        let initialValue = 0;
+        if (target.kind === "length") {
+          titleLabel = "長さ (mm)";
+          const seg = segments.find((s) => s.id === target.segmentId);
+          initialValue = seg ? segmentLength(seg) : 0;
+        } else if (target.kind === "radius") {
+          titleLabel = "半径 (mm)";
+          const seg = segments.find((s) => s.id === target.segmentId);
+          initialValue = (seg && segmentRadius(seg)) ?? 0;
+        } else {
+          initialValue = distanceBetweenRefs(segments, target.a, target.b) ?? 0;
+        }
+        setDimensionPopup({ target, titleLabel, initialValue, screen: { x: screenX, y: screenY } });
+      },
+      onCancel: () => {
+        setDimensionTool(false);
+        setDrawingSketchId(null);
+        setDimensionPopup(null);
+      },
+    });
+    setDrawingSketchId(sketchId);
+    setDimensionTool(true);
+  }
+
+  function handleCancelDimensionTool() {
+    viewerRef.current?.cancelDimensionTool();
+  }
+
+  /** 寸法ツールボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
+  function isDimensionToolDisabled(): boolean {
+    if (activeTool || cornerTool || trimTool) return true;
+    if (dimensionTool) return false;
+    return !selectedSketchPlane;
+  }
+
+  /** 寸法ツールの値入力ポップアップの確定(既存拘束があれば流用、無ければ新規作成)。矛盾したら自動的に巻き戻す。 */
+  function handleApplyDimensionTarget(value: number) {
+    if (!dimensionPopup || !selectedFeature || selectedFeature.type !== "sketch") return;
+    const sketchId = selectedFeature.id;
+    const target = dimensionPopup.target;
+    updateDocumentWithConflictRollback(
+      sketchId,
+      (doc) => {
+        const feature = doc.features.find((f) => f.id === sketchId);
+        if (feature?.type !== "sketch") return doc;
+        const constraints = feature.constraints ?? [];
+        const next =
+          target.kind === "length"
+            ? upsertLengthConstraint(constraints, target.segmentId, value)
+            : target.kind === "radius"
+              ? upsertRadiusConstraint(constraints, target.segmentId, value)
+              : upsertDistanceConstraint(constraints, target.a, target.b, value);
+        return setSketchConstraints(doc, sketchId, next);
+      },
+      showTransientMessage,
+    );
+    setDimensionPopup(null);
   }
 
   return (
@@ -753,6 +871,15 @@ export default function App() {
           >
             {trimTool ? "トリムキャンセル(Esc)" : "トリム"}
           </button>
+          <button
+            type="button"
+            data-testid="btn-dimension"
+            onClick={dimensionTool ? handleCancelDimensionTool : handleStartDimensionTool}
+            disabled={isDimensionToolDisabled()}
+            title="ビューア上でセグメントをクリックしてlength/radius拘束を、端点を2つ順にクリックしてdistance拘束を作成・編集します(端点は10px以内を優先ヒット、Escで終了)"
+          >
+            {dimensionTool ? "寸法キャンセル(Esc)" : "寸法"}
+          </button>
         </span>
         <button
           type="button"
@@ -806,6 +933,11 @@ export default function App() {
         {trimTool && (
           <span data-testid="trim-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
             赤色プレビューの区間をクリックして削除(連続クリック可、Escで終了)
+          </span>
+        )}
+        {dimensionTool && (
+          <span data-testid="dimension-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
+            線分・円弧をクリックで長さ/半径、端点を2つ順にクリックで距離を指定(連続使用可、Escで終了)
           </span>
         )}
         <span data-testid="status-text" style={{ fontSize: 12, opacity: 0.8, marginLeft: "auto" }}>
@@ -903,8 +1035,40 @@ export default function App() {
               sketch={selectedFeature}
               basis={selectedSketchPlane}
               viewerRef={viewerRef}
-              visible={showSketches && !activeTool && !cornerTool && !trimTool}
+              visible={showSketches && !activeTool && !cornerTool && !trimTool && !dimensionTool}
+              onConflictRollback={showTransientMessage}
             />
+          )}
+          {dimensionPopup && (
+            <DimensionToolPopup
+              key={JSON.stringify(dimensionPopup.target)}
+              titleLabel={dimensionPopup.titleLabel}
+              initialValue={dimensionPopup.initialValue}
+              screen={dimensionPopup.screen}
+              onCancel={() => setDimensionPopup(null)}
+              onApply={handleApplyDimensionTarget}
+            />
+          )}
+          {transientMessage && (
+            <div
+              data-testid="constraint-conflict-toast"
+              role="status"
+              style={{
+                position: "absolute",
+                top: 12,
+                left: "50%",
+                transform: "translateX(-50%)",
+                padding: "6px 14px",
+                borderRadius: 4,
+                background: "rgba(211, 47, 47, 0.92)",
+                color: "#fff",
+                fontSize: 12,
+                pointerEvents: "none",
+                zIndex: 30,
+              }}
+            >
+              {transientMessage}
+            </div>
           )}
           {showInitOverlay && (
             <div
