@@ -237,6 +237,23 @@ export function collectSketchSnapCandidates(entities: SketchEntity[]): SnapCandi
 }
 
 /**
+ * ボディ端面参照エッジ(referenceEdges、面上スケッチ等でWorkerが評価のたびに返す、破線グレー表示
+ * 済みの既存ボディ端面)からスナップ候補点リストを収集する。各エッジの両端点(vertex)+中点
+ * (midpoint)を候補にする。p1/p2のみを参照するため、呼び出し側は ReferenceEdgeLine
+ * (src/protocol/messages.ts)をそのまま渡せる(このモジュールをprotocol層に依存させないための
+ * 構造的型付け)。
+ */
+export function collectReferenceEdgeSnapCandidates(edges: { p1: [number, number]; p2: [number, number] }[]): SnapCandidate[] {
+  const candidates: SnapCandidate[] = [];
+  for (const edge of edges) {
+    candidates.push({ point: edge.p1, kind: "vertex" });
+    candidates.push({ point: edge.p2, kind: "vertex" });
+    candidates.push({ point: midpoint(edge.p1, edge.p2), kind: "midpoint" });
+  }
+  return candidates;
+}
+
+/**
  * スケッチの自由な線分・円弧セグメント(Phase 19a)からスナップ候補点リストを収集する(Phase 19b)。
  * 各セグメントの両端点(vertex)+中点(midpoint、円弧は弦の中点でなくbulgeArcPointsで求めた弧上の
  * 中点)を候補にする。線分作図ツール・トリムツールの対象スケッチの既存segmentsを渡す想定。

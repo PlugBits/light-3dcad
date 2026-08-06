@@ -1,7 +1,7 @@
 // src/sketch/trim.ts の単体テスト(純粋TS、WASM不要、Phase 19b)。
 import { describe, expect, it } from "vitest";
 
-import { createArcSegment, createLineSegment } from "../../src/model";
+import { createArcSegment, createCircleEntity, createLineSegment, createRectangleEntity } from "../../src/model";
 import { trimSegmentAtPoint } from "../../src/sketch/trim";
 
 describe("trimSegmentAtPoint", () => {
@@ -69,5 +69,50 @@ describe("trimSegmentAtPoint", () => {
     const xs = [kept!.p1[0], kept!.p2[0]].sort((a, b) => a - b);
     expect(xs[0]).toBeCloseTo(5, 6);
     expect(xs[1]).toBeCloseTo(10, 6);
+  });
+
+  it("円(entity)を横切る線分は円内部分だけをクリックすると内部区間だけが削除される(entitiesを境界に含める)", () => {
+    // 中心(0,0)半径5の円と、それを横切るx軸上の線分(-10,0)->(10,0)。
+    const circle = createCircleEntity({ center: [0, 0], radius: 5 });
+    const target = createLineSegment({ p1: [-10, 0], p2: [10, 0] });
+    const result = trimSegmentAtPoint([target], target.id, [0, 0], [circle]);
+
+    // 円自体はtrim対象ではないため戻り値には含まれない(境界を提供するだけ)。
+    expect(result).toHaveLength(2); // 左の外側区間、右の外側区間
+    const xs = result.map((s) => [s.p1[0], s.p2[0]].sort((a, b) => a - b));
+    xs.sort((a, b) => a[0] - b[0]);
+    expect(xs[0][0]).toBeCloseTo(-10, 6);
+    expect(xs[0][1]).toBeCloseTo(-5, 6);
+    expect(xs[1][0]).toBeCloseTo(5, 6);
+    expect(xs[1][1]).toBeCloseTo(10, 6);
+  });
+
+  it("円(entity)を横切る線分は外側部分だけをクリックすると外側区間だけが削除され円内部分が残る", () => {
+    const circle = createCircleEntity({ center: [0, 0], radius: 5 });
+    const target = createLineSegment({ p1: [-10, 0], p2: [10, 0] });
+    const result = trimSegmentAtPoint([target], target.id, [8, 0], [circle]); // 右の外側区間をクリック
+
+    expect(result).toHaveLength(2); // 左の外側区間、円内部分
+    const xs = result.map((s) => [s.p1[0], s.p2[0]].sort((a, b) => a - b));
+    xs.sort((a, b) => a[0] - b[0]);
+    expect(xs[0][0]).toBeCloseTo(-10, 6);
+    expect(xs[0][1]).toBeCloseTo(-5, 6);
+    expect(xs[1][0]).toBeCloseTo(-5, 6);
+    expect(xs[1][1]).toBeCloseTo(5, 6);
+  });
+
+  it("矩形(entity)の辺からはみ出した線分は、はみ出し部分だけをクリックすると削除され矩形内部分が残る", () => {
+    // 中心(0,0)、幅10×高さ10の矩形(辺はx=-5,5 / y=-5,5)を横切るx軸上の線分。
+    const rect = createRectangleEntity({ center: [0, 0], width: 10, height: 10 });
+    const target = createLineSegment({ p1: [-8, 0], p2: [8, 0] });
+    const result = trimSegmentAtPoint([target], target.id, [7, 0], [rect]); // 右のはみ出しをクリック
+
+    expect(result).toHaveLength(2); // 左のはみ出し、矩形内部分
+    const xs = result.map((s) => [s.p1[0], s.p2[0]].sort((a, b) => a - b));
+    xs.sort((a, b) => a[0] - b[0]);
+    expect(xs[0][0]).toBeCloseTo(-8, 6);
+    expect(xs[0][1]).toBeCloseTo(-5, 6);
+    expect(xs[1][0]).toBeCloseTo(-5, 6);
+    expect(xs[1][1]).toBeCloseTo(5, 6);
   });
 });

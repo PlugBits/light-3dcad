@@ -272,7 +272,7 @@ export default function App() {
     if (!trimTool) return;
     const feature = selectedFeatureId ? findFeature(doc, selectedFeatureId) : undefined;
     if (feature?.type === "sketch") {
-      viewerRef.current?.updateTrimSegments(feature.segments ?? []);
+      viewerRef.current?.updateTrimSegments(feature.segments ?? [], feature.entities ?? []);
     }
   }, [trimTool, doc, selectedFeatureId]);
 
@@ -575,19 +575,24 @@ export default function App() {
   function handleStartTrimTool() {
     if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
     const sketchId = selectedFeature.id;
-    viewerRef.current.startTrimTool(selectedSketchPlane, selectedFeature.segments ?? [], {
-      onTrimClick: (targetId, clickPoint) => {
-        const currentDoc = useCadStore.getState().doc;
-        const feature = findFeature(currentDoc, sketchId);
-        if (!feature || feature.type !== "sketch") return;
-        const nextSegments = trimSegmentAtPoint(feature.segments ?? [], targetId, clickPoint);
-        useCadStore.getState().updateDocument((d) => setSketchSegments(d, sketchId, nextSegments));
+    viewerRef.current.startTrimTool(
+      selectedSketchPlane,
+      selectedFeature.segments ?? [],
+      {
+        onTrimClick: (targetId, clickPoint) => {
+          const currentDoc = useCadStore.getState().doc;
+          const feature = findFeature(currentDoc, sketchId);
+          if (!feature || feature.type !== "sketch") return;
+          const nextSegments = trimSegmentAtPoint(feature.segments ?? [], targetId, clickPoint, feature.entities ?? []);
+          useCadStore.getState().updateDocument((d) => setSketchSegments(d, sketchId, nextSegments));
+        },
+        onCancel: () => {
+          setTrimTool(false);
+          setDrawingSketchId(null);
+        },
       },
-      onCancel: () => {
-        setTrimTool(false);
-        setDrawingSketchId(null);
-      },
-    });
+      selectedFeature.entities ?? [],
+    );
     setDrawingSketchId(sketchId);
     setTrimTool(true);
   }

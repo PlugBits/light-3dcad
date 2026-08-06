@@ -16,6 +16,7 @@ import {
   slotWidthFromCursor,
 } from "../sketch/shapeFromPoints";
 import {
+  collectReferenceEdgeSnapCandidates,
   collectSegmentSnapCandidates,
   collectSketchSnapCandidates,
   ORIGIN_CANDIDATE,
@@ -746,6 +747,8 @@ export class CadViewer {
   private trimBasis: PlaneBasis | null = null;
   /** ヒット判定対象のセグメント(対象スケッチのsegments)。 */
   private trimSegments: SketchSegment[] = [];
+  /** 交点境界を提供するだけのentities(対象スケッチのentities。それ自体はトリム対象にならない)。 */
+  private trimEntities: SketchEntity[] = [];
   private trimCallbacks: TrimToolCallbacks | null = null;
   /** 直近のホバーで求めた削除候補区間の元セグメントid(ヒット無しはnull)。クリック時にこれをonTrimClickへ渡す。 */
   private trimHoverTargetId: string | null = null;
@@ -1816,7 +1819,7 @@ export class CadViewer {
    * 中断/解除する。以後、マウス移動はホバー中の削除候補区間の赤色プレビュー、クリックは
    * `callbacks.onTrimClick`(実際のtrimSegmentAtPoint()適用・segments更新はApp側の責務)。
    */
-  startTrimTool(basis: PlaneBasis, segments: SketchSegment[], callbacks: TrimToolCallbacks) {
+  startTrimTool(basis: PlaneBasis, segments: SketchSegment[], callbacks: TrimToolCallbacks, entities: SketchEntity[] = []) {
     this.cancelTrimTool();
     this.cancelPolygonDrawing();
     this.cancelCornerTool();
@@ -1826,18 +1829,20 @@ export class CadViewer {
     this.trimActive = true;
     this.trimBasis = basis;
     this.trimSegments = segments;
+    this.trimEntities = entities;
     this.trimCallbacks = callbacks;
     this.trimHoverTargetId = null;
     this.renderer.domElement.style.cursor = "crosshair";
   }
 
   /**
-   * ヒット判定対象のsegments一覧を更新する(トリム適用でsegmentsが変わった後、呼び出し側の
+   * ヒット判定対象のsegments/entities一覧を更新する(トリム適用でsegmentsが変わった後、呼び出し側の
    * 最新値を反映するために使う想定)。ツール非アクティブ時は何もしない。
    */
-  updateTrimSegments(segments: SketchSegment[]) {
+  updateTrimSegments(segments: SketchSegment[], entities: SketchEntity[] = []) {
     if (!this.trimActive) return;
     this.trimSegments = segments;
+    this.trimEntities = entities;
     this.clearDrawingPreview();
     this.trimHoverTargetId = null;
   }
@@ -1853,6 +1858,7 @@ export class CadViewer {
     this.trimActive = false;
     this.trimBasis = null;
     this.trimSegments = [];
+    this.trimEntities = [];
     this.trimCallbacks = null;
     this.trimHoverTargetId = null;
     this.renderer.domElement.style.cursor = "";
@@ -1895,7 +1901,7 @@ export class CadViewer {
       this.trimHoverTargetId = null;
       return;
     }
-    const piece = findClosestSegmentPiece(this.trimSegments, nearestId, local);
+    const piece = findClosestSegmentPiece(this.trimSegments, nearestId, local, this.trimEntities);
     if (!piece) {
       this.trimHoverTargetId = null;
       return;
@@ -2741,6 +2747,7 @@ export class CadViewer {
       ? [
           ...collectSketchSnapCandidates(this.drawingEntities),
           ...collectSegmentSnapCandidates(this.drawingSegments),
+          ...collectReferenceEdgeSnapCandidates(this.dimensionToolReferenceEdges),
           ORIGIN_CANDIDATE,
           ...pointsToVertexCandidates(this.drawingPoints),
         ]

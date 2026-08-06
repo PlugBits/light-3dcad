@@ -544,3 +544,11 @@ Vitest284件(solver.ts循円拘束7件・evaluator.ts referenceEdges統合1件�
 追加)。ツールバーをファイル/ビュー/作図/編集/右端の5グループに整理し(区切り線+ラベル、標準ビューは
 主要3つ+セレクタ、アクティブツールは共通CSSクラスで強調)、SketchEditorの冗長な説明文を削除した。
 Vitest293件。E2E15件全通過。
+
+## 小修正: 参照エッジのスナップ+トリムのentities境界
+
+作図ツールの点入力(`resolveDrawingCursor`)に、ボディ端面参照エッジ(referenceEdges)の頂点・中点を
+`vertex`/`midpoint`候補として合流させた(`collectReferenceEdgeSnapCandidates`)。トリムは
+`trimSegmentAtPoint`/`findClosestSegmentPiece`が同一スケッチのentities(矩形・円・多角形・スロット・
+正多角形)を`explodeEntity`で一時セグメント化し交点境界に含めるようにした(entities自体は削除しない、
+対象はsegmentsのみ)。Vitest296件(trim.ts entities境界3件が新規)。
