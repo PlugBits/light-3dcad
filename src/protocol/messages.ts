@@ -46,6 +46,20 @@ export interface FaceGroup {
   faceId: number;
 }
 
+/**
+ * 1ボディ(bodies Mapの1要素)を構成する面IDの集合(Phase 28a、部品ドラッグ配置の
+ * ヒット判定用)。featureIdはそのボディを作ったフィーチャーのid(newBody操作のextrude/revolve、
+ * またはpartInstance)。UI側はクリックした面のfaceId(FaceGroup.faceId)からこの配列を引いて
+ * 所属ボディのfeatureIdを特定し、それがpartInstanceフィーチャーかどうかでドラッグ対象を判定する。
+ * mesh(全ボディのcompound)のfaceIdと同じ値になる(src/worker/evaluator.tsのコメント参照:
+ * replicadのShape.clone()・makeCompound()はいずれも元のOCCT形状を再利用するだけなので
+ * face.hashCodeは変化しない)。
+ */
+export interface BodyGroup {
+  featureId: FeatureId;
+  faceIds: number[];
+}
+
 /** 各B-Rep面の付加情報。面選択→スケッチ平面化に使う。 */
 export interface FaceInfo {
   faceId: number;
@@ -120,6 +134,8 @@ export type WorkerResponse =
       edgeInfo: EdgeInfo[];
       sketchPlanes: SketchPlaneInfo[];
       referenceEdges: ReferenceEdgeSet[];
+      /** 各ボディを構成する面IDの集合(Phase 28a)。ボディが無い場合は空配列。 */
+      bodyGroups: BodyGroup[];
     }
   | { kind: "stl"; requestId: string; blob: Blob }
   /** STEPエクスポート応答(Phase 26)。 */

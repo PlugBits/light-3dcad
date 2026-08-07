@@ -19,6 +19,7 @@ import {
   convertRectangleToPolygon,
   findFeature,
   getDependentFeatureIds,
+  patchPartInstanceFeature,
   setPolygonVertexCorner,
   setSketchConstraints,
   setSketchSegments,
@@ -118,6 +119,7 @@ export default function App() {
   const edgeInfo = useCadStore((s) => s.edgeInfo);
   const sketchPlanes = useCadStore((s) => s.sketchPlanes);
   const referenceEdges = useCadStore((s) => s.referenceEdges);
+  const bodyGroups = useCadStore((s) => s.bodyGroups);
   const errorMessage = useCadStore((s) => s.errorMessage);
   const errorFeatureId = useCadStore((s) => s.errorFeatureId);
   const selectedFeatureId = useCadStore((s) => s.selectedFeatureId);
@@ -191,6 +193,12 @@ export default function App() {
   threadHandRef.current = threadHand;
   const threadLengthRef = useRef(threadLength);
   threadLengthRef.current = threadLength;
+  // 部品移動ツール(未選択はfalse、Phase 28a)。partInstanceが作ったボディをドラッグして位置を動かす。
+  const [partDragTool, setPartDragTool] = useState(false);
+  // ドラッグ中の対象部品featureId・ドラッグ開始時点の位置(コールバックのクロージャが古い値を掴まない
+  // ようrefで保持する。cornerSizeRef等と同じパターン)。
+  const partDragFeatureIdRef = useRef<string | null>(null);
+  const partDragBasePositionRef = useRef<[number, number, number] | null>(null);
   // トリムツール(未選択はfalse、Phase 19b)。
   const [trimTool, setTrimTool] = useState(false);
   // 寸法ツール(未選択はfalse、Phase 20b)。segmentをクリックしてlength/radius/distance拘束を作成する。
@@ -280,9 +288,16 @@ export default function App() {
   // ここでのnullチェックは「まだ一度もWorkerから応答が無い」ケースのみを意味する)。
   useEffect(() => {
     if (mesh) {
-      viewerRef.current?.setMesh(mesh, faceInfo, edgeInfo);
+      viewerRef.current?.setMesh(mesh, faceInfo, edgeInfo, bodyGroups);
     }
-  }, [mesh, faceInfo, edgeInfo]);
+  }, [mesh, faceInfo, edgeInfo, bodyGroups]);
+
+  // 部品移動ツール(Phase 28a): ドキュメントが変わるたびに、partInstanceフィーチャーのfeatureId集合を
+  // ビューアへ同期する(ドラッグ対象=部品ボディかどうかの判定に使う)。
+  useEffect(() => {
+    const ids = new Set(doc.features.filter((f) => f.type === "partInstance").map((f) => f.id));
+    viewerRef.current?.setPartInstanceFeatureIds(ids);
+  }, [doc]);
 
   // ドキュメントに1つもフィーチャーが無い(=空ドキュメント、ボディなし)間だけ基準平面3枚を表示する。
   // 基準平面クリック等で最初のスケッチが作られた時点(features.length>0)で非表示になる(Phase 13)。
@@ -723,7 +738,7 @@ export default function App() {
 
   /** 指定ツールのボタンをdisabledにすべきか(他のツールが実行中、または対象スケッチ平面が未確定)。 */
   function isToolDisabled(tool: Exclude<DrawingTool, null>): boolean {
-    if (cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool) return true;
+    if (cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool) return true;
     if (activeTool) return activeTool !== tool;
     return !selectedSketchPlane;
   }
@@ -778,7 +793,7 @@ export default function App() {
 
   /** フィレット/面取りボタンをdisabledにすべきか(他の作図ツール実行中、または対象スケッチ平面が未確定)。 */
   function isCornerToolDisabled(kind: "fillet" | "chamfer"): boolean {
-    if (activeTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool) return true;
+    if (activeTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool) return true;
     if (cornerTool) return cornerTool !== kind;
     return !selectedSketchPlane;
   }
@@ -845,7 +860,7 @@ export default function App() {
 
   /** シェルボタンをdisabledにすべきか(他のツール実行中、またはボディが存在しない)。 */
   function isShellToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || threadTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || threadTool || partDragTool) return true;
     if (shellTool) return false;
     return !hasBody;
   }
@@ -883,9 +898,59 @@ export default function App() {
 
   /** ねじボタンをdisabledにすべきか(他のツール実行中、またはボディが存在しない)。 */
   function isThreadToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || partDragTool) return true;
     if (threadTool) return false;
     return !hasBody;
+  }
+
+  /**
+   * 部品移動ツール(Phase 28a)を開始する。ボディのエッジ/面選択ツールと違い、確定操作はクリックでは
+   * なくドラッグ(mousedown〜mouseup)で完結する。onDragStart/onDragMove/onDragEndはCadViewer側の
+   * コールバックで、ドラッグ開始時に対象featureId・その時点の部品位置(base)をrefへ記録し、以降は
+   * base+delta(ドラッグ開始点からの累積オフセット)を部品のpositionとして
+   * updateDocumentDuringDrag()(履歴を積まない直接更新)へ渡す。onDragStartでのみ
+   * beginDragHistory()を1回呼ぶことで、ドラッグ全体(開始〜終了)がアンドゥ1回になる。
+   */
+  function handleStartPartDragTool() {
+    if (!viewerRef.current) return;
+    viewerRef.current.startPartDragTool(gridSnap, {
+      onDragStart: (featureId) => {
+        partDragFeatureIdRef.current = featureId;
+        const feature = findFeature(useCadStore.getState().doc, featureId);
+        partDragBasePositionRef.current = feature && feature.type === "partInstance" ? feature.position : [0, 0, 0];
+        useCadStore.getState().beginDragHistory();
+      },
+      onDragMove: (delta) => {
+        const featureId = partDragFeatureIdRef.current;
+        const base = partDragBasePositionRef.current;
+        if (!featureId || !base) return;
+        const next: [number, number, number] = [base[0] + delta[0], base[1] + delta[1], base[2] + delta[2]];
+        useCadStore.getState().updateDocumentDuringDrag((d) => patchPartInstanceFeature(d, featureId, { position: next }));
+      },
+      onDragEnd: (delta) => {
+        const featureId = partDragFeatureIdRef.current;
+        const base = partDragBasePositionRef.current;
+        if (featureId && base) {
+          const next: [number, number, number] = [base[0] + delta[0], base[1] + delta[1], base[2] + delta[2]];
+          useCadStore.getState().updateDocumentDuringDrag((d) => patchPartInstanceFeature(d, featureId, { position: next }));
+        }
+        partDragFeatureIdRef.current = null;
+        partDragBasePositionRef.current = null;
+      },
+      onCancel: () => setPartDragTool(false),
+    });
+    setPartDragTool(true);
+  }
+
+  function handleCancelPartDragTool() {
+    viewerRef.current?.cancelPartDragTool();
+  }
+
+  /** 部品移動ボタンをdisabledにすべきか(他のツール実行中、または部品[partInstance]が1つも無い)。 */
+  function isPartDragToolDisabled(): boolean {
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool) return true;
+    if (partDragTool) return false;
+    return !doc.features.some((f) => f.type === "partInstance");
   }
 
   /**
@@ -929,7 +994,7 @@ export default function App() {
 
   /** トリムボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isTrimToolDisabled(): boolean {
-    if (activeTool || cornerTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool) return true;
+    if (activeTool || cornerTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool) return true;
     if (trimTool) return false;
     return !selectedSketchPlane;
   }
@@ -1079,7 +1144,7 @@ export default function App() {
 
   /** 寸法ツールボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isDimensionToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || constraintTool || edgeTool || shellTool || threadTool) return true;
+    if (activeTool || cornerTool || trimTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool) return true;
     if (dimensionTool) return false;
     return !selectedSketchPlane;
   }
@@ -1217,14 +1282,14 @@ export default function App() {
 
   /** 拘束ツールボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isConstraintToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || edgeTool || shellTool || threadTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || edgeTool || shellTool || threadTool || partDragTool) return true;
     if (constraintTool) return false;
     return !selectedSketchPlane;
   }
 
   /** 3Dフィレット/面取りボタンをdisabledにすべきか(他のツール実行中、またはボディが無い)。 */
   function isEdgeToolDisabled(kind: "fillet" | "chamfer"): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || shellTool || threadTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || shellTool || threadTool || partDragTool) return true;
     if (edgeTool) return edgeTool !== kind;
     return !hasBody;
   }
@@ -1755,6 +1820,16 @@ export default function App() {
                 <span style={{ fontSize: 12, opacity: 0.8 }}>平面をクリックして配置</span>
               </>
             )}
+            <button
+              type="button"
+              data-testid="btn-part-drag"
+              className={partDragTool ? "toolbar-btn-active" : undefined}
+              onClick={partDragTool ? handleCancelPartDragTool : handleStartPartDragTool}
+              disabled={isPartDragToolDisabled()}
+              title="部品のボディをドラッグして位置を動かします(Shift+ドラッグで上下、Escで終了)"
+            >
+              {partDragTool ? "部品移動キャンセル(Esc)" : "部品移動"}
+            </button>
           </div>
 
           <div className="toolbar-group" style={{ marginLeft: "auto" }}>

@@ -2748,3 +2748,93 @@ describe("evaluateDocument (WASM統合): 簡易アセンブリ(部品配置、Ph
     expect(volume2).toBeCloseTo(partVolume * 2, 3);
   });
 });
+
+describe("evaluateDocument (WASM統合): bodyGroups(部品ドラッグ配置のヒット判定用、Phase 28a)", () => {
+  it("① 離れた位置の2ボディ(newBody×2)で、bodyGroupsが2件になりfaceIdが重複なく正しく分類される", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const rect1 = createRectangleEntity({ width: 20, height: 20 });
+    const { doc: doc1, feature: sketch1 } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect1],
+    });
+    const { doc: doc2, feature: extrude1 } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch1.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+    const rect2 = createRectangleEntity({ width: 10, height: 10, center: [100, 0] });
+    const { doc: doc3, feature: sketch2 } = addSketchFeature(doc2, {
+      name: "Sketch2",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect2],
+    });
+    const { doc, feature: extrude2 } = addExtrudeFeature(doc3, {
+      name: "Extrude2",
+      sketchId: sketch2.id,
+      distance: 5,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    (result.shape as Shape3D).delete();
+
+    // 2つのnewBodyフィーチャー(extrude1/extrude2)それぞれに対応する1件ずつのbodyGroupsになる。
+    expect(result.bodyGroups.length).toBe(2);
+    const ids = result.bodyGroups.map((g) => g.featureId).sort();
+    expect(ids).toEqual([extrude1.id, extrude2.id].sort());
+
+    // 箱(6面)同士なのでどちらも6面、faceIdは互いに重複しない。
+    const group1 = result.bodyGroups.find((g) => g.featureId === extrude1.id);
+    const group2 = result.bodyGroups.find((g) => g.featureId === extrude2.id);
+    expect(group1?.faceIds.length).toBe(6);
+    expect(group2?.faceIds.length).toBe(6);
+    const overlap = group1!.faceIds.filter((id) => group2!.faceIds.includes(id));
+    expect(overlap.length).toBe(0);
+
+    // faceInfo(mesh評価から独立に計算)のfaceIdは、bodyGroupsが集めたfaceIdの和集合と完全一致する
+    // (compound化してもfaceIdが変化しないことの確認、Phase 27a snapshotロジックと同じ前提)。
+    const allBodyFaceIds = new Set([...(group1?.faceIds ?? []), ...(group2?.faceIds ?? [])]);
+    expect(allBodyFaceIds.size).toBe(12);
+  });
+
+  it("② 部品配置(partInstance)で作ったボディは、そのpartInstanceフィーチャーのidをfeatureIdに持つbodyGroupsエントリとして識別できる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const mainDoc = boxDoc(20, 20, 20);
+    const partDoc = boxDoc(10, 10, 10);
+    const { doc: docWithPart, feature: partFeature } = addPartInstanceFeature(mainDoc, {
+      name: "Part1",
+      part: partDoc,
+      position: [50, 0, 0],
+      rotation: [0, 0, 0],
+    });
+
+    const result = evaluateDocument(docWithPart);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    (result.shape as Shape3D).delete();
+
+    // 本体(newBodyフィーチャー由来)+部品(partInstanceフィーチャー由来)の2ボディ。
+    expect(result.bodyGroups.length).toBe(2);
+    const mainNewBody = mainDoc.features.find((f) => f.type === "extrude");
+    expect(mainNewBody).toBeDefined();
+
+    const partGroup = result.bodyGroups.find((g) => g.featureId === partFeature.id);
+    expect(partGroup).toBeDefined();
+    expect(partGroup?.faceIds.length).toBe(6);
+
+    const mainGroup = result.bodyGroups.find((g) => g.featureId === mainNewBody!.id);
+    expect(mainGroup).toBeDefined();
+    expect(mainGroup?.faceIds.length).toBe(6);
+
+    // 部品側と本体側でfaceIdの重複が無い(独立したボディとして分類されている)。
+    const overlap = partGroup!.faceIds.filter((id) => mainGroup!.faceIds.includes(id));
+    expect(overlap.length).toBe(0);
+  });
+});

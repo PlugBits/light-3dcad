@@ -131,10 +131,11 @@ function evaluateAndRespond(requestId: string, doc: CadDocument, quality: MeshQu
     return;
   }
 
-  const { shape, sketchPlanes, referenceEdges } = result;
+  const { shape, sketchPlanes, referenceEdges, bodyGroups } = result;
   if (!shape) {
     // ボディなし(Phase 13): 正常ケースとして空メッシュ+空faceInfo/edgeInfoを返す。
     // sketchPlanesは解決済みのため、スケッチだけの状態でもスケッチ線表示は継続する。
+    // bodyGroupsはevaluateDocument()の性質上この時点で空配列(ボディが無いため)。
     postResponse({
       kind: "evaluated",
       requestId,
@@ -143,6 +144,7 @@ function evaluateAndRespond(requestId: string, doc: CadDocument, quality: MeshQu
       edgeInfo: [],
       sketchPlanes,
       referenceEdges,
+      bodyGroups,
     });
     return;
   }
@@ -151,7 +153,7 @@ function evaluateAndRespond(requestId: string, doc: CadDocument, quality: MeshQu
     const faceInfo = computeFaceInfo(shape);
     const edgeInfo = computeEdgeInfo(shape);
     postResponse(
-      { kind: "evaluated", requestId, mesh, faceInfo, edgeInfo, sketchPlanes, referenceEdges },
+      { kind: "evaluated", requestId, mesh, faceInfo, edgeInfo, sketchPlanes, referenceEdges, bodyGroups },
       [mesh.positions.buffer, mesh.normals.buffer, mesh.indices.buffer, mesh.edges.buffer],
     );
   } finally {

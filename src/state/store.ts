@@ -29,7 +29,7 @@ import type {
   ThreadPreset,
   WorldPlaneName,
 } from "../model/types";
-import type { EdgeInfo, FaceInfo, MeshData, MeshQuality, ReferenceEdgeSet, SketchPlaneInfo, WorkerResponse } from "../protocol/messages";
+import type { BodyGroup, EdgeInfo, FaceInfo, MeshData, MeshQuality, ReferenceEdgeSet, SketchPlaneInfo, WorkerResponse } from "../protocol/messages";
 import { deserializeProject, serializeProject } from "../project/serialization";
 import { updateReferenceEdgeSnapshots } from "../sketch/referenceEdgeMatch";
 import { solveDocumentSketches } from "../sketch/solver";
@@ -189,6 +189,8 @@ interface CadStoreState {
    * ボディ端面参照寸法のオーバーレイ・寸法ツールのピック対象に使う派生状態)。
    */
   referenceEdges: ReferenceEdgeSet[];
+  /** 各ボディを構成する面IDの集合(Phase 28a、部品ドラッグ配置ツールのヒット判定に使う派生状態)。 */
+  bodyGroups: BodyGroup[];
   errorMessage: string | null;
   errorFeatureId: FeatureId | null;
   /** 現在表示中のmesh/faceInfo/errorに対応する最新のevaluateリクエストID(古い応答の破棄に使う)。 */
@@ -220,6 +222,18 @@ interface CadStoreState {
   initialize: () => void;
   /** ドキュメントを更新し、直ちに(デバウンスなしで)再評価を要求する。変更前の状態を履歴に積む。 */
   updateDocument: (updater: (doc: CadDocument) => CadDocument) => void;
+  /**
+   * ドラッグ操作(部品移動、Phase 28a)の開始時に呼ぶ。現在のドキュメントを履歴に1回だけpushする
+   * (doc自体・再評価は変更しない)。以降のドラッグ中の更新は updateDocumentDuringDrag() で
+   * 履歴を積まずに行うことで、ドラッグ全体(開始〜終了)がアンドゥ1回になる。
+   */
+  beginDragHistory: () => void;
+  /**
+   * ドラッグ中(部品移動、Phase 28a)の直接更新。updateDocument()と異なり履歴を積まない
+   * (beginDragHistory()で開始点を1回だけpush済みの前提)。呼び出し側(CadViewerの150ms
+   * スロットル)の都合で高頻度に呼ばれることを想定する。
+   */
+  updateDocumentDuringDrag: (updater: (doc: CadDocument) => CadDocument) => void;
   /** フィーチャーツリーの選択を変更する。 */
   selectFeature: (featureId: FeatureId | null) => void;
   /**
@@ -314,6 +328,7 @@ function applyEvaluated(
       edgeInfo: response.edgeInfo,
       sketchPlanes: response.sketchPlanes,
       referenceEdges: response.referenceEdges,
+      bodyGroups: response.bodyGroups,
       errorMessage: null,
       errorFeatureId: null,
     });
@@ -338,6 +353,7 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   edgeInfo: [],
   sketchPlanes: [],
   referenceEdges: [],
+  bodyGroups: [],
   errorMessage: null,
   errorFeatureId: null,
   latestEvaluateRequestId: null,
@@ -420,6 +436,37 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
     const nextDoc = solved.doc;
     const { requestId, promise } = postRequest({ kind: "evaluate", doc: resolveEvaluationDocument(nextDoc) });
     set({ doc: nextDoc, status: "evaluating", latestEvaluateRequestId: requestId, history: nextHistory });
+    promise.then((response) => applyEvaluated(set, get, requestId, response));
+  },
+
+  beginDragHistory: () => {
+    const nextHistory = pushHistory(get().history, structuredClone(get().doc));
+    set({ history: nextHistory });
+  },
+
+  updateDocumentDuringDrag: (updater) => {
+    const prevDoc = get().doc;
+    const updatedDoc = updater(prevDoc);
+    if (updatedDoc === prevDoc) return;
+
+    // updateDocument()と同じくソルバを経由する(部品移動自体は拘束を持たないが、他のスケッチとの
+    // 整合性を崩さないため同じ経路を通す)。履歴(history)はここではpushしない。
+    const solved = solveDocumentSketches(updatedDoc);
+    if (solved.conflict) {
+      const requestId = nextRequestId();
+      set({
+        doc: updatedDoc,
+        status: "error",
+        errorMessage: solved.conflict.message,
+        errorFeatureId: solved.conflict.featureId,
+        latestEvaluateRequestId: requestId,
+      });
+      return;
+    }
+
+    const nextDoc = solved.doc;
+    const { requestId, promise } = postRequest({ kind: "evaluate", doc: resolveEvaluationDocument(nextDoc) });
+    set({ doc: nextDoc, status: "evaluating", latestEvaluateRequestId: requestId });
     promise.then((response) => applyEvaluated(set, get, requestId, response));
   },
 

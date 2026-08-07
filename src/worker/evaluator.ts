@@ -64,7 +64,7 @@ import { computeFacePlaneBasis, facePlaneRawXDir } from "../sketch/facePlaneBasi
 import { findClosedRegions, loopPolyline } from "../sketch/regions";
 import { regularPolygonVertices, slotAxisNormal, SLOT_CAP_BULGE } from "../sketch/shapeFromPoints";
 import { MALE_THREAD_MAX_LENGTH, THREAD_PRESET_TABLE, threadDrillDiameter } from "../model/threadPresets";
-import type { ReferenceEdgeLine, ReferenceEdgeSet, SketchPlaneInfo } from "../protocol/messages";
+import type { BodyGroup, ReferenceEdgeLine, ReferenceEdgeSet, SketchPlaneInfo } from "../protocol/messages";
 
 export interface EvaluationSuccess {
   ok: true;
@@ -90,6 +90,13 @@ export interface EvaluationSuccess {
    * エントリが無い)。
    */
   referenceEdges: ReferenceEdgeSet[];
+  /**
+   * 各ボディ(bodies Mapの各要素)を構成する面IDの集合(Phase 28a、部品ドラッグ配置のヒット判定用)。
+   * compound化前のbodiesマップから直接収集する(buildBodiesCompound()参照。Shape.clone()は
+   * 元のOCCT形状を指すJSラッパーを新規生成するだけ、makeCompound()も各サブシェイプをそのまま
+   * Addするだけのため、ここで集めるfaceIdは最終的なcompound[=shape]上のfaceIdと一致する)。
+   */
+  bodyGroups: BodyGroup[];
 }
 
 export interface EvaluationFailure {
@@ -1406,6 +1413,15 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
   // ドキュメントとして正常なケースである(Phase 13)。エラーにはしない。
   // ここに到達した時点でループは最後まで例外なく完走しているため、
   // sketchesに登録された全スケッチ(world/faceいずれも)の平面基底が解決済みである。
+
+  // 各ボディの面ID集合(Phase 28a)を、compound化してbodiesをdelete()する前に集めておく。
+  const bodyGroups: BodyGroup[] = [];
+  for (const [featureId, body] of bodies) {
+    const faces = body.faces;
+    bodyGroups.push({ featureId, faceIds: faces.map((f) => f.hashCode) });
+    faces.forEach((f) => f.delete());
+  }
+
   // 最終結果は全ボディのcompound(単一ボディでも常にcompoundにラップする、Phase 27a)。
   // buildBodiesCompound()はクローンを合成するため、その後にbodies自体は個別にdelete()する。
   const shape = bodies.size > 0 ? buildBodiesCompound(bodies) : null;
@@ -1428,5 +1444,5 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
     referenceEdges.push({ sketchId, edges });
   }
 
-  return { ok: true, shape, sketchPlanes, referenceEdges };
+  return { ok: true, shape, sketchPlanes, referenceEdges, bodyGroups };
 }

@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
 import type { FeatureId, FilletEdgeRef, LineRef, PointRef, ShellFaceRef, SketchEntity, SketchSegment } from "../model/types";
-import type { EdgeGroup, EdgeInfo, FaceGroup, FaceInfo, MeshData, ReferenceEdgeLine } from "../protocol/messages";
+import type { BodyGroup, EdgeGroup, EdgeInfo, FaceGroup, FaceInfo, MeshData, ReferenceEdgeLine } from "../protocol/messages";
 import { bulgeArcPoints, bulgeFromThreePoints, DEFAULT_BULGE_SEGMENTS } from "../sketch/bulge";
 import { findEntityDimensionHit, type EntityDimensionHit } from "../sketch/entityDimensionPick";
 import type { Segment as DimensionLineSegment } from "./dimensionGraphics";
@@ -54,6 +54,14 @@ const EDGE_PICK_TOLERANCE_PX = 8;
 /** 3D面選択(Phase 25b、シェルの開口面選択)の選択済み強調色。3Dエッジ選択と同系色(オレンジ)にして
  * 通常の単一面選択(スケッチ平面化用、HIGHLIGHT_COLOR=黄)と見た目で区別する。 */
 const FACE_SELECT_COLOR = 0xff9800;
+/** 部品移動ツール(Phase 28a)中、ドラッグ可能な部品ボディ全体をホバー時に薄く強調する色(淡い紫)。 */
+const PART_HOVER_COLOR = 0xb39ddb;
+/** ドラッグ中のバウンディングボックスのワイヤーフレームプレビュー色(濃い紫)。 */
+const PART_DRAG_PREVIEW_COLOR = 0x7c4dff;
+/** 部品移動ツールのドキュメント更新スロットル間隔(ms)。プレビュー自体は毎フレーム追従する。 */
+const PART_DRAG_THROTTLE_MS = 150;
+/** 部品移動ツールのグリッドスナップ間隔(mm、既存の1mmスナップと同じ粒度)。 */
+const PART_DRAG_GRID_SPACING = 1;
 
 /** 基準平面(Phase 13)の一辺(mm)。ボディが存在しない空ドキュメント状態で表示する。 */
 const REFERENCE_PLANE_SIZE = 60;
@@ -299,6 +307,30 @@ export interface ThreadPlaceToolCallbacks {
   /** 平面な面がクリックされ、配置位置が確定したときに呼ばれる。 */
   onPick: (ref: ThreadPlaceRef) => void;
   /** Escapeキーまたはcancel呼び出しで(確定前に)中断したときに呼ばれる。 */
+  onCancel: () => void;
+}
+
+/**
+ * 部品移動ツール(Phase 28a)の開始/終了時、およびドラッグの開始/中/終了時に呼ばれるコールバック。
+ * 他のツールと異なり「クリック」ではなく「mousedown〜mouseup」のドラッグ操作で完結する。
+ * CadViewerはドキュメントの正本を持たないため、実際のドキュメント更新(部品のposition書き換え)は
+ * App側の責務とする(delta=ドラッグ開始点からの累積ワールド座標オフセット。基準位置への加算はApp側)。
+ */
+export interface PartDragToolCallbacks {
+  /**
+   * partInstanceフィーチャーが作ったボディの面上でmousedownされ、ドラッグが始まったときに呼ばれる
+   * (対象featureId付き)。OrbitControlsはこの間無効化される。
+   */
+  onDragStart: (featureId: FeatureId) => void;
+  /**
+   * ドラッグ中、150msスロットルで新しい累積オフセットが得られるたびに呼ばれる(プレビュー自体は
+   * 毎フレーム追従するが、実ドキュメント更新はこのコールバックの頻度に合わせる想定)。
+   * 通常ドラッグはXY成分のみ(Z=0)、Shift押下中はZ成分のみ(X=Y=0)になる。
+   */
+  onDragMove: (delta: [number, number, number]) => void;
+  /** マウスアップでドラッグが終了したときに、最終的な累積オフセットで呼ばれる(スロットル無し、必ず呼ばれる)。 */
+  onDragEnd: (delta: [number, number, number]) => void;
+  /** Escapeキーまたはcancel呼び出しでツール自体が終了したときに呼ばれる(ドラッグ中でなくても)。 */
   onCancel: () => void;
 }
 
@@ -977,6 +1009,34 @@ export class CadViewer {
   private threadPlaceActive = false;
   private threadPlaceCallbacks: ThreadPlaceToolCallbacks | null = null;
 
+  /**
+   * 部品移動ツール(Phase 28a)。各ボディ(featureId)を構成する面ID集合(bodyGroups)は
+   * setMesh()のたびに更新し、faceId→featureIdの逆引きMapを再構築する。
+   */
+  private bodyGroups: BodyGroup[] = [];
+  private faceIdToBodyFeatureId = new Map<number, FeatureId>();
+  /** 現在のドキュメントでpartInstanceフィーチャーであるfeatureIdの集合。App側がdoc変更のたびに同期する。 */
+  private partInstanceFeatureIds = new Set<FeatureId>();
+  private partDragToolActive = false;
+  private partDragToolCallbacks: PartDragToolCallbacks | null = null;
+  private partDragToolSnap = true;
+  /** ツール自体はactiveのまま、mousedown〜mouseupの間だけtrueになる(実際にドラッグ中かどうか)。 */
+  private partDragActive = false;
+  private partDragFeatureId: FeatureId | null = null;
+  /** ドラッグ開始時のワールド交点(通常ドラッグの基準面=このZを通るXY平行面、Shift+ドラッグの基準にも使う)。 */
+  private partDragStartWorld: Tuple3 | null = null;
+  /** ドラッグ開始時のスクリーンpx位置(Shift+ドラッグのスクリーン縦移動→Z換算に使う)。 */
+  private partDragStartPx: { x: number; y: number } | null = null;
+  /** 直近に計算した累積オフセット(スロットル判定・onDragEnd確定・cancel時のfinish用)。 */
+  private partDragLastDelta: Tuple3 = [0, 0, 0];
+  private partDragLastEmitAt = 0;
+  /** ドラッグ中のバウンディングボックスのワイヤーフレームプレビュー(ドラッグ開始時の中心位置を基準に、毎フレームdeltaぶん平行移動する)。 */
+  private partDragPreviewMesh: THREE.LineSegments | null = null;
+  private partDragPreviewBaseCenter: THREE.Vector3 | null = null;
+  /** ホバー中(未ドラッグ)、ドラッグ可能な部品ボディ全体を薄く強調するためのmaterialIndex集合。 */
+  private partHoverFeatureId: FeatureId | null = null;
+  private partHoverGroupIndices: number[] = [];
+
   constructor(
     container: HTMLElement,
     onFaceSelect?: (face: FaceInfo | null) => void,
@@ -1089,6 +1149,7 @@ export class CadViewer {
     this.renderer.domElement.addEventListener("dblclick", this.handleSegmentDoubleClick);
     this.renderer.domElement.addEventListener("mousemove", this.handleDrawingMouseMove);
     this.renderer.domElement.addEventListener("mouseleave", this.handleMouseLeave);
+    this.renderer.domElement.addEventListener("mousedown", this.handlePartDragCanvasMouseDown);
     window.addEventListener("keydown", this.handleKeyDown);
 
     this.resizeObserver = new ResizeObserver(() => this.handleResize());
@@ -1148,6 +1209,12 @@ export class CadViewer {
    * 衝突しないよう、入力欄が開いている間はEscapeを入力キャンセルに限定する)。
    */
   private handleKeyDown = (event: KeyboardEvent) => {
+    if (this.partDragToolActive) {
+      if (event.key === "Escape") {
+        this.cancelPartDragTool();
+      }
+      return;
+    }
     if (this.trimActive) {
       if (event.key === "Escape") {
         this.cancelTrimTool();
@@ -1278,6 +1345,9 @@ export class CadViewer {
   }
 
   private handleClick = (event: MouseEvent) => {
+    // 部品移動ツールはmousedown〜mouseupのドラッグで完結する(handlePartDragCanvasMouseDown参照)。
+    // クリック(=通常の面選択)は無視する。
+    if (this.partDragToolActive) return;
     if (this.trimActive) {
       this.handleTrimClick(event);
       return;
@@ -1548,7 +1618,7 @@ export class CadViewer {
     });
   }
 
-  setMesh(data: MeshData, faceInfo: FaceInfo[] = [], edgeInfo: EdgeInfo[] = []) {
+  setMesh(data: MeshData, faceInfo: FaceInfo[] = [], edgeInfo: EdgeInfo[] = [], bodyGroups: BodyGroup[] = []) {
     // ボディの再構築でB-RepエッジID(edgeId)の対応が変わりうるため、3Dエッジ選択の
     // ヒット判定データ・ホバー/選択ハイライトは常にここでリセットする(選択中フィーチャーの
     // 再評価はApp側でツールをキャンセルしてから行う運用のため、実際にアクティブなまま
@@ -1563,6 +1633,16 @@ export class CadViewer {
     // materials自体はこの直後に全面新規生成される(BASE_COLORから開始)ため、色の復元は不要。
     this.selectedFaceIds = [];
     this.hoveredFaceSelectIndex = null;
+    // 部品移動ツール(Phase 28a)のホバー強調も同じ理由でリセットする(トラッキング配列のみ。
+    // materials自体は新規生成されるためBASE_COLORへの復元は不要)。ドラッグ実行中(mousedown〜
+    // mouseup)自体はfaceGroups/materialsに依存しないため継続する(computePartDragDelta参照)。
+    this.partHoverGroupIndices = [];
+    this.partHoverFeatureId = null;
+    this.bodyGroups = bodyGroups;
+    this.faceIdToBodyFeatureId = new Map();
+    for (const group of bodyGroups) {
+      for (const faceId of group.faceIds) this.faceIdToBodyFeatureId.set(faceId, group.featureId);
+    }
 
     if (this.mesh) {
       this.scene.remove(this.mesh);
@@ -1899,6 +1979,7 @@ export class CadViewer {
     this.cancelEdgeSelectTool();
     this.cancelFaceSelectTool();
     this.cancelThreadPlaceTool();
+    this.cancelPartDragTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.drawingActive = true;
@@ -2028,6 +2109,7 @@ export class CadViewer {
     this.cancelEdgeSelectTool();
     this.cancelFaceSelectTool();
     this.cancelThreadPlaceTool();
+    this.cancelPartDragTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.cornerToolActive = true;
@@ -2152,6 +2234,7 @@ export class CadViewer {
     this.cancelEdgeSelectTool();
     this.cancelFaceSelectTool();
     this.cancelThreadPlaceTool();
+    this.cancelPartDragTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.trimActive = true;
@@ -2303,6 +2386,7 @@ export class CadViewer {
     this.cancelEdgeSelectTool();
     this.cancelFaceSelectTool();
     this.cancelThreadPlaceTool();
+    this.cancelPartDragTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.dimensionToolActive = true;
@@ -3174,6 +3258,12 @@ export class CadViewer {
    * 更新し、描画モード外であれば面ホバーハイライトを更新する。
    */
   private handleDrawingMouseMove = (event: MouseEvent) => {
+    if (this.partDragToolActive) {
+      // ドラッグ中はwindow全体のmousemoveリスナー(handlePartDragWindowMouseMove)が処理するため、
+      // ここではホバー強調の更新のみ行う(ドラッグ中は何もしない)。
+      if (!this.partDragActive) this.handlePartDragHoverMouseMove(event);
+      return;
+    }
     if (this.trimActive) {
       this.handleTrimMouseMove(event);
       return;
@@ -3652,6 +3742,7 @@ export class CadViewer {
     this.cancelEdgeSelectTool();
     this.cancelFaceSelectTool();
     this.cancelThreadPlaceTool();
+    this.cancelPartDragTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.constraintToolActive = true;
@@ -3795,6 +3886,7 @@ export class CadViewer {
     this.cancelConstraintTool();
     this.cancelFaceSelectTool();
     this.cancelThreadPlaceTool();
+    this.cancelPartDragTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.edgeSelectActive = true;
@@ -3971,6 +4063,7 @@ export class CadViewer {
     this.cancelConstraintTool();
     this.cancelEdgeSelectTool();
     this.cancelThreadPlaceTool();
+    this.cancelPartDragTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.faceSelectActive = true;
@@ -4086,6 +4179,7 @@ export class CadViewer {
     this.cancelConstraintTool();
     this.cancelEdgeSelectTool();
     this.cancelFaceSelectTool();
+    this.cancelPartDragTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.threadPlaceActive = true;
@@ -4163,6 +4257,316 @@ export class CadViewer {
     callbacks?.onPick({ faceId: info.faceId, center: info.center, normal: info.normal, position });
   }
 
+  // ---- 部品移動ツール(Phase 28a) ----
+  // 既存のfaceGroups/materials(setMesh()で構築済み)をfaceIdToBodyFeatureId経由の逆引きに使う点は
+  // 面選択ツールと同様。他のツールと違い、確定操作は「クリック」ではなく「mousedown〜mouseup」の
+  // ドラッグで完結する(handlePartDragCanvasMouseDown/handlePartDragWindowMouseMove/
+  // handlePartDragWindowMouseUpの3メソッドで状態機械を構成する)。
+
+  /**
+   * 部品移動ツールを開始する。以後、partInstanceフィーチャーが作ったボディの面上でのmousedown+
+   * ドラッグで、その部品の位置を動かせるようになる(通常ドラッグ=ワールドXY平面に平行な移動、
+   * Shift押下中=Z方向の移動)。ホバー中はドラッグ対象の部品ボディ全体を薄く強調する。部品以外の
+   * ボディはドラッグ対象外(mousedownしても何も起きない)。snapは1mmグリッドスナップのON/OFF
+   * (既存の「スナップ」トグルと同じ値を渡す想定)。Escapeまたはcancel呼び出しで終了する。
+   */
+  startPartDragTool(snap: boolean, callbacks: PartDragToolCallbacks) {
+    this.cancelPartDragTool();
+    this.cancelPolygonDrawing();
+    this.cancelTrimTool();
+    this.cancelCornerTool();
+    this.cancelDimensionTool();
+    this.cancelConstraintTool();
+    this.cancelEdgeSelectTool();
+    this.cancelFaceSelectTool();
+    this.cancelThreadPlaceTool();
+    this.clearSelection();
+    this.setHoverGroup(null);
+    this.partDragToolActive = true;
+    this.partDragToolCallbacks = callbacks;
+    this.partDragToolSnap = snap;
+  }
+
+  isPartDragToolActive(): boolean {
+    return this.partDragToolActive;
+  }
+
+  /** ドラッグ対象判定に使うpartInstanceフィーチャーのfeatureId集合を更新する(App側がdoc変更のたびに呼ぶ想定)。 */
+  setPartInstanceFeatureIds(ids: Set<FeatureId>) {
+    this.partInstanceFeatureIds = ids;
+  }
+
+  /**
+   * 部品移動ツールを終了する。ドラッグ実行中に呼ばれた場合は、現在位置で確定してから終了する
+   * (孤立したwindowリスナー・無効化されたOrbitControlsを残さないため)。非アクティブなら何もしない。
+   */
+  cancelPartDragTool() {
+    if (!this.partDragToolActive) return;
+    if (this.partDragActive) {
+      this.finishPartDrag();
+    }
+    const callbacks = this.partDragToolCallbacks;
+    this.partDragToolActive = false;
+    this.partDragToolCallbacks = null;
+    this.clearPartHoverHighlight();
+    this.renderer.domElement.style.cursor = "";
+    callbacks?.onCancel();
+  }
+
+  /**
+   * canvasのmousedownハンドラ(常時登録、部品移動ツールが非アクティブ・既にドラッグ中なら何もしない)。
+   * クリック位置が「partInstanceフィーチャーが作ったボディ」の面上であればドラッグを開始する。
+   */
+  private handlePartDragCanvasMouseDown = (event: MouseEvent) => {
+    if (!this.partDragToolActive || this.partDragActive || !this.mesh) return;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const pointer = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(pointer, this.camera);
+    const intersections = this.raycaster.intersectObject(this.mesh, false);
+    if (intersections.length === 0) return;
+    const triangleIndex = intersections[0].faceIndex;
+    if (triangleIndex == null) return;
+    const triangleOffset = triangleIndex * 3;
+    const groupIndex = this.faceGroups.findIndex((g) => triangleOffset >= g.start && triangleOffset < g.start + g.count);
+    if (groupIndex === -1) return;
+    const faceId = this.faceGroups[groupIndex].faceId;
+    const featureId = this.faceIdToBodyFeatureId.get(faceId);
+    // 部品(partInstance)以外のボディはドラッグ対象外。
+    if (!featureId || !this.partInstanceFeatureIds.has(featureId)) return;
+
+    const point = intersections[0].point;
+    const startWorld: Tuple3 = [point.x, point.y, point.z];
+
+    this.partDragActive = true;
+    this.partDragFeatureId = featureId;
+    this.partDragStartWorld = startWorld;
+    this.partDragStartPx = { x: event.clientX, y: event.clientY };
+    this.partDragLastDelta = [0, 0, 0];
+    this.partDragLastEmitAt = 0;
+    this.controls.enabled = false;
+    this.clearPartHoverHighlight();
+    this.buildPartDragPreview(featureId);
+    this.renderer.domElement.style.cursor = "grabbing";
+    window.addEventListener("mousemove", this.handlePartDragWindowMouseMove);
+    window.addEventListener("mouseup", this.handlePartDragWindowMouseUp);
+    this.partDragToolCallbacks?.onDragStart(featureId);
+  };
+
+  /**
+   * window全体で追跡するドラッグ中のmousemove(canvas外へマウスが出ても追従を続けるため)。
+   * プレビューは毎回更新するが、実ドキュメント更新の通知(onDragMove)はPART_DRAG_THROTTLE_MSで間引く。
+   */
+  private handlePartDragWindowMouseMove = (event: MouseEvent) => {
+    if (!this.partDragActive) return;
+    const delta = this.computePartDragDelta(event);
+    this.partDragLastDelta = delta;
+    this.updatePartDragPreview(delta);
+    const now = performance.now();
+    if (now - this.partDragLastEmitAt >= PART_DRAG_THROTTLE_MS) {
+      this.partDragLastEmitAt = now;
+      this.partDragToolCallbacks?.onDragMove(delta);
+    }
+  };
+
+  private handlePartDragWindowMouseUp = (event: MouseEvent) => {
+    if (!this.partDragActive) return;
+    this.finishPartDrag(this.computePartDragDelta(event));
+  };
+
+  /**
+   * ドラッグ開始点からの累積ワールド座標オフセットを計算する。通常ドラッグは、ドラッグ開始点を
+   * 通るワールドXY平行面へのレイキャスト差分(Z=0)。Shift押下中は、ドラッグ開始時のスクリーン
+   * 位置からの縦方向pxオフセットをmmへ換算したZ移動(X=Y=0、上へ動かすと+Z)。
+   */
+  private computePartDragDelta(event: MouseEvent): Tuple3 {
+    if (!this.partDragStartWorld || !this.partDragStartPx) return [0, 0, 0];
+    const start = this.partDragStartWorld;
+
+    if (event.shiftKey) {
+      const dyPx = event.clientY - this.partDragStartPx.y;
+      const rawDz = -this.pxToMm(dyPx, start);
+      const dz = this.partDragToolSnap ? Math.round(rawDz / PART_DRAG_GRID_SPACING) * PART_DRAG_GRID_SPACING : rawDz;
+      return [0, 0, dz];
+    }
+
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const pointer = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(pointer, this.camera);
+    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(
+      new THREE.Vector3(0, 0, 1),
+      new THREE.Vector3(start[0], start[1], start[2]),
+    );
+    const hit = new THREE.Vector3();
+    if (!this.raycaster.ray.intersectPlane(plane, hit)) return this.partDragLastDelta;
+    let dx = hit.x - start[0];
+    let dy = hit.y - start[1];
+    if (this.partDragToolSnap) {
+      dx = Math.round(dx / PART_DRAG_GRID_SPACING) * PART_DRAG_GRID_SPACING;
+      dy = Math.round(dy / PART_DRAG_GRID_SPACING) * PART_DRAG_GRID_SPACING;
+    }
+    return [dx, dy, 0];
+  }
+
+  /**
+   * ドラッグを終了する(mouseup、またはcancelPartDragTool()呼び出し時にドラッグ実行中だった場合)。
+   * window リスナー除去・OrbitControls再有効化・プレビュー破棄を行い、featureIdがあればonDragEndを呼ぶ。
+   */
+  private finishPartDrag(delta: Tuple3 = this.partDragLastDelta) {
+    window.removeEventListener("mousemove", this.handlePartDragWindowMouseMove);
+    window.removeEventListener("mouseup", this.handlePartDragWindowMouseUp);
+    this.controls.enabled = true;
+    this.clearPartDragPreview();
+    this.renderer.domElement.style.cursor = this.partDragToolActive ? "grab" : "";
+    this.partDragActive = false;
+    const featureId = this.partDragFeatureId;
+    this.partDragFeatureId = null;
+    this.partDragStartWorld = null;
+    this.partDragStartPx = null;
+    if (featureId) {
+      this.partDragToolCallbacks?.onDragEnd(delta);
+    }
+  }
+
+  /** ドラッグ対象(featureId)の現在のメッシュ頂点群から、ワールド座標のバウンディングボックスを計算する。 */
+  private computeBodyBoundingBox(featureId: FeatureId): THREE.Box3 | null {
+    if (!this.mesh) return null;
+    const geometry = this.mesh.geometry;
+    const position = geometry.getAttribute("position") as THREE.BufferAttribute | undefined;
+    const index = geometry.getIndex();
+    if (!position || !index) return null;
+    const faceIdSets = this.bodyGroups.filter((g) => g.featureId === featureId).flatMap((g) => g.faceIds);
+    if (faceIdSets.length === 0) return null;
+    const faceIdSet = new Set(faceIdSets);
+    const box = new THREE.Box3();
+    let any = false;
+    for (const fg of this.faceGroups) {
+      if (!faceIdSet.has(fg.faceId)) continue;
+      for (let i = fg.start; i < fg.start + fg.count; i += 1) {
+        const vi = index.getX(i);
+        box.expandByPoint(new THREE.Vector3(position.getX(vi), position.getY(vi), position.getZ(vi)));
+        any = true;
+      }
+    }
+    return any ? box : null;
+  }
+
+  /** ドラッグ開始時に、対象部品のバウンディングボックスのワイヤーフレームプレビューを構築してシーンに追加する。 */
+  private buildPartDragPreview(featureId: FeatureId) {
+    const box = this.computeBodyBoundingBox(featureId);
+    if (!box) return;
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    const center = new THREE.Vector3();
+    box.getCenter(center);
+    const boxGeometry = new THREE.BoxGeometry(Math.max(size.x, 1e-3), Math.max(size.y, 1e-3), Math.max(size.z, 1e-3));
+    const edges = new THREE.EdgesGeometry(boxGeometry);
+    boxGeometry.dispose();
+    const material = new THREE.LineBasicMaterial({ color: PART_DRAG_PREVIEW_COLOR, depthTest: false });
+    const previewMesh = new THREE.LineSegments(edges, material);
+    previewMesh.renderOrder = DRAWING_FEEDBACK_RENDER_ORDER;
+    previewMesh.position.copy(center);
+    this.scene.add(previewMesh);
+    this.partDragPreviewMesh = previewMesh;
+    this.partDragPreviewBaseCenter = center;
+  }
+
+  /** ドラッグ中のプレビューの位置を、開始時の中心+deltaへ更新する。 */
+  private updatePartDragPreview(delta: Tuple3) {
+    if (!this.partDragPreviewMesh || !this.partDragPreviewBaseCenter) return;
+    this.partDragPreviewMesh.position.set(
+      this.partDragPreviewBaseCenter.x + delta[0],
+      this.partDragPreviewBaseCenter.y + delta[1],
+      this.partDragPreviewBaseCenter.z + delta[2],
+    );
+  }
+
+  /** ドラッグ終了時、プレビューのジオメトリ・マテリアルを破棄してシーンから取り除く。 */
+  private clearPartDragPreview() {
+    if (this.partDragPreviewMesh) {
+      this.scene.remove(this.partDragPreviewMesh);
+      this.partDragPreviewMesh.geometry.dispose();
+      (this.partDragPreviewMesh.material as THREE.Material).dispose();
+      this.partDragPreviewMesh = null;
+    }
+    this.partDragPreviewBaseCenter = null;
+  }
+
+  /**
+   * 部品移動ツールが非ドラッグ中のマウス移動: partInstanceが作ったボディ上にカーソルがあれば
+   * そのボディ全体を薄く強調し、カーソルをgrabにする。それ以外(部品以外のボディ・空クリック)は
+   * 強調を解除する。
+   */
+  private handlePartDragHoverMouseMove(event: MouseEvent) {
+    if (!this.mesh) {
+      this.setPartHoverHighlight(null);
+      return;
+    }
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const pointer = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(pointer, this.camera);
+    const intersections = this.raycaster.intersectObject(this.mesh, false);
+    if (intersections.length === 0) {
+      this.setPartHoverHighlight(null);
+      this.renderer.domElement.style.cursor = "";
+      return;
+    }
+    const triangleIndex = intersections[0].faceIndex;
+    if (triangleIndex == null) {
+      this.setPartHoverHighlight(null);
+      this.renderer.domElement.style.cursor = "";
+      return;
+    }
+    const triangleOffset = triangleIndex * 3;
+    const groupIndex = this.faceGroups.findIndex((g) => triangleOffset >= g.start && triangleOffset < g.start + g.count);
+    if (groupIndex === -1) {
+      this.setPartHoverHighlight(null);
+      this.renderer.domElement.style.cursor = "";
+      return;
+    }
+    const faceId = this.faceGroups[groupIndex].faceId;
+    const featureId = this.faceIdToBodyFeatureId.get(faceId);
+    if (!featureId || !this.partInstanceFeatureIds.has(featureId)) {
+      this.setPartHoverHighlight(null);
+      this.renderer.domElement.style.cursor = "";
+      return;
+    }
+    this.setPartHoverHighlight(featureId);
+    this.renderer.domElement.style.cursor = "grab";
+  }
+
+  /** ドラッグ可能な部品ボディ(featureId)全体を薄く強調する(featureId=nullで強調解除)。 */
+  private setPartHoverHighlight(featureId: FeatureId | null) {
+    if (this.partHoverFeatureId === featureId) return;
+    this.clearPartHoverHighlight();
+    if (featureId === null) return;
+    this.partHoverFeatureId = featureId;
+    const faceIdSets = this.bodyGroups.filter((g) => g.featureId === featureId).flatMap((g) => g.faceIds);
+    const faceIdSet = new Set(faceIdSets);
+    this.faceGroups.forEach((fg, idx) => {
+      if (!faceIdSet.has(fg.faceId)) return;
+      this.partHoverGroupIndices.push(idx);
+      this.materials[idx]?.color.setHex(PART_HOVER_COLOR);
+    });
+  }
+
+  /** 部品ホバー強調を解除し、対象面をBASE_COLORへ戻す。 */
+  private clearPartHoverHighlight() {
+    for (const idx of this.partHoverGroupIndices) {
+      this.materials[idx]?.color.setHex(BASE_COLOR);
+    }
+    this.partHoverGroupIndices = [];
+    this.partHoverFeatureId = null;
+  }
+
   /**
    * 現在のカメラでワールド座標をcanvas内ピクセル座標(左上が原点)に投影する。
    * E2Eの`window.__cadViewerDebug.projectPoint`と、描画モードの始点近傍判定の両方から使う。
@@ -4186,7 +4590,11 @@ export class CadViewer {
     this.renderer.domElement.removeEventListener("dblclick", this.handleSegmentDoubleClick);
     this.renderer.domElement.removeEventListener("mousemove", this.handleDrawingMouseMove);
     this.renderer.domElement.removeEventListener("mouseleave", this.handleMouseLeave);
+    this.renderer.domElement.removeEventListener("mousedown", this.handlePartDragCanvasMouseDown);
+    window.removeEventListener("mousemove", this.handlePartDragWindowMouseMove);
+    window.removeEventListener("mouseup", this.handlePartDragWindowMouseUp);
     window.removeEventListener("keydown", this.handleKeyDown);
+    this.clearPartDragPreview();
     this.frameCallbacks.clear();
     this.controls.dispose();
     if (this.mesh) {
