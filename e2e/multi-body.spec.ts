@@ -80,12 +80,14 @@ test("離れた位置に2つ目のNew Bodyを作り、その面をカットし�
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toBe("model.stl");
 
+  // ファイル内容がバイナリSTL形式であることを検証する(Phase 29a、full-flow.spec.tsと同じ判定方法)。
   const stlPath = await download.path();
   expect(stlPath).toBeTruthy();
-  const content = readFileSync(stlPath as string, "utf-8");
-  expect(content.slice(0, 5).toLowerCase()).toBe("solid");
-  expect(content).toMatch(/facet normal/);
-  expect(content.trim().toLowerCase()).toMatch(/endsolid/);
+  const content = readFileSync(stlPath as string);
+  expect(content.byteLength).toBeGreaterThan(84);
+  const triangleCount = content.readUInt32LE(80);
+  expect(triangleCount).toBeGreaterThan(0);
+  expect(content.byteLength).toBe(84 + triangleCount * 50);
 
   await expect(page.getByTestId("export-error")).toHaveCount(0);
 

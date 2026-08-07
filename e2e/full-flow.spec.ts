@@ -31,9 +31,9 @@ test("フルフロー: スケッチ→押し出し→面選択→面上スケッ
   await expect(page.getByTestId("eval-error")).toHaveCount(0);
   await expect(page.getByTestId("status-text")).toContainText("状態: ready");
 
-  // 8. STLダウンロード。ファイル内容がSTL形式であることを検証する
-  // (replicadのblobSTLはデフォルトでASCII STLを出力するため、"solid"ヘッダと
-  //  "facet normal" / "endsolid" キーワードの有無で判定する)。
+  // 8. STLダウンロード。ファイル内容がバイナリSTL形式であることを検証する(Phase 29a、
+  // {binary:true}に変更。「80バイトヘッダ + uint32[LE]三角形数 + 50バイト/三角形」の
+  // 固定長フォーマットになっているかを、ファイルサイズの妥当性で判定する)。
   const downloadPromise = page.waitForEvent("download");
   await page.getByTestId("btn-download-stl").click();
   const download = await downloadPromise;
@@ -41,10 +41,11 @@ test("フルフロー: スケッチ→押し出し→面選択→面上スケッ
 
   const stlPath = await download.path();
   expect(stlPath).toBeTruthy();
-  const content = readFileSync(stlPath as string, "utf-8");
-  expect(content.slice(0, 5).toLowerCase()).toBe("solid");
-  expect(content).toMatch(/facet normal/);
-  expect(content.trim().toLowerCase()).toMatch(/endsolid/);
+  const content = readFileSync(stlPath as string);
+  expect(content.byteLength).toBeGreaterThan(84);
+  const triangleCount = content.readUInt32LE(80);
+  expect(triangleCount).toBeGreaterThan(0);
+  expect(content.byteLength).toBe(84 + triangleCount * 50);
 
   await expect(page.getByTestId("export-error")).toHaveCount(0);
 

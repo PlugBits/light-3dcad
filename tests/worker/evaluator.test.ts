@@ -2131,6 +2131,56 @@ describe("evaluateDocument (WASM統合): ねじ(Phase 25c)", () => {
     expect(result.featureId).toBe(feature.id);
     expect(result.message.length).toBeGreaterThan(0);
   });
+
+  it("同一プリセット・長さの雄ねじは2回目以降の評価でキャッシュが再利用され、速度が大幅に短縮される(速度計測ログ、Phase 29a)", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: boxDoc } = buildBoxDoc(20);
+    const boxResult = evaluateDocument(boxDoc);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const topFace = findTopFace(boxResult.shape);
+    boxResult.shape.delete();
+
+    // M6×15mm(nTurns=15、断面数16/回転 -> 200件超のloft断面)は、キャッシュの効果が
+    // 測定しやすい程度に重い(THREAD_SECTIONS_PER_TURN、src/worker/evaluator.ts参照)。
+    const { doc } = addThreadFeature(boxDoc, {
+      name: "M6ねじ1",
+      hand: "male",
+      preset: "M6",
+      length: 15,
+      face: topFace,
+      position: [0, 0],
+      direction: 1,
+    });
+
+    const t0 = performance.now();
+    const first = evaluateDocument(doc);
+    const t1 = performance.now();
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const volume1 = measureVolume(first.shape as Shape3D);
+    (first.shape as Shape3D).delete();
+
+    // ドキュメント自体は変えず、もう一度評価する(Workerメモリキャッシュ[本テストでは
+    // モジュールスコープを共有する同一プロセス内]により、雄ねじソリッド生成[loft+fuse]の
+    // 再計算は発生しないはず)。
+    const t2 = performance.now();
+    const second = evaluateDocument(doc);
+    const t3 = performance.now();
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    const volume2 = measureVolume(second.shape as Shape3D);
+    (second.shape as Shape3D).delete();
+
+    // eslint-disable-next-line no-console
+    console.log(
+      `[thread cache] 1回目(未キャッシュ): ${(t1 - t0).toFixed(1)}ms, ` + `2回目(キャッシュ済みのはず): ${(t3 - t2).toFixed(1)}ms`,
+    );
+
+    expect(volume2).toBeCloseTo(volume1, 6);
+    // 厳密な倍率はCI環境の負荷でばらつくため、緩めに「2回目が1回目より明らかに短い」ことのみ確認する。
+    expect(t3 - t2).toBeLessThan((t1 - t0) * 0.7);
+  }, 90000);
 });
 
 describe("evaluateDocument (WASM統合): 回転体(Revolve、Phase 25b)", () => {
@@ -2642,6 +2692,49 @@ describe("evaluateDocument (WASM統合): 複数ボディ(Phase 27a)", () => {
       expect(stepBlob.size).toBeGreaterThan(0);
       const stepText = await stepBlob.text();
       expect(stepText.startsWith("ISO-10303-21;")).toBe(true);
+    } finally {
+      shape.delete();
+    }
+  });
+});
+
+describe("evaluateDocument (WASM統合): STLエクスポート(バイナリ形式、Phase 29a)", () => {
+  it("blobSTL({binary:true})は80バイトヘッダ+uint32三角形数+50バイト/三角形のバイナリ形式になる", async (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const rect = createRectangleEntity({ width: 20, height: 20 });
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+    });
+    const { doc } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const shape = result.shape as Shape3D;
+    try {
+      const binaryBlob = shape.blobSTL({ tolerance: 0.1, angularTolerance: 30, binary: true });
+      const buffer = new Uint8Array(await binaryBlob.arrayBuffer());
+      // バイナリSTLは「80バイトヘッダ + uint32(リトルエンディアン)三角形数 + 50バイト/三角形」の
+      // 固定長フォーマット(ASCII STLの"solid"ヘッダ・"facet normal"キーワードは含まれない)。
+      expect(buffer.byteLength).toBeGreaterThan(84);
+      const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+      const triangleCount = view.getUint32(80, true);
+      expect(triangleCount).toBeGreaterThan(0);
+      expect(buffer.byteLength).toBe(84 + triangleCount * 50);
+
+      // 同じ形状のASCII STL(既定)と比べ、バイナリ形式のほうがファイルサイズが明らかに小さい
+      // (ASCII STLは1三角形あたり数百バイトのテキストになるため)。
+      const asciiBlob = shape.blobSTL({ tolerance: 0.1, angularTolerance: 30 });
+      expect(buffer.byteLength).toBeLessThan(asciiBlob.size);
     } finally {
       shape.delete();
     }
