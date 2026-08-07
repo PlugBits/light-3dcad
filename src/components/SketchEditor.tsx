@@ -20,6 +20,7 @@ import type { FeatureId, PolygonCorner, SketchEntity, SketchFeature, SketchSegme
 import { isEntityFixed, removeConstraint, setEntityFixed } from "../sketch/constraintDimensions";
 import { CONSTRAINT_KIND_LABELS, describeConstraint } from "../sketch/constraintLabels";
 import { formatMm } from "../sketch/format";
+import type { SketchDiagnostics } from "../sketch/solver";
 import { updateDocumentWithConflictRollback } from "../state/constraintUpdate";
 import { useCadStore } from "../state/store";
 
@@ -78,7 +79,17 @@ function NumberField({
  * SketchEditorの一時トースト通知先(削除時の「関連する拘束N件も削除しました」)。App.tsxの
  * showTransientMessageを渡す想定(省略時は何もしない、テスト・単体利用時の後方互換)。
  */
-export function SketchEditor({ sketch, onNotice }: { sketch: SketchFeature; onNotice?: (message: string) => void }) {
+export function SketchEditor({
+  sketch,
+  onNotice,
+  diagnostics,
+}: {
+  sketch: SketchFeature;
+  onNotice?: (message: string) => void;
+  /** 拘束診断(自由度[dof]・矛盾/冗長拘束id、拘束診断UI、Phase 35b-2)。App.tsxがsolve後の状態から
+   * 都度計算して渡す(GCS未初期化・図形が無い等はnull=定義状態バッジ非表示)。 */
+  diagnostics?: SketchDiagnostics | null;
+}) {
   const updateDocument = useCadStore((s) => s.updateDocument);
   // ビューア上のスケッチ線直接クリックで選択されたentity/segmentのid(Phase 31b、未選択はnull)。
   // 該当エンティティ/セグメント欄への自動スクロール&一時ハイライトに使う(ビューア側の3D強調は
@@ -200,9 +211,12 @@ export function SketchEditor({ sketch, onNotice }: { sketch: SketchFeature; onNo
     updateDocument((doc) => updateSketchEntity(doc, sketch.id, entityId, { [field]: next }));
   }
 
+  const hasGeometry = (sketch.segments?.length ?? 0) > 0 || sketch.entities.length > 0;
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <h3 style={{ margin: 0, fontSize: 14 }}>スケッチ編集</h3>
+      {diagnostics && hasGeometry && <DefinitionStateBadge diagnostics={diagnostics} />}
       <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
         名前
         <input type="text" value={sketch.name} onChange={(e) => handleRename(e.target.value)} />
@@ -508,8 +522,40 @@ export function SketchEditor({ sketch, onNotice }: { sketch: SketchFeature; onNo
         )}
       </div>
 
-      <ConstraintListPanel sketch={sketch} />
+      <ConstraintListPanel sketch={sketch} diagnostics={diagnostics} />
     </div>
+  );
+}
+
+/**
+ * スケッチの定義状態バッジ(拘束診断UI、Phase 35b-2)。「完全定義」(dof=0、濃緑)/
+ * 「未定義 (自由度N)」(青)/「矛盾あり」(赤)の3状態をSketchEditorパネル上部に表示する。
+ * diagnostics.conflicting優先(矛盾があればdofに関わらず矛盾扱い)、次にdof===0で完全定義、
+ * それ以外は未定義。
+ */
+function DefinitionStateBadge({ diagnostics }: { diagnostics: SketchDiagnostics }) {
+  const state: { label: string; bg: string; fg: string; testId: string } =
+    diagnostics.conflicting.length > 0
+      ? { label: "矛盾あり", bg: "#4d1f1f", fg: "#ff8a80", testId: "sketch-definition-badge-conflicting" }
+      : diagnostics.dof === 0
+        ? { label: "完全定義", bg: "#1b3a26", fg: "#69f0ae", testId: "sketch-definition-badge-fully-defined" }
+        : { label: `未定義 (自由度${diagnostics.dof})`, bg: "#1a2a3d", fg: "#82b1ff", testId: "sketch-definition-badge-under-defined" };
+  return (
+    <span
+      data-testid="sketch-definition-badge"
+      title={`このスケッチの拘束診断: 自由度=${diagnostics.dof}、矛盾拘束=${diagnostics.conflicting.length}件、冗長拘束=${diagnostics.redundant.length}件`}
+      style={{
+        alignSelf: "flex-start",
+        fontSize: 11,
+        fontWeight: 600,
+        padding: "3px 8px",
+        borderRadius: 10,
+        background: state.bg,
+        color: state.fg,
+      }}
+    >
+      <span data-testid={state.testId}>{state.label}</span>
+    </span>
   );
 }
 
@@ -528,10 +574,14 @@ function segmentRowLabel(seg: SketchSegment, index: number): string {
  * 拘束一覧パネル(Phase 20b)。種類・対象・値の簡易表示+削除ボタン。値なし拘束(coincident/
  * horizontal/vertical/fix)も表示・削除できる。削除後の再ソルブ・再評価はstore.tsのupdateDocument
  * 経由で自動的に行われる(削除は拘束を緩めるだけなので矛盾を新たに生むことはなく、巻き戻しは不要)。
+ * diagnostics(拘束診断UI、Phase 35b-2)を渡すと、矛盾拘束の行を赤・冗長拘束の行を黄に色分けし、
+ * ツールチップで種別を示す(両方に該当する場合は矛盾を優先表示)。
  */
-function ConstraintListPanel({ sketch }: { sketch: SketchFeature }) {
+function ConstraintListPanel({ sketch, diagnostics }: { sketch: SketchFeature; diagnostics?: SketchDiagnostics | null }) {
   const updateDocument = useCadStore((s) => s.updateDocument);
   const constraints = sketch.constraints ?? [];
+  const conflictingIds = new Set(diagnostics?.conflicting ?? []);
+  const redundantIds = new Set(diagnostics?.redundant ?? []);
 
   function handleRemove(constraintId: string) {
     updateDocument((doc) => setSketchConstraints(doc, sketch.id, removeConstraint(constraints, constraintId)));
@@ -554,36 +604,43 @@ function ConstraintListPanel({ sketch }: { sketch: SketchFeature }) {
         </p>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          {constraints.map((constraint, index) => (
-            <div
-              key={constraint.id}
-              data-testid={`constraint-${index}`}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 6,
-                fontSize: 11,
-                border: "1px solid #333",
-                borderRadius: 4,
-                padding: "4px 6px",
-              }}
-            >
-              <span>
-                <strong>{CONSTRAINT_KIND_LABELS[constraint.kind]}</strong>{" "}
-                <span style={{ opacity: 0.8 }}>{describeConstraint(sketch.segments, sketch.entities, constraint)}</span>
-              </span>
-              <button
-                type="button"
-                data-testid={`constraint-${index}-delete`}
-                onClick={() => handleRemove(constraint.id)}
-                title="削除"
-                style={{ fontSize: 10 }}
+          {constraints.map((constraint, index) => {
+            const isConflicting = conflictingIds.has(constraint.id);
+            const isRedundant = !isConflicting && redundantIds.has(constraint.id);
+            const rowTitle = isConflicting ? "他の拘束と矛盾しています" : isRedundant ? "他の拘束と重複しています(冗長)" : undefined;
+            return (
+              <div
+                key={constraint.id}
+                data-testid={`constraint-${index}`}
+                title={rowTitle}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 6,
+                  fontSize: 11,
+                  border: isConflicting ? "1px solid #c62828" : isRedundant ? "1px solid #f9a825" : "1px solid #333",
+                  borderRadius: 4,
+                  padding: "4px 6px",
+                  background: isConflicting ? "rgba(198, 40, 40, 0.2)" : isRedundant ? "rgba(249, 168, 37, 0.15)" : undefined,
+                }}
               >
-                削除
-              </button>
-            </div>
-          ))}
+                <span>
+                  <strong>{CONSTRAINT_KIND_LABELS[constraint.kind]}</strong>{" "}
+                  <span style={{ opacity: 0.8 }}>{describeConstraint(sketch.segments, sketch.entities, constraint)}</span>
+                </span>
+                <button
+                  type="button"
+                  data-testid={`constraint-${index}-delete`}
+                  onClick={() => handleRemove(constraint.id)}
+                  title="削除"
+                  style={{ fontSize: 10 }}
+                >
+                  削除
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

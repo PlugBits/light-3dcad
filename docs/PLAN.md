@@ -884,3 +884,32 @@ primitive/constraintへ変換し、`solveSketch()`(`src/sketch/solver.ts`)の内
 (Phase 35b-2): `gcsAdapter.ts`の`getSketchDiagnostics()`(dof・conflicting/redundant拘束id取得)は
 実装済みだがUIに未配線。拘束一覧パネルへのDOF表示・矛盾/冗長拘束のハイライトの検討に加え、
 上記の既存不具合4件(ソルバ移行と無関係、Phase 34以前から存在)の切り分け・修正も申し送る。
+
+## Phase 35b-2: E2E失敗4件の根本修正+拘束診断UI
+
+前フェーズの申し送り4件を個別に再現・特定し、いずれも実際に修正した(3件は`git stash`でPhase 34の
+コミットに戻しても同じ場所・理由で再現することを自分で確認済みでソルバ移行と無関係の既存不具合、
+1件はGCS移行由来の新規リグレッション)。①ドラッグ編集(`addDragConstraints`)のtemporary
+p2p_distance(=0)拘束が、目標点=対象点の特異点(Euclid距離の勾配が0/0)でPlaneGCSのDogLegを
+NaNにする不具合(GCS移行由来)を発見し、temporary拘束をcoordinate_x/coordinate_yの2本(線形、
+特異点なし)に置き換えて解消した(sketch-drag④長さ拘束付き本体ドラッグのNaN化を修正)。
+②原点と線分端点が画面上で重なる場合、拘束ツールの2クリック目が常に優先度最上位の原点自身に
+ヒットして選択が完了しない既存バグ(Phase 31b由来)を、2クリック目はpendingと同じ対象を除外して
+次点へフォールスルーする方式で修正した(sketch-drag②)。③複数ボディが離れた位置にあるシーンで
+ズームアウトすると、押し出し量の薄いボディの面がスクリーン距離的に元のスケッチ線と近接し、面ピックより
+スケッチ線直接選択(Phase 31b)が常に優先されてしまう既存バグを、スケッチ平面上の交点よりボディの面が
+カメラに近ければ面を優先する深度判定(`isSketchOverlayOccludedByMesh`)で修正した(multi-body)。
+④円↔原点のY距離拘束(`circle-distance-origin`)にaxis(X/Y距離)指定が存在しなかった機能欠落
+(既存不具合)を、`distanceEntityOrigin`拘束にaxis/signedを追加し`distancePointOrigin`と同じ
+difference拘束方式で実装して埋めた(sketch-drag⑤)。Vitest468件(既存回帰なし)、E2E38件
+(sketch-drag④の4件全て含む)をBashで同期実行し全通過を確認した。
+
+拘束診断UI: `solver.ts`に`getSketchDiagnostics()`を公開し(`gcsAdapter`未初期化時はnull)、
+App.tsxが選択中スケッチのsegments/constraints/entitiesから毎編集で再計算してSketchEditor
+(定義状態バッジ: 完全定義=濃緑/未定義(自由度N)=青/矛盾あり=赤、拘束一覧の矛盾=赤・冗長=黄色背景+
+ツールチップ)とCadViewer(選択中スケッチ線の配色をSolidWorks流に完全定義=黒っぽく/未定義=青系/
+矛盾=赤へ切替、要素単位でなくスケッチ全体単位)へ渡す。実装中、`getSketchDiagnostics()`が
+PlaneGCSの`get_gcs_conflicting_constraints()`だけに頼ると純粋な距離的矛盾(fixEntity+
+distanceEntityEntityの直接編集による矛盾)を見逃すバグを実機確認し、`solveSketchGcs()`と同じ
+残差再計算による二重チェックを追加して解消した。ブラウザ実機で未定義→完全定義→矛盾の3状態の
+バッジ・拘束一覧の色分け・ドラッグ後のバッジ即時更新を確認した。
