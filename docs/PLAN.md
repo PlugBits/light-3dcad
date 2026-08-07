@@ -913,3 +913,31 @@ PlaneGCSの`get_gcs_conflicting_constraints()`だけに頼ると純粋な距離�
 distanceEntityEntityの直接編集による矛盾)を見逃すバグを実機確認し、`solveSketchGcs()`と同じ
 残差再計算による二重チェックを追加して解消した。ブラウザ実機で未定義→完全定義→矛盾の3状態の
 バッジ・拘束一覧の色分け・ドラッグ後のバッジ即時更新を確認した。
+
+## Phase 35c: 旧ソルバ(自前LM法)の撤去
+
+Phase 35b-1/35b-2で維持していたフォールバック用の旧ソルバ(`src/sketch/solver.ts`の自前
+Levenberg-Marquardt実装、`solveSketchLegacy`とそのヤコビアン・減衰・初期値リトライ・
+side-lockヒューリスティック等の内部関数一式、約1000行)を削除し、`solveSketch()`は常に
+PlaneGCS(`gcsAdapter.ts`)経由で解くようにした。`src/assembly/mateSolver.ts`(3D合致ソルバ、
+別実装)が再利用する`solveLinearSystem()`のみ`solver.ts`に残した。GCS初期化未完了ウィンドウは
+「黙って未解決の形状を返す」旧ソルバ流のフォールバックではなく、`solveDocumentSketchesAsync()`が
+初期化Promise(`ensureGcsInitialized()`)の完了を待ってから解く方式にした。呼び出し元
+`src/state/store.ts`の`updateDocument()`/`updateDocumentDuringDrag()`はこれに伴い戻り値が
+`Promise<void>`になった(GCS初期化済みなら実質マイクロタスク1回分の遅延で解決し、83箇所ある
+呼び出し元の大半はfire-and-forgetのままで問題ない。結果を見て追加のロールバックを行う
+`src/state/constraintUpdate.ts`の`updateDocumentWithConflictRollback()`と`store.ts`内の
+`setRollbackIndex()`のみ、await/ローカル計算に修正して同期時の判定順序を保った)。同期呼び出しが
+残る`CadViewer.ts`のドラッグ処理(毎フレーム)は`isSolverReady()`で未初期化時にそのフレームだけ
+スキップするガードを追加した(次フレームで再試行、既存の「収束失敗時はスキップ」と同じ設計)。
+旧ソルバの内部実装をテストしていた`tests/sketch/solverLegacyFallback.test.ts`(2件)は削除、
+残りのsolver系Vitestはpublic API経由でPlaneGCSに対して引き続き通過を確認(468→466件)。
+ライセンス表記の確認: `node_modules/@salusoft89/planegcs/LICENSE`の実文面はLGPL **2.1**
+(「version 2.1 of the License, or (at your option) any later version」)であり、本リポジトリの
+表記(README.md・`gcsAdapter.ts`・本ドキュメント、いずれも「LGPL-2.1-or-later」)は実際の
+ライセンス条文と一致していることを確認した。不一致があったのは`@salusoft89/planegcs`パッケージ
+自身の`package.json`の`license`フィールド(`LGPL-2.0-or-later`、上流のメタデータ誤記と見られる)
+であり、本リポジトリはこのフィールドを引用・転記していないため修正は不要と判断した。
+gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 466件全通過、`vite build`+
+`npm run size`でUIバンドル260.5KB→256.9KB gzip(約3.6KB減、上限350KB)、E2E 38件全通過
+(`npx playwright test`をBashで同期実行)。
