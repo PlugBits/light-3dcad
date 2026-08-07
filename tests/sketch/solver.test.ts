@@ -668,6 +668,148 @@ describe("solveSketch 原点系拘束(distancePointOrigin/coincidentOrigin、追
   });
 });
 
+describe("solveSketch 頂点ベースの寸法指定(distancePointLine/distance・distancePointOriginのaxis、Phase 30)", () => {
+  it("① distancePointLine(長さ拘束なし): 遠い方の端点を固定すると、距離を満たすよう線分が伸びる(遠い方の端点は動かない)", () => {
+    const s1: SketchSegment = { id: "s1", kind: "line", p1: [0, 0], p2: [10, 0] };
+    const constraints: SketchConstraint[] = [
+      { id: "fix1", kind: "fix", point: { segmentId: "s1", end: "p1" } },
+      { id: "horiz", kind: "horizontal", segmentId: "s1" },
+      {
+        id: "d1",
+        kind: "distancePointLine",
+        point: { segmentId: "s1", end: "p2" },
+        line: { kind: "refEdge", p1: [0, -5], p2: [0, 5] },
+        value: 20,
+      },
+    ];
+    const result = solveSketch([s1], constraints);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.segments[0];
+    // 遠い方の端点(fix)は動かない。
+    expect(out.p1[0]).toBeCloseTo(0, 4);
+    expect(out.p1[1]).toBeCloseTo(0, 4);
+    // 端点(p2)は線(Y軸、x=0)からの距離20を満たす位置まで伸びる。
+    expect(Math.abs(out.p2[0])).toBeCloseTo(20, 3);
+    expect(out.p2[1]).toBeCloseTo(0, 4);
+  });
+
+  it("② distancePointLine(長さ拘束あり): 長さが固定されていると線分ごと平行移動して距離を満たす", () => {
+    const s1: SketchSegment = { id: "s1", kind: "line", p1: [0, 0], p2: [10, 0] };
+    const constraints: SketchConstraint[] = [
+      { id: "horiz", kind: "horizontal", segmentId: "s1" },
+      { id: "len1", kind: "length", segmentId: "s1", value: 10 },
+      {
+        id: "d1",
+        kind: "distancePointLine",
+        point: { segmentId: "s1", end: "p2" },
+        line: { kind: "refEdge", p1: [0, -5], p2: [0, 5] },
+        value: 20,
+      },
+    ];
+    const result = solveSketch([s1], constraints);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.segments[0];
+    expect(Math.abs(out.p2[0])).toBeCloseTo(20, 3);
+    // 長さは維持(平行移動、伸びていない)。
+    expect(dist(out.p1, out.p2)).toBeCloseTo(10, 3);
+    expect(out.p1[1]).toBeCloseTo(out.p2[1], 4);
+    // p1も一緒に動いている(伸びるケース[①]とは異なり、p1が[0,0]のままではない)。
+    expect(Math.abs(out.p1[0] - (out.p2[0] - 10))).toBeLessThan(1e-2);
+    expect(out.p1[0]).not.toBeCloseTo(0, 1);
+  });
+
+  it("③ distancePointLine: 端点・線(segmentEdge)の双方を固定すると矛盾を検出する", () => {
+    const p: SketchSegment = { id: "p1seg", kind: "line", p1: [0, 5], p2: [0, 6] };
+    const line: SketchSegment = { id: "lineSeg", kind: "line", p1: [-10, 0], p2: [10, 0] };
+    const constraints: SketchConstraint[] = [
+      { id: "fixp1", kind: "fix", point: { segmentId: "p1seg", end: "p1" } },
+      { id: "fixl1", kind: "fix", point: { segmentId: "lineSeg", end: "p1" } },
+      { id: "fixl2", kind: "fix", point: { segmentId: "lineSeg", end: "p2" } },
+      {
+        id: "d1",
+        kind: "distancePointLine",
+        point: { segmentId: "p1seg", end: "p1" },
+        line: { kind: "segmentEdge", segmentId: "lineSeg" },
+        value: 20,
+      },
+    ];
+    const result = solveSketch([p, line], constraints);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.conflicting).toBe(true);
+  });
+
+  it("④ distance(axis:x): 2端点のX距離のみが指定値に解け、Y方向の相対位置は変わらない", () => {
+    const a: SketchSegment = { id: "a", kind: "line", p1: [0, 0], p2: [0, 1] };
+    const b: SketchSegment = { id: "b", kind: "line", p1: [5, 8], p2: [5, 9] };
+    const constraints: SketchConstraint[] = [
+      { id: "fixa", kind: "fix", point: { segmentId: "a", end: "p1" } },
+      { id: "d1", kind: "distance", a: { segmentId: "a", end: "p1" }, b: { segmentId: "b", end: "p1" }, value: 30, axis: "x" },
+    ];
+    const result = solveSketch([a, b], constraints);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outA = result.segments.find((s) => s.id === "a")!;
+    const outB = result.segments.find((s) => s.id === "b")!;
+    expect(Math.abs(outB.p1[0] - outA.p1[0])).toBeCloseTo(30, 3);
+    // Y方向は拘束されていないため、入力の相対Y差(8)付近を維持する(正則化)。
+    expect(outB.p1[1] - outA.p1[1]).toBeCloseTo(8, 2);
+  });
+
+  it("⑤ distancePointOrigin(axis:y): 端点のY距離のみが原点からの指定値に解け、X座標は変わらない", () => {
+    const seg: SketchSegment = { id: "s1", kind: "line", p1: [10, 3], p2: [20, 3] };
+    const constraints: SketchConstraint[] = [
+      { id: "d1", kind: "distancePointOrigin", point: { segmentId: "s1", end: "p1" }, value: 25, axis: "y" },
+    ];
+    const result = solveSketch([seg], constraints);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.segments[0];
+    expect(Math.abs(out.p1[1])).toBeCloseTo(25, 3);
+    // Xは拘束されていないため、正則化で入力(10)に近いまま。
+    expect(out.p1[0]).toBeCloseTo(10, 1);
+  });
+
+  it("⑥ 一致クラスタ経由の連動: 3線分チェーンの中間頂点(一致拘束)にdistancePointOriginを指定すると、後続の線分も整合して動く", () => {
+    // s1.p2とs2.p1、s2.p2とs3.p1がそれぞれcoincidentで結ばれたチェーン(L字ではなく直線的な3本鎖)。
+    // s1の遠い方の端点(p1)を固定し、s1自体には長さ拘束を付けない(中間頂点[s1.p2/s2.p1の代表点]の
+    // 位置がdistancePointOriginで決まれば、s1がその位置まで伸びる)。s2/s3はhorizontal+lengthで
+    // 剛体として振る舞うため、中間頂点が動けばcoincident経由でs2・s3全体が整合して追従する
+    // (頂点ベースの寸法指定でクラスタの代表点[segmentId昇順の先頭='s1:p2']に拘束をつけた場合と等価)。
+    const s1: SketchSegment = { id: "s1", kind: "line", p1: [0, 0], p2: [10, 0] };
+    const s2: SketchSegment = { id: "s2", kind: "line", p1: [10, 0], p2: [20, 0] };
+    const s3: SketchSegment = { id: "s3", kind: "line", p1: [20, 0], p2: [30, 0] };
+    const constraints: SketchConstraint[] = [
+      { id: "fix1", kind: "fix", point: { segmentId: "s1", end: "p1" } },
+      { id: "h1", kind: "horizontal", segmentId: "s1" },
+      { id: "h2", kind: "horizontal", segmentId: "s2" },
+      { id: "len2", kind: "length", segmentId: "s2", value: 10 },
+      { id: "h3", kind: "horizontal", segmentId: "s3" },
+      { id: "len3", kind: "length", segmentId: "s3", value: 10 },
+      { id: "co1", kind: "coincident", a: { segmentId: "s1", end: "p2" }, b: { segmentId: "s2", end: "p1" } },
+      { id: "co2", kind: "coincident", a: { segmentId: "s2", end: "p2" }, b: { segmentId: "s3", end: "p1" } },
+      { id: "d1", kind: "distancePointOrigin", point: { segmentId: "s1", end: "p2" }, value: 50, axis: "x" },
+    ];
+    const result = solveSketch([s1, s2, s3], constraints);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outS1 = result.segments.find((s) => s.id === "s1")!;
+    const outS2 = result.segments.find((s) => s.id === "s2")!;
+    const outS3 = result.segments.find((s) => s.id === "s3")!;
+    // 中間頂点(s1.p2)が指定通りx=50に伸びる。
+    expect(outS1.p2[0]).toBeCloseTo(50, 3);
+    expect(outS1.p2[1]).toBeCloseTo(0, 3);
+    // coincidentでs2.p1が追従。
+    expect(dist(outS2.p1, outS1.p2)).toBeLessThan(1e-3);
+    expect(outS2.p2[0]).toBeCloseTo(60, 3);
+    // coincidentでs3.p1が追従、s3も整合して伸びる。
+    expect(dist(outS3.p1, outS2.p2)).toBeLessThan(1e-3);
+    expect(outS3.p2[0]).toBeCloseTo(70, 3);
+  });
+});
+
 describe("solveSketch 幾何拘束(perpendicular/concentric/tangent、Phase 23)", () => {
   function circle(id: string, center: [number, number], radius = 5): Extract<SketchEntity, { kind: "circle" }> {
     return { kind: "circle", id, center, radius };

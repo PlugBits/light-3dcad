@@ -180,6 +180,29 @@ function axisDistanceResidual(
 }
 
 /**
+ * 可変点(idx)から固定点(fixed)への距離のうち、片方の軸成分のみを対象にした残差式
+ * (distance/distancePointOriginのaxis:"x"/"y"、頂点ベースの寸法指定、Phase 30)。
+ * axisDistanceResidual(2点とも可変)の「片方が固定値」版。符号は現在のx(引数)から都度決め直す
+ * (axisDistanceResidualと同じ単純な実装で十分収束する、pointToFixedDistanceResidualと対になる関数)。
+ * axisIndex 0=x, 1=y。
+ */
+function axisDistanceToFixedResidual(
+  x: number[],
+  idx: [number, number],
+  fixed: Point2,
+  value: number,
+  axisIndex: 0 | 1,
+): ResidualEq {
+  const ai = idx[axisIndex];
+  const d = x[ai] - fixed[axisIndex];
+  const sign = d >= 0 ? 1 : -1;
+  return {
+    value: sign * d - value,
+    terms: [{ index: ai, coef: sign }],
+  };
+}
+
+/**
  * radius拘束の残差式を作る。円弧のbulge(=tan(挟角/4))は固定値として扱い(端点移動では変えない)、
  * 挟角θ=4*atan(bulge)から半弦-半径比を求め、半径 = 弦長 / (2*sin(θ/2)) をvalueと比較する。
  * sin(θ/2)が0近傍(=ほぼ直線)の場合は数値的に不安定なため、符号を保った下限でクランプする。
@@ -525,7 +548,9 @@ function buildConstraintResiduals(
         const a = pointVarIndex(varIndex, c.a);
         const b = pointVarIndex(varIndex, c.b);
         if (!a || !b) break;
-        eqs.push(lengthLikeResidual(x, a, b, c.value));
+        if (c.axis === "x") eqs.push(axisDistanceResidual(x, a, b, c.value, 0));
+        else if (c.axis === "y") eqs.push(axisDistanceResidual(x, a, b, c.value, 1));
+        else eqs.push(lengthLikeResidual(x, a, b, c.value));
         break;
       }
       case "radius": {
@@ -550,7 +575,10 @@ function buildConstraintResiduals(
       case "distancePointOrigin": {
         const idx = pointVarIndex(varIndex, c.point);
         if (!idx) break;
-        eqs.push(pointToFixedDistanceResidual(x, idx, c.originLocal ?? [0, 0], c.value));
+        const origin = c.originLocal ?? [0, 0];
+        if (c.axis === "x") eqs.push(axisDistanceToFixedResidual(x, idx, origin, c.value, 0));
+        else if (c.axis === "y") eqs.push(axisDistanceToFixedResidual(x, idx, origin, c.value, 1));
+        else eqs.push(pointToFixedDistanceResidual(x, idx, origin, c.value));
         break;
       }
       case "coincidentOrigin": {
@@ -575,6 +603,33 @@ function buildConstraintResiduals(
         // 矩形側が並進する)。segmentEdge(自由な線分、ユーザー報告対応)も同様にvarIndexから解決し、
         // 線分の両端点そのものが動く。refEdge(ボディ端面参照)は常に固定なのでvarIndicesに追加しない。
         const idx = entityVarIndex(entityVarIdx, c.entity);
+        if (!idx) break;
+        const line0 = resolveLineRefPoints(c.line, entities, segments);
+        if (!line0) break;
+        const sign = lineSideSign(initX, idx, line0[0], line0[1]);
+        const varIndices: number[] = [idx[0], idx[1]];
+        if (c.line.kind === "entityEdge") {
+          const lineBase = entityVarIdx.get(c.line.entityId);
+          if (lineBase !== undefined) varIndices.push(lineBase, lineBase + 1);
+        } else if (c.line.kind === "segmentEdge") {
+          const lineBase = varIndex.get(c.line.segmentId);
+          if (lineBase !== undefined) varIndices.push(lineBase, lineBase + 1, lineBase + 2, lineBase + 3);
+        }
+        eqs.push(
+          numericResidual(
+            (vars) => distanceEntityLineValue(vars, idx, c.line, entities, entityVarIdx, varIndex, sign) - c.value,
+            x,
+            varIndices,
+          ),
+        );
+        break;
+      }
+      case "distancePointLine": {
+        // 頂点↔線の距離拘束(Phase 30新設)。distanceEntityLineと完全に同形(idxがentityではなく
+        // 端点の変数インデックスである点のみが異なる)なので、distanceEntityLineValue()をそのまま
+        // 流用する。挙動の要(端点に付く線分に長さ拘束が無ければ伸び、あれば平行移動で追従)は
+        // ソルバの自然な帰結であり、ここでは残差式を定義するだけでよい。
+        const idx = pointVarIndex(varIndex, c.point);
         if (!idx) break;
         const line0 = resolveLineRefPoints(c.line, entities, segments);
         if (!line0) break;

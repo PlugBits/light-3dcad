@@ -423,6 +423,7 @@ const CONSTRAINT_KIND_LABELS: Record<SketchConstraint["kind"], string> = {
   coincidentOrigin: "原点一致",
   distanceEntityEntity: "中心間距離",
   distanceEntityLine: "中心↔辺距離",
+  distancePointLine: "端点↔辺距離",
   fixEntity: "円の固定",
   perpendicular: "垂直",
   concentric: "同心",
@@ -455,14 +456,18 @@ function describeConstraint(
       return `${segmentLabel(segments, constraint.segmentId)} = ${formatMm(constraint.value)}mm`;
     case "radius":
       return `${segmentLabel(segments, constraint.segmentId)} = R${formatMm(constraint.value)}mm`;
-    case "distance":
-      return `${pointRefLabel(segments, constraint.a)} - ${pointRefLabel(segments, constraint.b)} = ${formatMm(constraint.value)}mm`;
+    case "distance": {
+      const axisPrefix = constraint.axis === "x" ? "X:" : constraint.axis === "y" ? "Y:" : "";
+      return `${pointRefLabel(segments, constraint.a)} - ${pointRefLabel(segments, constraint.b)} = ${axisPrefix}${formatMm(constraint.value)}mm`;
+    }
     case "fix":
       return pointRefLabel(segments, constraint.point);
     case "distanceEntityOrigin":
       return `${entityLabel(entities, constraint.entity.entityId)} - 原点 = ${formatMm(constraint.value)}mm`;
-    case "distancePointOrigin":
-      return `${pointRefLabel(segments, constraint.point)} - 原点 = ${formatMm(constraint.value)}mm`;
+    case "distancePointOrigin": {
+      const axisPrefix = constraint.axis === "x" ? "X:" : constraint.axis === "y" ? "Y:" : "";
+      return `${pointRefLabel(segments, constraint.point)} - 原点 = ${axisPrefix}${formatMm(constraint.value)}mm`;
+    }
     case "coincidentOrigin":
       return "segmentId" in constraint.point
         ? `${pointRefLabel(segments, constraint.point)} = 原点`
@@ -473,6 +478,8 @@ function describeConstraint(
     }
     case "distanceEntityLine":
       return `${entityLabel(entities, constraint.entity.entityId)} - 辺 = ${formatMm(constraint.value)}mm`;
+    case "distancePointLine":
+      return `${pointRefLabel(segments, constraint.point)} - 辺 = ${formatMm(constraint.value)}mm`;
     case "fixEntity":
       return entityLabel(entities, constraint.entity.entityId);
     case "perpendicular":

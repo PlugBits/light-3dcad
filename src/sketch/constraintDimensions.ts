@@ -26,7 +26,8 @@ function findSegment(segments: readonly SketchSegment[], segmentId: string): Ske
   return segments.find((s) => s.id === segmentId);
 }
 
-function pointFromRef(segments: readonly SketchSegment[], ref: PointRef): Point2 | null {
+/** PointRefの現在座標を返す(参照先セグメントが見つからなければnull)。 */
+export function pointFromRef(segments: readonly SketchSegment[], ref: PointRef): Point2 | null {
   const seg = findSegment(segments, ref.segmentId);
   if (!seg) return null;
   return ref.end === "p1" ? seg.p1 : seg.p2;
@@ -50,6 +51,28 @@ export function distanceBetweenRefs(segments: readonly SketchSegment[], a: Point
   const pb = pointFromRef(segments, b);
   if (!pa || !pb) return null;
   return Math.hypot(pb[0] - pa[0], pb[1] - pa[1]);
+}
+
+/**
+ * 巻き戻しトーストの誘導メッセージ(頂点ベースの寸法指定、Phase 30新設)。distance/distancePointOrigin
+ * (axis省略/"direct")の値が、既にX方向またはY方向に離れている量(適用前の2点の座標差)より小さい
+ * 典型的な解なしケース(直線距離は|Δx|・|Δy|それぞれ以上でなければ幾何学的に成立しない)を検出し、
+ * 具体的な誘導メッセージを返す。検出できなければnull(呼び出し側は既定の汎用メッセージにフォールバック)。
+ * 「既に固定されている」かどうかまでは判定しない簡易チェックだが、direct距離が解なしになる典型例は
+ * ほぼこのケースであるため実用上十分(仕様: 適用前の座標から|Δy|等と入力値を比較するだけでよい)。
+ */
+export function describeAxisDistanceConflict(a: Point2, b: Point2, value: number, axis?: "direct" | "x" | "y"): string | null {
+  if (axis === "x" || axis === "y") return null; // 軸距離指定自体は各軸1本の残差のみで解なしになりにくい。
+  const dx = Math.abs(b[0] - a[0]);
+  const dy = Math.abs(b[1] - a[1]);
+  const violateX = dx > value;
+  const violateY = dy > value;
+  if (!violateX && !violateY) return null;
+  const useY = violateY && (!violateX || dy >= dx);
+  const axisLabel = useY ? "Y" : "X";
+  const otherLabel = useY ? "X" : "Y";
+  const required = useY ? dy : dx;
+  return `${axisLabel}方向の位置が${required.toFixed(1)}mmに拘束されているため直線距離は${required.toFixed(1)}mm以上が必要です。${otherLabel}距離指定も使えます`;
 }
 
 function samePointRef(a: PointRef, b: PointRef): boolean {
@@ -83,20 +106,25 @@ export function upsertRadiusConstraint(constraints: readonly SketchConstraint[],
   return [...constraints, { id: generateId("constraint"), kind: "radius", segmentId, value }];
 }
 
-/** 2点間のdistance拘束を追加/更新する(a/bの順序は問わず一致を判定。既存があれば値だけ差し替え)。 */
+/**
+ * 2点間のdistance拘束を追加/更新する(a/bの順序は問わず一致を判定。既存があれば値だけ差し替え)。
+ * axis(頂点ベースの寸法指定、Phase 30。省略=direct・後方互換)はupsertDistanceEntityEntityConstraintの
+ * axisと同じ意味。
+ */
 export function upsertDistanceConstraint(
   constraints: readonly SketchConstraint[],
   a: PointRef,
   b: PointRef,
   value: number,
+  axis?: "direct" | "x" | "y",
 ): SketchConstraint[] {
   const idx = constraints.findIndex((c) => sameDistancePair(c, a, b));
   if (idx >= 0) {
     const next = constraints.slice();
-    next[idx] = { ...next[idx], value } as SketchConstraint;
+    next[idx] = { ...next[idx], value, axis } as SketchConstraint;
     return next;
   }
-  return [...constraints, { id: generateId("constraint"), kind: "distance", a, b, value }];
+  return [...constraints, { id: generateId("constraint"), kind: "distance", a, b, value, axis }];
 }
 
 /** 指定IDの拘束を削除する(見つからない場合は元の配列と等価な新しい配列を返す)。 */
@@ -130,20 +158,22 @@ export function upsertDistanceEntityOriginConstraint(
 /**
  * セグメント端点↔原点のdistancePointOrigin拘束を追加/更新する(追加項目)。
  * upsertDistanceEntityOriginConstraintのPointRef版。originLocalの意味・扱いは同じ。
+ * axis(頂点ベースの寸法指定、Phase 30。省略=direct・後方互換)はupsertDistanceConstraintと同じ意味。
  */
 export function upsertDistancePointOriginConstraint(
   constraints: readonly SketchConstraint[],
   point: PointRef,
   value: number,
   originLocal?: [number, number],
+  axis?: "direct" | "x" | "y",
 ): SketchConstraint[] {
   const idx = constraints.findIndex((c) => c.kind === "distancePointOrigin" && samePointRef(c.point, point));
   if (idx >= 0) {
     const next = constraints.slice();
-    next[idx] = { ...next[idx], value, ...(originLocal ? { originLocal } : {}) } as SketchConstraint;
+    next[idx] = { ...next[idx], value, axis, ...(originLocal ? { originLocal } : {}) } as SketchConstraint;
     return next;
   }
-  return [...constraints, { id: generateId("constraint"), kind: "distancePointOrigin", point, value, originLocal }];
+  return [...constraints, { id: generateId("constraint"), kind: "distancePointOrigin", point, value, originLocal, axis }];
 }
 
 /**
@@ -210,6 +240,28 @@ export function upsertDistanceEntityLineConstraint(
     return next;
   }
   return [...constraints, { id: generateId("constraint"), kind: "distanceEntityLine", entity: { entityId }, line, value }];
+}
+
+/**
+ * セグメント端点↔線(LineRef)のdistancePointLine拘束を追加/更新する(頂点ベースの寸法指定、
+ * Phase 30新設)。upsertDistanceEntityLineConstraintのPointRef版(pointRef+同一のlineが既にあれば
+ * 値だけ差し替え)。
+ */
+export function upsertDistancePointLineConstraint(
+  constraints: readonly SketchConstraint[],
+  point: PointRef,
+  line: LineRef,
+  value: number,
+): SketchConstraint[] {
+  const idx = constraints.findIndex(
+    (c) => c.kind === "distancePointLine" && samePointRef(c.point, point) && sameLineRef(c.line, line),
+  );
+  if (idx >= 0) {
+    const next = constraints.slice();
+    next[idx] = { ...next[idx], value } as SketchConstraint;
+    return next;
+  }
+  return [...constraints, { id: generateId("constraint"), kind: "distancePointLine", point, line, value }];
 }
 
 /** エンティティが固定(fixEntity拘束を持つ)かどうか。circle/rectangle/polygon/regularPolygon/slotいずれも対象。 */
@@ -489,6 +541,8 @@ export interface SegDistanceDimension {
   constraintId: string;
   a: PointRef;
   b: PointRef;
+  /** 省略/"direct"は2点間の直線距離、"x"/"y"は片方の軸成分のみ(頂点ベースの寸法指定、Phase 30)。 */
+  axis?: "direct" | "x" | "y";
   value: number;
   anchor: Point2;
 }
@@ -506,6 +560,8 @@ export interface PointOriginDimension {
   kind: "point-distance-origin";
   constraintId: string;
   point: PointRef;
+  /** 省略/"direct"は原点までの直線距離、"x"/"y"は片方の軸成分のみ(頂点ベースの寸法指定、Phase 30)。 */
+  axis?: "direct" | "x" | "y";
   value: number;
   anchor: Point2;
   /** 「原点」の実座標(ワールド原点のスケッチローカル投影、仕様変更対応)。寸法線の描画に使う。 */
@@ -525,6 +581,15 @@ export interface EntityLineDimension {
   kind: "entity-distance-line";
   constraintId: string;
   entityId: string;
+  line: LineRef;
+  value: number;
+  anchor: Point2;
+}
+/** 端点↔線の垂直距離(mm、頂点ベースの寸法指定、Phase 30新設)。EntityLineDimensionのPointRef版。 */
+export interface PointLineDimension {
+  kind: "point-distance-line";
+  constraintId: string;
+  point: PointRef;
   line: LineRef;
   value: number;
   anchor: Point2;
@@ -555,6 +620,7 @@ export type ConstraintDimension =
   | PointOriginDimension
   | EntityEntityDimension
   | EntityLineDimension
+  | PointLineDimension
   | SegDistanceLineLineDimension
   | SegAngleLineLineDimension;
 
@@ -589,7 +655,21 @@ export function computeConstraintDimensions(
       if (!p) continue;
       const origin: Point2 = c.originLocal ?? [0, 0];
       const anchor: Point2 = [(p[0] + origin[0]) / 2, (p[1] + origin[1]) / 2];
-      dims.push({ kind: "point-distance-origin", constraintId: c.id, point: c.point, value: c.value, anchor, origin });
+      dims.push({ kind: "point-distance-origin", constraintId: c.id, point: c.point, axis: c.axis, value: c.value, anchor, origin });
+      continue;
+    }
+    if (c.kind === "distancePointLine") {
+      const p = pointFromRef(segments, c.point);
+      const line = resolveLineRefPoints(c.line, entities, segments);
+      if (!p || !line) continue;
+      const [a, b] = line;
+      const dx = b[0] - a[0];
+      const dy = b[1] - a[1];
+      const lenSq = dx * dx + dy * dy;
+      const foot: Point2 =
+        lenSq < 1e-18 ? a : [a[0] + (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / lenSq) * dx, a[1] + (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / lenSq) * dy];
+      const anchor: Point2 = [(p[0] + foot[0]) / 2, (p[1] + foot[1]) / 2];
+      dims.push({ kind: "point-distance-line", constraintId: c.id, point: c.point, line: c.line, value: c.value, anchor });
       continue;
     }
     if (c.kind === "distanceEntityEntity") {
@@ -657,7 +737,7 @@ export function computeConstraintDimensions(
       const pb = pointFromRef(segments, c.b);
       if (!pa || !pb) continue;
       const anchor: Point2 = [(pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2];
-      dims.push({ kind: "seg-distance", constraintId: c.id, a: c.a, b: c.b, value: c.value, anchor });
+      dims.push({ kind: "seg-distance", constraintId: c.id, a: c.a, b: c.b, axis: c.axis, value: c.value, anchor });
     }
   }
   return dims;
@@ -670,7 +750,7 @@ export function computeConstraintDimensions(
 export function formatConstraintDimensionLabel(dimension: ConstraintDimension): string {
   if (dimension.kind === "seg-radius") return `R${dimension.value.toFixed(1)}`;
   if (dimension.kind === "seg-angle-line-line") return `${dimension.value.toFixed(1)}°`;
-  if (dimension.kind === "entity-distance-entity") {
+  if (dimension.kind === "entity-distance-entity" || dimension.kind === "seg-distance" || dimension.kind === "point-distance-origin") {
     if (dimension.axis === "x") return `X${dimension.value.toFixed(1)}`;
     if (dimension.axis === "y") return `Y${dimension.value.toFixed(1)}`;
   }

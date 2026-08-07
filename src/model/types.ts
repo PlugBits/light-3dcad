@@ -137,8 +137,13 @@ export type SketchConstraint =
   | { id: string; kind: "vertical"; segmentId: string }
   /** 線分(または円弧の弦長ではなく弧長方向の端点間距離。実体は端点間のユークリッド距離)の長さ(mm)。 */
   | { id: string; kind: "length"; segmentId: string; value: number }
-  /** 2点間の距離(mm)。同一セグメント内・別セグメント間のどちらの点も指定できる。 */
-  | { id: string; kind: "distance"; a: PointRef; b: PointRef; value: number }
+  /**
+   * 2点間の距離(mm)。同一セグメント内・別セグメント間のどちらの点も指定できる。
+   * axis(頂点ベースの寸法指定、Phase 30。省略=direct・後方互換)は"x"/"y"のとき
+   * それぞれ|bx-ax|/|by-ay|のみを距離として扱う(直線距離ではなく片方の軸成分のみを拘束する。
+   * distanceEntityEntityのaxisと同じ考え方)。
+   */
+  | { id: string; kind: "distance"; a: PointRef; b: PointRef; value: number; axis?: "direct" | "x" | "y" }
   /** kind:"arc" のセグメントにのみ指定できる半径拘束(mm)。bulge(挟角)は維持したまま端点間距離を調整して解く。 */
   | { id: string; kind: "radius"; segmentId: string; value: number }
   /** 点を(拘束追加時点の)現在位置に固定する。値はsolveSketch呼び出し時の入力座標から都度求める(拘束自体には持たない)。 */
@@ -158,8 +163,17 @@ export type SketchConstraint =
    * セグメント端点↔原点の距離(mm、追加項目: 原点ピック常時有効化に伴う新設)。
    * distanceEntityOriginの「対象がcircleエンティティではなく自由な線分の端点」版。原点の定義・
    * originLocalスナップショットの扱いはdistanceEntityOriginと同一。
+   * axis(頂点ベースの寸法指定、Phase 30。省略=direct・後方互換)は"distance"拘束のaxisと同じ意味
+   * (原点のoriginLocal[x,y]を固定側の座標として片方の軸成分のみを拘束する)。
    */
-  | { id: string; kind: "distancePointOrigin"; point: PointRef; value: number; originLocal?: [number, number] }
+  | {
+      id: string;
+      kind: "distancePointOrigin";
+      point: PointRef;
+      value: number;
+      originLocal?: [number, number];
+      axis?: "direct" | "x" | "y";
+    }
   /**
    * セグメント端点、またはcircleエンティティの中心を原点に一致させる(固定、追加項目)。
    * 拘束ツール(垂直・同心・接線と同じ選択ポップアップ)から追加する。残差は対象点の座標そのもの
@@ -175,6 +189,15 @@ export type SketchConstraint =
   | { id: string; kind: "distanceEntityEntity"; a: EntityRef; b: EntityRef; value: number; axis?: "direct" | "x" | "y" }
   /** circleエンティティの中心↔辺(直線、動かない)の垂直距離(mm、Phase 22)。 */
   | { id: string; kind: "distanceEntityLine"; entity: EntityRef; line: LineRef; value: number }
+  /**
+   * セグメント端点↔線(rectangle/polygonの辺・自由な線分・参照エッジ)の垂直距離(mm、頂点ベースの
+   * 寸法指定、Phase 30新設)。distanceEntityLineの「対象がcircleエンティティの中心ではなく自由な
+   * 線分の端点」版で、lineの解決(entityEdge/segmentEdge=可動、refEdge=固定スナップショット)は
+   * distanceEntityLineと完全に共通(src/sketch/solver.tsのdistanceEntityLineValue()をそのまま流用)。
+   * 挙動の要: 端点に接続する線分に長さ拘束が無ければ線分が伸びて距離を満たし、長さ拘束があれば
+   * (端点間距離が固定されるため)線分ごと平行移動する(ソルバの自然な帰結、特別な実装は無い)。
+   */
+  | { id: string; kind: "distancePointLine"; point: PointRef; line: LineRef; value: number }
   /** circleエンティティの中心を(拘束追加時点の)現在位置に固定する(Phase 22、固定トグル)。 */
   | { id: string; kind: "fixEntity"; entity: EntityRef }
   /** 2本の直線セグメント(kind:"line"のみ対象)が垂直であること(Phase 23)。 */

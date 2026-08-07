@@ -6,13 +6,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { setSketchConstraints, updateSketchEntity } from "../model/document";
-import type { PointRef, SketchEntity, SketchFeature, SketchSegment } from "../model/types";
+import type { CadDocument, SketchEntity, SketchFeature, SketchSegment } from "../model/types";
 import { arcGeometryFromBulge } from "../sketch/bulge";
 import { resolveLineRefPoints } from "../sketch/entityEdges";
 import {
   computeConstraintDimensions,
   constraintDimensionKey,
+  describeAxisDistanceConflict,
   formatConstraintDimensionLabel,
+  pointFromRef,
   removeConstraint,
   upsertAngleLineLineConstraint,
   upsertDistanceConstraint,
@@ -20,6 +22,7 @@ import {
   upsertDistanceEntityLineConstraint,
   upsertDistanceEntityOriginConstraint,
   upsertDistanceLineLineConstraint,
+  upsertDistancePointLineConstraint,
   upsertDistancePointOriginConstraint,
   upsertLengthConstraint,
   upsertRadiusConstraint,
@@ -88,12 +91,6 @@ function measuredDimensionGraphics(dimension: SketchDimension, entities: SketchE
   return null;
 }
 
-function pointFromRef(segments: readonly SketchSegment[], ref: PointRef): Point2 | null {
-  const seg = segments.find((s) => s.id === ref.segmentId);
-  if (!seg) return null;
-  return ref.end === "p1" ? seg.p1 : seg.p2;
-}
-
 /**
  * 拘束寸法(ConstraintDimension、segments/constraints由来)1件分の引出線・寸法線・矢印を計算する。
  * 参照先セグメントが見つからない/円弧情報が無い場合はnull。
@@ -116,6 +113,7 @@ function constraintDimensionGraphics(
     const pa = pointFromRef(segments, dimension.a);
     const pb = pointFromRef(segments, dimension.b);
     if (!pa || !pb) return null;
+    if (dimension.axis === "x" || dimension.axis === "y") return computeAxisDimensionGraphics(pa, pb, dimension.axis);
     return computeLinearDimensionGraphics(pa, pb);
   }
   if (dimension.kind === "entity-distance-origin") {
@@ -126,6 +124,7 @@ function constraintDimensionGraphics(
   if (dimension.kind === "point-distance-origin") {
     const p = pointFromRef(segments, dimension.point);
     if (!p) return null;
+    if (dimension.axis === "x" || dimension.axis === "y") return computeAxisDimensionGraphics(p, dimension.origin, dimension.axis);
     return computeLinearDimensionGraphics(p, dimension.origin);
   }
   if (dimension.kind === "entity-distance-entity") {
@@ -148,6 +147,20 @@ function constraintDimensionGraphics(
     const t = ((c[0] - a[0]) * dx + (c[1] - a[1]) * dy) / lenSq;
     const foot: Point2 = [a[0] + t * dx, a[1] + t * dy];
     return computeLinearDimensionGraphics(c, foot);
+  }
+  if (dimension.kind === "point-distance-line") {
+    const p = pointFromRef(segments, dimension.point);
+    const line = resolveLineRefPoints(dimension.line, entities, segments);
+    if (!p || !line) return null;
+    // 端点から直線への垂線の足を寸法のもう一端にする(entity-distance-lineと同じ考え方)。
+    const [a, b] = line;
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq < 1e-12) return null;
+    const t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / lenSq;
+    const foot: Point2 = [a[0] + t * dx, a[1] + t * dy];
+    return computeLinearDimensionGraphics(p, foot);
   }
   if (dimension.kind === "seg-distance-line-line") {
     const segA = segments.find((s) => s.id === dimension.a);
@@ -227,6 +240,7 @@ const CONSTRAINT_DIMENSION_LABELS: Record<ConstraintDimension["kind"], string> =
   "point-distance-origin": "端点↔原点の距離 (mm)",
   "entity-distance-entity": "中心間の距離 (mm)",
   "entity-distance-line": "中心↔辺の距離 (mm)",
+  "point-distance-line": "端点↔辺の距離 (mm)",
   "seg-distance-line-line": "距離 (mm)",
   "seg-angle-line-line": "角度 (°)",
 };
@@ -350,6 +364,25 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
 
   /** 拘束寸法ラベルの編集(既存拘束の値の差し替え)。矛盾したら自動的に巻き戻す(Phase 20b)。 */
   function applyConstraintDimension(dimension: ConstraintDimension, value: number, axis?: "direct" | "x" | "y") {
+    // 矛盾巻き戻しの誘導メッセージ(頂点ベースの寸法指定、Phase 30新設): 寸法ツール新規作成時
+    // (App.tsx側)と同じロジックを、既存ラベルの値編集にも適用する。
+    const describeConflict = (before: CadDocument): string | null => {
+      const feature = before.features.find((f) => f.id === sketch.id);
+      if (feature?.type !== "sketch") return null;
+      const beforeSegments = feature.segments ?? [];
+      if (dimension.kind === "seg-distance") {
+        const pa = pointFromRef(beforeSegments, dimension.a);
+        const pb = pointFromRef(beforeSegments, dimension.b);
+        if (!pa || !pb) return null;
+        return describeAxisDistanceConflict(pa, pb, value, axis);
+      }
+      if (dimension.kind === "point-distance-origin") {
+        const p = pointFromRef(beforeSegments, dimension.point);
+        if (!p) return null;
+        return describeAxisDistanceConflict(p, dimension.origin, value, axis);
+      }
+      return null;
+    };
     updateDocumentWithConflictRollback(
       sketch.id,
       (doc) => {
@@ -362,21 +395,24 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
             : dimension.kind === "seg-radius"
               ? upsertRadiusConstraint(constraints, dimension.segmentId, value)
               : dimension.kind === "seg-distance"
-                ? upsertDistanceConstraint(constraints, dimension.a, dimension.b, value)
+                ? upsertDistanceConstraint(constraints, dimension.a, dimension.b, value, axis)
                 : dimension.kind === "entity-distance-origin"
                   ? upsertDistanceEntityOriginConstraint(constraints, dimension.entityId, value, dimension.origin)
                   : dimension.kind === "point-distance-origin"
-                    ? upsertDistancePointOriginConstraint(constraints, dimension.point, value, dimension.origin)
+                    ? upsertDistancePointOriginConstraint(constraints, dimension.point, value, dimension.origin, axis)
                     : dimension.kind === "entity-distance-entity"
                     ? upsertDistanceEntityEntityConstraint(constraints, dimension.aEntityId, dimension.bEntityId, value, axis)
                     : dimension.kind === "entity-distance-line"
                       ? upsertDistanceEntityLineConstraint(constraints, dimension.entityId, dimension.line, value)
-                      : dimension.kind === "seg-distance-line-line"
-                        ? upsertDistanceLineLineConstraint(constraints, dimension.a, dimension.b, value)
-                        : upsertAngleLineLineConstraint(constraints, dimension.a, dimension.b, value);
+                      : dimension.kind === "point-distance-line"
+                        ? upsertDistancePointLineConstraint(constraints, dimension.point, dimension.line, value)
+                        : dimension.kind === "seg-distance-line-line"
+                          ? upsertDistanceLineLineConstraint(constraints, dimension.a, dimension.b, value)
+                          : upsertAngleLineLineConstraint(constraints, dimension.a, dimension.b, value);
         return setSketchConstraints(doc, sketch.id, next);
       },
       onConflictRollback,
+      describeConflict,
     );
     setEditingConstraint(null);
   }
@@ -479,9 +515,15 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
           titleLabel={CONSTRAINT_DIMENSION_LABELS[editingConstraint.dimension.kind]}
           initialValue={editingConstraint.dimension.value}
           screen={editingConstraint.screen}
-          axisOptions={editingConstraint.dimension.kind === "entity-distance-entity"}
+          axisOptions={
+            editingConstraint.dimension.kind === "entity-distance-entity" ||
+            editingConstraint.dimension.kind === "seg-distance" ||
+            editingConstraint.dimension.kind === "point-distance-origin"
+          }
           initialAxis={
-            editingConstraint.dimension.kind === "entity-distance-entity"
+            editingConstraint.dimension.kind === "entity-distance-entity" ||
+            editingConstraint.dimension.kind === "seg-distance" ||
+            editingConstraint.dimension.kind === "point-distance-origin"
               ? (editingConstraint.dimension.axis ?? "direct")
               : undefined
           }

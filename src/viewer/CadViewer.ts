@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
-import type { FeatureId, FilletEdgeRef, LineRef, PointRef, ShellFaceRef, SketchEntity, SketchSegment } from "../model/types";
+import type { FeatureId, FilletEdgeRef, LineRef, PointRef, ShellFaceRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
 import type { BodyGroup, EdgeGroup, EdgeInfo, FaceGroup, FaceInfo, MeshData, ReferenceEdgeLine } from "../protocol/messages";
 import { bulgeArcPoints, bulgeFromThreePoints, DEFAULT_BULGE_SEGMENTS } from "../sketch/bulge";
 import { findEntityDimensionHit, type EntityDimensionHit } from "../sketch/entityDimensionPick";
@@ -28,6 +28,7 @@ import {
   type SnapCandidate,
   type SnapKind,
 } from "../sketch/snapping";
+import { buildPointClusterRepMap, resolvePointClusterRepresentative } from "../sketch/pointClusters";
 import { findSharedEndpoint } from "../sketch/segmentCorner";
 import {
   distPointToEntityShape,
@@ -442,6 +443,14 @@ export type DimensionToolTarget =
   /** ボディ端面参照エッジ(Phase 22)への距離。lineは常に"refEdge"(ピック時点のスナップショット)。 */
   | { kind: "circle-distance-refedge"; entityId: string; edgeA: [number, number]; edgeB: [number, number]; line: LineRef }
   /**
+   * 頂点↔線の距離(頂点ベースの寸法指定、Phase 30新設)。circle-distance-edge/refedgeのPointRef版で、
+   * 端点→線(自由な線分/rectangle・polygonの辺/参照エッジ)、または線→端点のどちらの順でクリックしても
+   * 同じターゲットになる(circle-distance-*と同じ「後にクリックした方[ここでは常にpoint]は関係なく、
+   * 拘束はpoint+lineの組み合わせで決まる」設計)。lineがsegmentEdge/entityEdgeなら線側も動きうる
+   * (円と同じくfixEntity/fix等の固定状態次第)。
+   */
+  | { kind: "point-distance-line"; point: PointRef; edgeA: [number, number]; edgeB: [number, number]; line: LineRef }
+  /**
    * 線分↔線分の寸法(Phase 24)。aが1点目(lengthポップアップが開いていた直線セグメント)、
    * bが2点目(後にクリックした直線セグメント)。平行(方向のなす角<5度)かどうか・実際に
    * distanceLineLine/angleLineLineのどちらの拘束にするかの判定はApp側の責務とする
@@ -479,8 +488,12 @@ export interface DimensionToolCallbacks {
   onPendingChange?: (state: DimensionPendingState) => void;
 }
 
-/** 寸法ツールの端点ヒット判定の許容スクリーン距離(px)。セグメント本体より優先してヒットさせる。 */
-const DIMENSION_ENDPOINT_TOLERANCE_PX = 10;
+/**
+ * 寸法ツール・拘束ツールの端点(頂点)ヒット判定の許容スクリーン距離(px)。セグメント本体より
+ * 優先してヒットさせる(頂点ベースの寸法指定、Phase 30で10→12pxへ拡大: 一致クラスタの代表点を
+ * クリックで選びやすくするため)。
+ */
+const DIMENSION_ENDPOINT_TOLERANCE_PX = 12;
 /** 寸法ツールのセグメント本体ヒット判定の許容スクリーン距離(px、ローカルmmへ概算換算して使う)。 */
 const DIMENSION_SEGMENT_TOLERANCE_PX = 14;
 /**
@@ -988,6 +1001,13 @@ export class CadViewer {
   /** ヒット判定対象のentities(rectangle/circleのみ対象、Phase 21)。 */
   private dimensionToolEntities: SketchEntity[] = [];
   /**
+   * 一致(coincident)拘束で結ばれた端点群を1つの「頂点」として扱うための、端点キー→クラスタ代表点
+   * マップ(頂点ベースの寸法指定、Phase 30新設)。ヒット判定でどの端点をクリックしても、常にこの
+   * マップを介して代表点(PointRef)に正規化してからdimensionPendingPoint/onTargetPickedへ渡す
+   * (src/sketch/pointClusters.ts参照)。
+   */
+  private dimensionPointRepMap: Map<string, PointRef> = new Map();
+  /**
    * ヒット判定対象のボディ端面参照エッジ(Phase 22)。参照エッジを1つ目に選べるようにする改善
    * (追加項目)で、保留状態に関わらず常にピック対象になる(以前はdimensionPendingCircleId/
    * dimensionPendingLineId保持中のみ)。
@@ -1045,6 +1065,8 @@ export class CadViewer {
   private constraintToolBasis: PlaneBasis | null = null;
   private constraintToolSegments: SketchSegment[] = [];
   private constraintToolEntities: SketchEntity[] = [];
+  /** 一致クラスタ(頂点ベースの寸法指定、Phase 30新設)。dimensionPointRepMapと同じ役割の拘束ツール版。 */
+  private constraintPointRepMap: Map<string, PointRef> = new Map();
   private constraintToolCallbacks: ConstraintToolCallbacks | null = null;
   /** 1つ目としてクリック済みの対象(未選択はnull)。2つ目のクリックでonPairPickedを呼ぶ。 */
   private constraintPendingTarget: ConstraintPickTarget | null = null;
@@ -2557,7 +2579,13 @@ export class CadViewer {
    * ターゲットとして`callbacks.onTargetPicked`が呼ばれる(実際の拘束の作成/更新・entityの直接更新は
    * App側の責務)。マウス移動中はヒット候補をホバー色でハイライトする(handleDimensionToolMouseMove)。
    */
-  startDimensionTool(basis: PlaneBasis, segments: SketchSegment[], entities: SketchEntity[], callbacks: DimensionToolCallbacks) {
+  startDimensionTool(
+    basis: PlaneBasis,
+    segments: SketchSegment[],
+    entities: SketchEntity[],
+    constraints: SketchConstraint[],
+    callbacks: DimensionToolCallbacks,
+  ) {
     this.cancelDimensionTool();
     this.cancelConstraintTool();
     this.cancelPolygonDrawing();
@@ -2574,6 +2602,7 @@ export class CadViewer {
     this.dimensionToolBasis = basis;
     this.dimensionToolSegments = segments;
     this.dimensionToolEntities = entities;
+    this.dimensionPointRepMap = buildPointClusterRepMap(segments, constraints);
     this.dimensionToolCallbacks = callbacks;
     this.setDimensionPendingPoint(null);
     this.dimensionHoverEntityHit = null;
@@ -2589,10 +2618,11 @@ export class CadViewer {
    * 呼び出し側の最新値を反映するために使う想定)。1点目の保留状態・プレビューはリセットする
    * (更新前のsegmentIdを参照したままにしないため)。ツール非アクティブ時は何もしない。
    */
-  updateDimensionToolTargets(segments: SketchSegment[], entities: SketchEntity[]) {
+  updateDimensionToolTargets(segments: SketchSegment[], entities: SketchEntity[], constraints: SketchConstraint[] = []) {
     if (!this.dimensionToolActive) return;
     this.dimensionToolSegments = segments;
     this.dimensionToolEntities = entities;
+    this.dimensionPointRepMap = buildPointClusterRepMap(segments, constraints);
     this.clearDrawingPreview();
     this.setDimensionPendingPoint(null);
     this.dimensionHoverEntityHit = null;
@@ -2743,12 +2773,22 @@ export class CadViewer {
         const distSq = dx * dx + dy * dy;
         if (distSq > DIMENSION_ENDPOINT_TOLERANCE_PX * DIMENSION_ENDPOINT_TOLERANCE_PX) continue;
         if (bestPoint === null || distSq < bestPoint.distSq) {
-          bestPoint = { ref: { segmentId: seg.id, end }, local, distSq };
+          // 一致クラスタ(頂点ベースの寸法指定、Phase 30新設): クリックした端点が一致拘束で
+          // 他の端点と結ばれている場合、クラスタの代表点に正規化する(どの端点をクリックしても
+          // 同じ拘束対象になる)。localは実際にクリックした端点の座標のまま(マーカー表示用)。
+          const ref = resolvePointClusterRepresentative({ segmentId: seg.id, end }, this.dimensionPointRepMap);
+          bestPoint = { ref, local, distSq };
         }
       }
     }
 
     if (bestPoint) {
+      // 頂点↔線の寸法(頂点ベースの寸法指定、Phase 30新設): 辺(rectangle/polygon)・自由な線分・
+      // 参照エッジが1点目として保留中の状態で端点をクリックした場合(逆順)、point-distance-line
+      // ターゲットになる(circle-distance-edge/refedgeと同じ「1点目保持→2点目」パターン)。
+      const pendingLineIdForPoint = this.dimensionPendingLineId;
+      const pendingEdgeLineForPoint = this.dimensionPendingEdgeLine;
+      const pendingRefEdgeLineForPoint = this.dimensionPendingRefEdgeLine;
       this.setDimensionPendingCircle(null);
       this.setDimensionPendingLine(null);
       if (this.dimensionPendingOrigin) {
@@ -2757,6 +2797,56 @@ export class CadViewer {
         this.clearDrawingPreview();
         this.dimensionToolCallbacks?.onTargetPicked({ kind: "point-distance-origin", point: bestPoint.ref }, px, py);
         return;
+      }
+      if (pendingEdgeLineForPoint) {
+        this.setDimensionPendingEdge(null);
+        this.clearDrawingPreview();
+        this.dimensionToolCallbacks?.onTargetPicked(
+          {
+            kind: "point-distance-line",
+            point: bestPoint.ref,
+            edgeA: pendingEdgeLineForPoint.edgeA,
+            edgeB: pendingEdgeLineForPoint.edgeB,
+            line: pendingEdgeLineForPoint.line,
+          },
+          px,
+          py,
+        );
+        return;
+      }
+      if (pendingRefEdgeLineForPoint) {
+        this.setDimensionPendingRefEdge(null);
+        this.clearDrawingPreview();
+        this.dimensionToolCallbacks?.onTargetPicked(
+          {
+            kind: "point-distance-line",
+            point: bestPoint.ref,
+            edgeA: pendingRefEdgeLineForPoint.edgeA,
+            edgeB: pendingRefEdgeLineForPoint.edgeB,
+            line: pendingRefEdgeLineForPoint.line,
+          },
+          px,
+          py,
+        );
+        return;
+      }
+      if (pendingLineIdForPoint) {
+        const seg = this.dimensionToolSegments.find((s) => s.id === pendingLineIdForPoint);
+        if (seg) {
+          this.clearDrawingPreview();
+          this.dimensionToolCallbacks?.onTargetPicked(
+            {
+              kind: "point-distance-line",
+              point: bestPoint.ref,
+              edgeA: seg.p1,
+              edgeB: seg.p2,
+              line: { kind: "segmentEdge", segmentId: seg.id },
+            },
+            px,
+            py,
+          );
+          return;
+        }
       }
       const pending = this.dimensionPendingPoint;
       if (pending && !(pending.segmentId === bestPoint.ref.segmentId && pending.end === bestPoint.ref.end)) {
@@ -2829,8 +2919,9 @@ export class CadViewer {
       (!entityHit || refEdgeHit.dist < entityHit.dist);
 
     // セグメント・entity・参照エッジのうち、許容距離内で最も近いものを優先する
-    // (circle/line保留中に参照エッジを2つ目としてクリックした場合)。
-    if (refEdgeIsNearest && (this.dimensionPendingCircleId || this.dimensionPendingLineId)) {
+    // (circle/line/point保留中に参照エッジを2つ目としてクリックした場合)。pointの追加は
+    // 頂点↔線の寸法(頂点ベースの寸法指定、Phase 30新設)。
+    if (refEdgeIsNearest && (this.dimensionPendingCircleId || this.dimensionPendingLineId || this.dimensionPendingPoint)) {
       const hit = refEdgeHit as { edge: ReferenceEdgeLine; dist: number };
       if (this.dimensionPendingLineId) {
         const a = this.dimensionPendingLineId;
@@ -2841,6 +2932,23 @@ export class CadViewer {
           {
             kind: "line-refedge",
             a,
+            edgeA: hit.edge.p1,
+            edgeB: hit.edge.p2,
+            line: { kind: "refEdge", p1: hit.edge.p1, p2: hit.edge.p2 },
+          },
+          px,
+          py,
+        );
+        return;
+      }
+      if (this.dimensionPendingPoint) {
+        const point = this.dimensionPendingPoint;
+        this.setDimensionPendingPoint(null);
+        this.clearDrawingPreview();
+        this.dimensionToolCallbacks?.onTargetPicked(
+          {
+            kind: "point-distance-line",
+            point,
             edgeA: hit.edge.p1,
             edgeB: hit.edge.p2,
             line: { kind: "refEdge", p1: hit.edge.p1, p2: hit.edge.p2 },
@@ -2880,7 +2988,8 @@ export class CadViewer {
       !this.dimensionPendingLineId &&
       !this.dimensionPendingEdgeLine &&
       !this.dimensionPendingRefEdgeLine &&
-      !this.dimensionPendingOrigin
+      !this.dimensionPendingOrigin &&
+      !this.dimensionPendingPoint
     ) {
       const hit = refEdgeHit as { edge: ReferenceEdgeLine; dist: number };
       this.setDimensionPendingRefEdge(
@@ -2896,6 +3005,9 @@ export class CadViewer {
 
     // セグメントとentityの両方が許容距離内にヒットしうる場合は、より近い方を優先する。
     if (entityHit && entityHit.dist <= toleranceMm && (nearestId === null || entityHit.dist < nearestDist)) {
+      // 頂点↔線の寸法(頂点ベースの寸法指定、Phase 30新設): 端点が1点目として保留中の状態で
+      // rectangle/polygonの辺をクリックした場合(逆順)のためclear前に保持しておく。
+      const pendingPointForEdge = this.dimensionPendingPoint;
       this.setDimensionPendingPoint(null);
       this.setDimensionPendingLine(null);
       this.clearDrawingPreview();
@@ -2968,6 +3080,19 @@ export class CadViewer {
           py,
         );
         return;
+      } else if (pendingPointForEdge) {
+        // 端点(1点目)→rectangle/polygonの辺(2点目、頂点ベースの寸法指定、Phase 30新設):
+        // circle-distance-edgeと同じ考え方でpoint-distance-lineターゲットになる
+        // (entity-width/height/entity-edgeいずれの辺種別でも同様に扱う)。
+        const point = pendingPointForEdge;
+        const edgeA = entityHit.highlightPoints[0];
+        const edgeB = entityHit.highlightPoints[1];
+        const line: LineRef =
+          entityHit.edgeIndex !== undefined
+            ? { kind: "entityEdge", entityId: entityHit.entityId, edgeIndex: entityHit.edgeIndex }
+            : { kind: "refEdge", p1: edgeA, p2: edgeB };
+        this.dimensionToolCallbacks?.onTargetPicked({ kind: "point-distance-line", point, edgeA, edgeB, line }, px, py);
+        return;
       } else if (entityHit.kind === "entity-width" || entityHit.kind === "entity-height" || entityHit.kind === "entity-edge") {
         // 辺を1点目としてクリック(選択順柔軟化、UI改善): pending化してハイライト、続けて円を
         // クリックすればcircle-distance-edge/refedgeになる(dimensionPendingLineIdと同じ
@@ -2993,6 +3118,9 @@ export class CadViewer {
 
     if (nearestId === null || nearestDist > toleranceMm) return;
 
+    // 頂点↔線の寸法(頂点ベースの寸法指定、Phase 30新設): 端点が1点目として保留中の状態で
+    // 自由な線分本体をクリックした場合(逆順)のためclear前に保持しておく。
+    const pendingPointForSegment = this.dimensionPendingPoint;
     this.setDimensionPendingPoint(null);
     // セグメント本体のヒットはdimensionPendingOriginを消費しない(原点↔線分本体の組み合わせは
     // 未対応、端点のみ対応)。新たな1点目/確定ターゲットに進むため保留を解除する(相互排他の維持)。
@@ -3026,6 +3154,21 @@ export class CadViewer {
       this.setDimensionPendingLine(null);
       this.dimensionToolCallbacks?.onTargetPicked(
         { kind: "circle-distance-edge", entityId, edgeA: seg.p1, edgeB: seg.p2, line: { kind: "segmentEdge", segmentId: seg.id } },
+        px,
+        py,
+      );
+    } else if (pendingPointForSegment) {
+      // 端点(1点目)→自由な線分本体(2点目、頂点ベースの寸法指定、Phase 30新設):
+      // circle-distance-edgeと同じ考え方でpoint-distance-lineターゲットになる(line側は
+      // segmentEdgeで解決するため、長さ拘束の無い線分は伸び、あれば平行移動で追従する)。
+      this.dimensionToolCallbacks?.onTargetPicked(
+        {
+          kind: "point-distance-line",
+          point: pendingPointForSegment,
+          edgeA: seg.p1,
+          edgeB: seg.p2,
+          line: { kind: "segmentEdge", segmentId: seg.id },
+        },
         px,
         py,
       );
@@ -3070,6 +3213,10 @@ export class CadViewer {
    * は描かない。原点マーカーは保留状態に関わらず常にホバー対象になる(ユーザー報告対応: 原点が
    * いつも選択できない。ヒット半径はORIGIN_HIT_TOLERANCE_PXで他より広め)。参照エッジも保留状態に
    * 関わらず常にホバー対象(以前からの挙動)。
+   * 端点(頂点、頂点ベースの寸法指定、Phase 30新設)は原点マーカーに次ぐ優先度でホバー対象になり、
+   * ヒットすれば頂点マーカー(小さな四角、originMarkerHighlightPolylineを流用)を表示する
+   * (handleDimensionToolClickのbestPoint探索と同じ判定順序: 端点はセグメント本体・entities・
+   * 参照エッジより優先)。
    */
   private handleDimensionToolMouseMove(event: MouseEvent) {
     if (!this.dimensionToolBasis || this.dimensionPendingPoint) return;
@@ -3089,6 +3236,32 @@ export class CadViewer {
         this.drawDimensionHoverPreview(basis, originMarkerHighlightPolyline(worldOriginLocal(basis)));
         return;
       }
+    }
+
+    // 端点(頂点)のホバー判定(頂点ベースの寸法指定、Phase 30新設。セグメント本体・entitiesより優先)。
+    let bestEndpointLocal: [number, number] | null = null;
+    let bestEndpointDistSq = Infinity;
+    for (const seg of this.dimensionToolSegments) {
+      for (const end of ["p1", "p2"] as const) {
+        const local = end === "p1" ? seg.p1 : seg.p2;
+        const world = planeLocalToWorld(basis, local[0], local[1]);
+        const screen = this.projectPoint(world);
+        if (!screen) continue;
+        const dx = screen.x - px;
+        const dy = screen.y - py;
+        const distSq = dx * dx + dy * dy;
+        if (distSq > DIMENSION_ENDPOINT_TOLERANCE_PX * DIMENSION_ENDPOINT_TOLERANCE_PX) continue;
+        if (distSq < bestEndpointDistSq) {
+          bestEndpointDistSq = distSq;
+          bestEndpointLocal = local;
+        }
+      }
+    }
+    if (bestEndpointLocal) {
+      this.clearDrawingPreview();
+      this.dimensionHoverEntityHit = null;
+      this.drawDimensionHoverPreview(basis, originMarkerHighlightPolyline(bestEndpointLocal));
+      return;
     }
 
     const hit = this.raycastDrawingPlane(basis, px, py, rect);
@@ -3972,7 +4145,13 @@ export class CadViewer {
    * 拘束ツールを開始する。以後、直線セグメント本体またはcircleエンティティ境界を2つ順にクリック
    * すると`callbacks.onPairPicked`が呼ばれる(実際の拘束種別の選択・作成はApp側の責務)。
    */
-  startConstraintTool(basis: PlaneBasis, segments: SketchSegment[], entities: SketchEntity[], callbacks: ConstraintToolCallbacks) {
+  startConstraintTool(
+    basis: PlaneBasis,
+    segments: SketchSegment[],
+    entities: SketchEntity[],
+    constraints: SketchConstraint[],
+    callbacks: ConstraintToolCallbacks,
+  ) {
     this.cancelConstraintTool();
     this.cancelPolygonDrawing();
     this.cancelTrimTool();
@@ -3989,15 +4168,17 @@ export class CadViewer {
     this.constraintToolBasis = basis;
     this.constraintToolSegments = segments;
     this.constraintToolEntities = entities;
+    this.constraintPointRepMap = buildPointClusterRepMap(segments, constraints);
     this.constraintToolCallbacks = callbacks;
     this.setConstraintPendingTarget(null);
   }
 
   /** 拘束ツール中、対象スケッチのsegments/entitiesが変わった場合(拘束適用・アンドゥ等)にピック対象を更新する。 */
-  updateConstraintToolTargets(segments: SketchSegment[], entities: SketchEntity[]) {
+  updateConstraintToolTargets(segments: SketchSegment[], entities: SketchEntity[], constraints: SketchConstraint[] = []) {
     if (!this.constraintToolActive) return;
     this.constraintToolSegments = segments;
     this.constraintToolEntities = entities;
+    this.constraintPointRepMap = buildPointClusterRepMap(segments, constraints);
     this.setConstraintPendingTarget(null);
   }
 
@@ -4083,7 +4264,10 @@ export class CadViewer {
         const dx = screen.x - px;
         const dy = screen.y - py;
         if (dx * dx + dy * dy <= DIMENSION_ENDPOINT_TOLERANCE_PX * DIMENSION_ENDPOINT_TOLERANCE_PX) {
-          return { target: { kind: "point", point: { segmentId: seg.id, end } }, highlightPoints: originMarkerHighlightPolyline(local) };
+          // 一致クラスタ(頂点ベースの寸法指定、Phase 30新設): クリック/ホバーした端点を
+          // クラスタの代表点に正規化する(寸法ツールと同じ考え方)。
+          const point = resolvePointClusterRepresentative({ segmentId: seg.id, end }, this.constraintPointRepMap);
+          return { target: { kind: "point", point }, highlightPoints: originMarkerHighlightPolyline(local) };
         }
       }
     }

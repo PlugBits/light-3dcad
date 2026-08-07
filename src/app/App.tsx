@@ -42,6 +42,7 @@ import {
   createSlotEntity,
 } from "../model/entity";
 import type {
+  CadDocument,
   FeatureId,
   Fillet3DFeature,
   FilletEdgeRef,
@@ -62,9 +63,11 @@ import {
   addTangentSegmentConstraint,
   angleBetweenSegmentAndLine,
   angleBetweenSegments,
+  describeAxisDistanceConflict,
   distanceBetweenRefs,
   foldToAcuteAngle,
   isNearlyParallelAngle,
+  pointFromRef,
   segmentLength,
   segmentRadius,
   upsertAngleLineLineConstraint,
@@ -75,6 +78,7 @@ import {
   upsertDistanceEntityOriginConstraint,
   upsertDistanceLineLineConstraint,
   upsertDistanceLineRefEdgeConstraint,
+  upsertDistancePointLineConstraint,
   upsertDistancePointOriginConstraint,
   upsertLengthConstraint,
   upsertRadiusConstraint,
@@ -475,7 +479,7 @@ export default function App() {
     if (!dimensionTool) return;
     const feature = selectedFeatureId ? findFeature(doc, selectedFeatureId) : undefined;
     if (feature?.type === "sketch") {
-      viewerRef.current?.updateDimensionToolTargets(feature.segments ?? [], feature.entities);
+      viewerRef.current?.updateDimensionToolTargets(feature.segments ?? [], feature.entities, feature.constraints ?? []);
     }
   }, [dimensionTool, doc, selectedFeatureId]);
 
@@ -485,7 +489,7 @@ export default function App() {
     if (!constraintTool) return;
     const feature = selectedFeatureId ? findFeature(doc, selectedFeatureId) : undefined;
     if (feature?.type === "sketch") {
-      viewerRef.current?.updateConstraintToolTargets(feature.segments ?? [], feature.entities);
+      viewerRef.current?.updateConstraintToolTargets(feature.segments ?? [], feature.entities, feature.constraints ?? []);
     }
   }, [constraintTool, doc, selectedFeatureId]);
 
@@ -1379,7 +1383,7 @@ export default function App() {
   function handleStartDimensionTool() {
     if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
     const sketchId = selectedFeature.id;
-    viewerRef.current.startDimensionTool(selectedSketchPlane, selectedFeature.segments ?? [], selectedFeature.entities, {
+    viewerRef.current.startDimensionTool(selectedSketchPlane, selectedFeature.segments ?? [], selectedFeature.entities, selectedFeature.constraints ?? [], {
       onTargetPicked: (target, screenX, screenY) => {
         const currentDoc = useCadStore.getState().doc;
         const feature = findFeature(currentDoc, sketchId);
@@ -1401,7 +1405,9 @@ export default function App() {
           const seg = segments.find((s) => s.id === target.segmentId);
           initialValue = (seg && segmentRadius(seg)) ?? 0;
         } else if (target.kind === "distance") {
+          // 端点↔端点の距離(頂点ベースの寸法指定、Phase 30: X/Y距離にも対応)。
           initialValue = distanceBetweenRefs(segments, target.a, target.b) ?? 0;
+          axisOptions = true;
         } else if (target.kind === "entity-radius") {
           titleLabel = "半径 (mm)";
           const entity = entities.find((e) => e.id === target.entityId);
@@ -1417,11 +1423,24 @@ export default function App() {
           const entity = entities.find((e) => e.id === target.entityId);
           initialValue = entity?.kind === "circle" ? distanceBetweenPoints(entity.center, originLocal) : 0;
         } else if (target.kind === "point-distance-origin") {
-          // セグメント端点↔原点の距離(追加項目: 原点ピック常時有効化)。
+          // セグメント端点↔原点の距離(追加項目: 原点ピック常時有効化。頂点ベースの寸法指定、
+          // Phase 30でX/Y距離にも対応)。
           titleLabel = "端点↔原点の距離 (mm)";
           const seg = segments.find((s) => s.id === target.point.segmentId);
           const p = seg ? (target.point.end === "p1" ? seg.p1 : seg.p2) : null;
           initialValue = p ? distanceBetweenPoints(p, originLocal) : 0;
+          axisOptions = true;
+        } else if (target.kind === "point-distance-line") {
+          // 頂点↔線の距離(頂点ベースの寸法指定、Phase 30新設)。circle-distance-edge/refedgeと同じ
+          // 考え方だが対象がcircleの中心ではなく自由な端点である点のみが異なる。
+          titleLabel = target.line.kind === "refEdge" ? "端点↔参照エッジの距離 (mm)" : "端点↔辺の距離 (mm)";
+          const seg = segments.find((s) => s.id === target.point.segmentId);
+          const p = seg ? (target.point.end === "p1" ? seg.p1 : seg.p2) : null;
+          initialValue = p ? distancePointToLine(p, target.edgeA, target.edgeB) : 0;
+          hintLabel =
+            target.line.kind === "refEdge"
+              ? "参照エッジは動かず、端点だけが移動します"
+              : "長さ拘束の無い線分は伸び、長さ拘束があれば線分ごと平行移動します";
         } else if (target.kind === "circle-distance-circle") {
           titleLabel = "中心間の距離 (mm)";
           const from = entities.find((e) => e.id === target.fromEntityId);
@@ -1492,21 +1511,22 @@ export default function App() {
         } else if (state.kind === "circle") {
           setDimensionPendingLabel("1つ目: 円 → 2つ目を選択(原点/円/辺/端面)");
         } else if (state.kind === "line") {
-          setDimensionPendingLabel("1つ目: 線分 → 2つ目の線分/参照エッジを選択(距離/角度)");
+          setDimensionPendingLabel("1つ目: 線分 → 2つ目の線分/参照エッジ/端点を選択(距離/角度/垂直距離)");
         } else if (state.kind === "edge") {
           // 選択順柔軟化(UI改善): 辺(矩形・多角形)を1つ目としてクリックした状態。
-          // 混乱を避けるため線分↔線分の「距離/角度」ではなく「次: 円をクリック」と明示する。
-          setDimensionPendingLabel("1つ目: 辺 → 次: 円をクリック");
+          setDimensionPendingLabel("1つ目: 辺 → 次: 円/端点をクリック");
         } else if (state.kind === "refedge") {
           // 参照エッジを1つ目に選べるようにする改善(追加項目): ボディ端面参照エッジ(破線)を
-          // 1つ目としてクリックした状態。次は円(円↔参照エッジの距離)または線分
-          // (線分↔参照エッジの距離/角度)のどちらも選べる。
-          setDimensionPendingLabel("1つ目: 参照エッジ → 次: 円/線分をクリック");
+          // 1つ目としてクリックした状態。次は円(円↔参照エッジの距離)・線分(線分↔参照エッジの
+          // 距離/角度)・端点(頂点ベースの寸法指定、Phase 30新設: 端点↔参照エッジの垂直距離)のいずれも選べる。
+          setDimensionPendingLabel("1つ目: 参照エッジ → 次: 円/線分/端点をクリック");
         } else if (state.kind === "origin") {
           // 原点ピック常時有効化(追加項目、ユーザー報告対応)。
           setDimensionPendingLabel("1つ目: 原点 → 2つ目を選択(円/端点)");
         } else {
-          setDimensionPendingLabel("1つ目: 端点 → 2つ目の端点を選択(距離/原点)");
+          // 頂点ベースの寸法指定(Phase 30新設): 端点↔線(自由な線分/rectangle・polygonの辺/
+          // 参照エッジ)の垂直距離にも対応。
+          setDimensionPendingLabel("1つ目: 端点 → 2つ目を選択(端点/原点/線)");
         }
       },
     });
@@ -1597,6 +1617,28 @@ export default function App() {
       return;
     }
 
+    // 矛盾巻き戻しの誘導メッセージ(頂点ベースの寸法指定、Phase 30新設): distance/point-distance-origin
+    // (axis省略/"direct")のみ、適用前の座標から典型的な解なしケース(既にX/Y方向に離れている量より
+    // 小さい直線距離を要求)を検出して具体的なメッセージを出す。他のtarget種別・検出できない場合は
+    // updateDocumentWithConflictRollback側の既定メッセージにフォールバックする。
+    const describeConflict = (before: CadDocument): string | null => {
+      const feature = findFeature(before, sketchId);
+      if (feature?.type !== "sketch") return null;
+      const beforeSegments = feature.segments ?? [];
+      if (target.kind === "distance") {
+        const pa = pointFromRef(beforeSegments, target.a);
+        const pb = pointFromRef(beforeSegments, target.b);
+        if (!pa || !pb) return null;
+        return describeAxisDistanceConflict(pa, pb, value, axis);
+      }
+      if (target.kind === "point-distance-origin") {
+        const p = pointFromRef(beforeSegments, target.point);
+        if (!p) return null;
+        return describeAxisDistanceConflict(p, originLocal ?? [0, 0], value, axis);
+      }
+      return null;
+    };
+
     updateDocumentWithConflictRollback(
       sketchId,
       (doc) => {
@@ -1609,17 +1651,20 @@ export default function App() {
             : target.kind === "radius"
               ? upsertRadiusConstraint(constraints, target.segmentId, value)
               : target.kind === "distance"
-                ? upsertDistanceConstraint(constraints, target.a, target.b, value)
+                ? upsertDistanceConstraint(constraints, target.a, target.b, value, axis)
                 : target.kind === "circle-distance-origin"
                   ? upsertDistanceEntityOriginConstraint(constraints, target.entityId, value, originLocal)
                   : target.kind === "point-distance-origin"
-                    ? upsertDistancePointOriginConstraint(constraints, target.point, value, originLocal)
+                    ? upsertDistancePointOriginConstraint(constraints, target.point, value, originLocal, axis)
                     : target.kind === "circle-distance-circle"
                       ? upsertDistanceEntityEntityConstraint(constraints, target.fromEntityId, target.toEntityId, value, axis)
-                      : upsertDistanceEntityLineConstraint(constraints, target.entityId, target.line, value);
+                      : target.kind === "point-distance-line"
+                        ? upsertDistancePointLineConstraint(constraints, target.point, target.line, value)
+                        : upsertDistanceEntityLineConstraint(constraints, target.entityId, target.line, value);
         return setSketchConstraints(doc, sketchId, next);
       },
       showTransientMessage,
+      describeConflict,
     );
     setDimensionPopup(null);
   }
@@ -1633,7 +1678,7 @@ export default function App() {
   function handleStartConstraintTool() {
     if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
     const sketchId = selectedFeature.id;
-    viewerRef.current.startConstraintTool(selectedSketchPlane, selectedFeature.segments ?? [], selectedFeature.entities, {
+    viewerRef.current.startConstraintTool(selectedSketchPlane, selectedFeature.segments ?? [], selectedFeature.entities, selectedFeature.constraints ?? [], {
       onPairPicked: (a, b, screenX, screenY) => {
         setConstraintPopup({ a, b, screen: { x: screenX, y: screenY } });
       },
