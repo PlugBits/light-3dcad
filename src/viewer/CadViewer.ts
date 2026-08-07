@@ -339,6 +339,30 @@ export interface PartDragToolCallbacks {
 }
 
 /**
+ * 合致(メイト、Phase 28c)ツールがクリックで確定する面1つ分の情報。ShellFaceRefと同じ
+ * center/normalスナップショットに加え、bodyFeatureId(その面が属するボディを作ったフィーチャーのid。
+ * faceIdToBodyFeatureIdから逆引きする。Phase 28aの部品移動ツールと同じ仕組み)と
+ * surface(平面/円筒/その他。faceInfoのsurfaceフィールド)を持つ。
+ */
+export interface MatePickTarget {
+  faceId: number;
+  bodyFeatureId: FeatureId;
+  center: [number, number, number];
+  normal: [number, number, number];
+  surface: "plane" | "cylinder" | "other";
+}
+
+/** 合致ツールの開始/終了時、および2つ目の対象が確定したときに呼ばれるコールバック。 */
+export interface MateToolCallbacks {
+  /** 2つ目の対象が確定したときに呼ばれる(screenX/screenYは選択ポップアップの位置決めに使うcanvas内px座標)。 */
+  onPairPicked: (a: MatePickTarget, b: MatePickTarget, screenX: number, screenY: number) => void;
+  /** Escapeキーまたはcancel呼び出しで終了したときに呼ばれる。 */
+  onCancel: () => void;
+  /** 1つ目待ち状態が変わるたびに呼ばれる(ツールバー付近のステータス表示用)。 */
+  onPendingChange?: (pending: MatePickTarget | null) => void;
+}
+
+/**
  * 描画モードの対象図形種別。polygonは既存の複数頂点線描画、rectangle/circleは2クリック作図(Phase 14)、
  * slot/regularPolygonも2クリック作図(Phase 17。幅/辺数はツール開始時に固定するパラメータ)、
  * segmentは自由な線分・円弧チェーン作図(Phase 19b。閉じる必要が無い点がpolygonと異なる)。
@@ -1052,6 +1076,20 @@ export class CadViewer {
   private partHoverFeatureId: FeatureId | null = null;
   private partHoverGroupIndices: number[] = [];
 
+  /**
+   * 合致(メイト、Phase 28c)ツール。3D面選択ツール(faceSelectActive)と同じfaceGroups/materialsを
+   * 流用するが、複数選択ではなく「1つ目→2つ目」の順で2面を確定するとonPairPickedを呼ぶ点が
+   * 拘束ツール(constraintToolActive)と同じ設計(平面のみ・円のみを扱う拘束ツールと異なり、
+   * こちらは平面・円筒の両方を対象にする。faceInfoのisPlanarでは円筒を除外できないため
+   * surfaceフィールド[Phase 28c]で判定する)。
+   */
+  private mateToolActive = false;
+  private mateToolCallbacks: MateToolCallbacks | null = null;
+  /** 1つ目としてクリック済みの対象(未選択はnull)。2つ目のクリックでonPairPickedを呼ぶ。 */
+  private matePendingTarget: MatePickTarget | null = null;
+  /** ホバー中のmaterialIndex(faceSelectActiveのhoveredFaceSelectIndexと同じ役割)。 */
+  private mateHoverGroupIndex: number | null = null;
+
   constructor(
     container: HTMLElement,
     onFaceSelect?: (face: FaceInfo | null) => void,
@@ -1227,6 +1265,12 @@ export class CadViewer {
    * 衝突しないよう、入力欄が開いている間はEscapeを入力キャンセルに限定する)。
    */
   private handleKeyDown = (event: KeyboardEvent) => {
+    if (this.mateToolActive) {
+      if (event.key === "Escape") {
+        this.cancelMateTool();
+      }
+      return;
+    }
     if (this.partDragToolActive) {
       if (event.key === "Escape") {
         this.cancelPartDragTool();
@@ -1363,6 +1407,10 @@ export class CadViewer {
   }
 
   private handleClick = (event: MouseEvent) => {
+    if (this.mateToolActive) {
+      this.handleMateToolClick(event);
+      return;
+    }
     // 部品移動ツールはmousedown〜mouseupのドラッグで完結する(handlePartDragCanvasMouseDown参照)。
     // クリック(=通常の面選択)は無視する。
     if (this.partDragToolActive) return;
@@ -1529,6 +1577,13 @@ export class CadViewer {
         this.materials[this.hoveredFaceSelectIndex]?.color.setHex(BASE_COLOR);
       }
       this.hoveredFaceSelectIndex = null;
+    }
+    if (this.mateToolActive && this.mateHoverGroupIndex != null) {
+      const faceId = this.faceGroups[this.mateHoverGroupIndex]?.faceId;
+      if (faceId == null || faceId !== this.matePendingTarget?.faceId) {
+        this.materials[this.mateHoverGroupIndex]?.color.setHex(BASE_COLOR);
+      }
+      this.mateHoverGroupIndex = null;
     }
   };
 
@@ -2041,6 +2096,7 @@ export class CadViewer {
     this.cancelFaceSelectTool();
     this.cancelThreadPlaceTool();
     this.cancelPartDragTool();
+    this.cancelMateTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.drawingActive = true;
@@ -2171,6 +2227,7 @@ export class CadViewer {
     this.cancelFaceSelectTool();
     this.cancelThreadPlaceTool();
     this.cancelPartDragTool();
+    this.cancelMateTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.cornerToolActive = true;
@@ -2296,6 +2353,7 @@ export class CadViewer {
     this.cancelFaceSelectTool();
     this.cancelThreadPlaceTool();
     this.cancelPartDragTool();
+    this.cancelMateTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.trimActive = true;
@@ -2448,6 +2506,7 @@ export class CadViewer {
     this.cancelFaceSelectTool();
     this.cancelThreadPlaceTool();
     this.cancelPartDragTool();
+    this.cancelMateTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.dimensionToolActive = true;
@@ -3319,6 +3378,10 @@ export class CadViewer {
    * 更新し、描画モード外であれば面ホバーハイライトを更新する。
    */
   private handleDrawingMouseMove = (event: MouseEvent) => {
+    if (this.mateToolActive) {
+      this.handleMateToolMouseMove(event);
+      return;
+    }
     if (this.partDragToolActive) {
       // ドラッグ中はwindow全体のmousemoveリスナー(handlePartDragWindowMouseMove)が処理するため、
       // ここではホバー強調の更新のみ行う(ドラッグ中は何もしない)。
@@ -3804,6 +3867,7 @@ export class CadViewer {
     this.cancelFaceSelectTool();
     this.cancelThreadPlaceTool();
     this.cancelPartDragTool();
+    this.cancelMateTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.constraintToolActive = true;
@@ -3948,6 +4012,7 @@ export class CadViewer {
     this.cancelFaceSelectTool();
     this.cancelThreadPlaceTool();
     this.cancelPartDragTool();
+    this.cancelMateTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.edgeSelectActive = true;
@@ -4125,6 +4190,7 @@ export class CadViewer {
     this.cancelEdgeSelectTool();
     this.cancelThreadPlaceTool();
     this.cancelPartDragTool();
+    this.cancelMateTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.faceSelectActive = true;
@@ -4220,6 +4286,113 @@ export class CadViewer {
     }
   }
 
+  // ---- 合致(メイト)ツール(Phase 28c) ----
+  // FaceSelectTool(シェル)と同じfaceGroups/materials/raycastFaceGroupAt()を使うが、複数選択では
+  // なく「1つ目→2つ目」の順で2面を確定するとonPairPickedを呼ぶ点が拘束ツール(2D)と同じ設計。
+  // 平面・円筒のどちらの面も選択できる(faceInfo.surfaceで判定。他の形状[円錐・球等]は合致の対象外
+  // だが、クリック自体は妨げない。組み合わせ不適合の判定・メッセージ表示はApp側の責務とする)。
+
+  /**
+   * 合致ツールを開始する。以後、ボディの面上でのマウス移動はホバー強調(水色)、クリックは
+   * 1つ目→2つ目の順で対象を確定し、2つ目が確定した時点で`callbacks.onPairPicked`を呼ぶ
+   * (1つ目はFACE_SELECT_COLORで強調表示したまま2つ目待ちになる)。同じ面を2回連続でクリックしても
+   * 何も起きない(1つ目のまま)。Escapeまたはcancel呼び出しで終了する(callbacks.onCancelが呼ばれる)。
+   */
+  startMateTool(callbacks: MateToolCallbacks) {
+    this.cancelMateTool();
+    this.cancelPolygonDrawing();
+    this.cancelTrimTool();
+    this.cancelCornerTool();
+    this.cancelDimensionTool();
+    this.cancelConstraintTool();
+    this.cancelEdgeSelectTool();
+    this.cancelFaceSelectTool();
+    this.cancelThreadPlaceTool();
+    this.cancelPartDragTool();
+    this.clearSelection();
+    this.setHoverGroup(null);
+    this.mateToolActive = true;
+    this.mateToolCallbacks = callbacks;
+    this.matePendingTarget = null;
+    this.mateHoverGroupIndex = null;
+  }
+
+  isMateToolActive(): boolean {
+    return this.mateToolActive;
+  }
+
+  /** 合致ツールを終了する(onCancelが呼ばれる)。非アクティブなら何もしない。 */
+  cancelMateTool() {
+    if (!this.mateToolActive) return;
+    const callbacks = this.mateToolCallbacks;
+    this.mateToolActive = false;
+    this.mateToolCallbacks = null;
+    this.matePendingTarget = null;
+    this.clearMateHighlight();
+    callbacks?.onCancel();
+  }
+
+  /** materials[]の色をすべてBASE_COLORへ戻す(選択・ホバーいずれもリセット)。 */
+  private clearMateHighlight() {
+    for (let i = 0; i < this.faceGroups.length; i += 1) {
+      this.materials[i]?.color.setHex(BASE_COLOR);
+    }
+    this.mateHoverGroupIndex = null;
+    this.renderer.domElement.style.cursor = "";
+  }
+
+  private handleMateToolClick(event: MouseEvent) {
+    const groupIndex = this.raycastFaceGroupAt(event);
+    if (groupIndex == null) return;
+    const faceId = this.faceGroups[groupIndex].faceId;
+    const bodyFeatureId = this.faceIdToBodyFeatureId.get(faceId);
+    const info = this.faceInfo.find((f) => f.faceId === faceId);
+    if (!bodyFeatureId || !info) return;
+    const target: MatePickTarget = {
+      faceId,
+      bodyFeatureId,
+      center: info.center,
+      normal: info.normal,
+      surface: info.surface,
+    };
+
+    const pending = this.matePendingTarget;
+    if (!pending) {
+      this.matePendingTarget = target;
+      this.materials[groupIndex]?.color.setHex(FACE_SELECT_COLOR);
+      this.mateToolCallbacks?.onPendingChange?.(target);
+      return;
+    }
+    if (pending.faceId === target.faceId) return;
+
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+    this.matePendingTarget = null;
+    this.clearMateHighlight();
+    this.mateToolCallbacks?.onPendingChange?.(null);
+    this.mateToolCallbacks?.onPairPicked(pending, target, px, py);
+  }
+
+  private handleMateToolMouseMove(event: MouseEvent) {
+    const groupIndex = this.raycastFaceGroupAt(event);
+    this.renderer.domElement.style.cursor = groupIndex != null ? "pointer" : "";
+    if (this.mateHoverGroupIndex === groupIndex) return;
+    if (this.mateHoverGroupIndex != null) {
+      const prevFaceId = this.faceGroups[this.mateHoverGroupIndex]?.faceId;
+      if (prevFaceId == null || prevFaceId !== this.matePendingTarget?.faceId) {
+        this.materials[this.mateHoverGroupIndex]?.color.setHex(BASE_COLOR);
+      }
+    }
+    this.mateHoverGroupIndex = groupIndex;
+    if (groupIndex != null) {
+      const faceId = this.faceGroups[groupIndex].faceId;
+      if (faceId !== this.matePendingTarget?.faceId) {
+        this.materials[groupIndex]?.color.setHex(HOVER_COLOR);
+      }
+    }
+  }
+
   // ---- ねじ配置ツール(Phase 25c) ----
   // 面選択ツールと同じfaceGroups/materials/faceInfoを使うが、複数選択ではなく平面な面への
   // 単一クリックで即座にonPickが呼ばれて終了する(選択集合を持たず、通常の単一面ホバー
@@ -4241,6 +4414,7 @@ export class CadViewer {
     this.cancelEdgeSelectTool();
     this.cancelFaceSelectTool();
     this.cancelPartDragTool();
+    this.cancelMateTool();
     this.clearSelection();
     this.setHoverGroup(null);
     this.threadPlaceActive = true;
@@ -4333,6 +4507,7 @@ export class CadViewer {
    */
   startPartDragTool(snap: boolean, callbacks: PartDragToolCallbacks) {
     this.cancelPartDragTool();
+    this.cancelMateTool();
     this.cancelPolygonDrawing();
     this.cancelTrimTool();
     this.cancelCornerTool();

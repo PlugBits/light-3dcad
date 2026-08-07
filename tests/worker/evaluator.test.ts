@@ -12,6 +12,7 @@ import type { OpenCascadeInstance } from "replicad-opencascadejs/src/replicad_si
 import {
   addExtrudeFeature,
   addFillet3DFeature,
+  addMateFeature,
   addPartInstanceFeature,
   addRevolveFeature,
   addShellFeature,
@@ -28,8 +29,9 @@ import {
   patchExtrudeFeature,
   resolveEvaluationDocument,
   setRollbackIndex,
+  validateFeature,
 } from "../../src/model";
-import type { CadDocument, FilletEdgeRef, SketchSegment } from "../../src/model/types";
+import type { CadDocument, FilletEdgeRef, MateFaceRef, SketchSegment } from "../../src/model/types";
 import { checkInterference, evaluateDocument } from "../../src/worker/evaluator";
 
 const initOpenCascade = initOpenCascadeUntyped as unknown as (moduleOverrides: {
@@ -122,6 +124,72 @@ function topFaceEdgeSnapshots(shape: Shape3D, topZ: number): FilletEdgeRef[] {
     edge.delete();
   }
   return result;
+}
+
+/**
+ * テスト用(Phase 28c、合致): 形状の中から法線がtargetNormalにほぼ一致する平面を探し、
+ * MateFaceRefの元データ(bodyFeatureIdは呼び出し側で付与)を取り出す。findTopFace()の一般化版。
+ */
+function findFaceByNormal(shape: Shape3D, targetNormal: [number, number, number]): { faceId: number; center: [number, number, number]; normal: [number, number, number] } {
+  const faces = shape.faces;
+  let found: { faceId: number; center: [number, number, number]; normal: [number, number, number] } | null = null;
+  for (const face of faces) {
+    if (face.geomType === "PLANE") {
+      const centerVec = face.center;
+      const normalVec = face.normalAt();
+      const center = centerVec.toTuple();
+      const normal = normalVec.toTuple();
+      centerVec.delete();
+      normalVec.delete();
+      const dot = normal[0] * targetNormal[0] + normal[1] * targetNormal[1] + normal[2] * targetNormal[2];
+      if (dot > 1 - 1e-6) {
+        found = { faceId: face.hashCode, center, normal };
+      }
+    }
+    face.delete();
+  }
+  if (!found) throw new Error("テストセットアップ失敗: 指定した法線の面が見つかりません");
+  return found;
+}
+
+/** テスト用(Phase 28c、合致): 形状の中から円筒面(geomType==="CYLINDRE")を1つ探し、faceId/center/normalを取り出す。 */
+function findCylinderFace(shape: Shape3D): { faceId: number; center: [number, number, number]; normal: [number, number, number] } {
+  const faces = shape.faces;
+  let found: { faceId: number; center: [number, number, number]; normal: [number, number, number] } | null = null;
+  for (const face of faces) {
+    if (!found && face.geomType === "CYLINDRE") {
+      const centerVec = face.center;
+      const normalVec = face.normalAt();
+      found = { faceId: face.hashCode, center: centerVec.toTuple(), normal: normalVec.toTuple() };
+      centerVec.delete();
+      normalVec.delete();
+    }
+    face.delete();
+  }
+  if (!found) throw new Error("テストセットアップ失敗: 円筒面が見つかりません");
+  return found;
+}
+
+/**
+ * テスト用(Phase 28c、合致): 半径radius・高さdistanceの円柱(原点中心、+Z方向へ押し出し)の
+ * ドキュメントを作る。円形sketch(circle)を押し出すだけでbodyDoc相当になる。
+ */
+function cylinderDoc(radius: number, distance: number): CadDocument {
+  const empty = createEmptyDocument();
+  const circle = createCircleEntity({ radius });
+  const { doc: withSketch, feature: sketch } = addSketchFeature(empty, {
+    name: "CylSketch1",
+    plane: { kind: "world", plane: "XY" },
+    entities: [circle],
+  });
+  const { doc } = addExtrudeFeature(withSketch, {
+    name: "CylExtrude1",
+    sketchId: sketch.id,
+    distance,
+    direction: 1,
+    operation: "newBody",
+  });
+  return doc;
 }
 
 const SKIP_NOTE = "Node上でのOpenCascade WASM初期化に失敗したためスキップ";
@@ -2969,5 +3037,233 @@ describe("checkInterference (WASM統合): 干渉チェック(Phase 28b)", () => 
     const emptyResult = checkInterference(createEmptyDocument());
     expect(emptyResult.ok).toBe(true);
     if (emptyResult.ok) expect(emptyResult.pairs.length).toBe(0);
+  });
+});
+
+describe("evaluateDocument (WASM統合): 合致(メイト、Phase 28c)", () => {
+  it("① coincident: 部品(10mm箱)を箱(上面z=20)の上方に配置し、底面↔上面で一致させると部品zが20に収束する(法線は逆平行)", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const base = boxDoc(60, 40, 20);
+    const baseExtrude = base.features.find((f) => f.type === "extrude")!;
+
+    const baseResult = evaluateDocument(base);
+    expect(baseResult.ok).toBe(true);
+    if (!baseResult.ok) return;
+    const baseTopFace = findFaceByNormal(baseResult.shape as Shape3D, [0, 0, 1]);
+    (baseResult.shape as Shape3D).delete();
+
+    const partDoc = boxDoc(10, 10, 10);
+    const partResult = evaluateDocument(partDoc);
+    expect(partResult.ok).toBe(true);
+    if (!partResult.ok) return;
+    // 部品ローカル座標系での底面(evaluatePartDocumentCached()と同じ「変換前」ジオメトリ)。
+    const partBottomFaceLocal = findFaceByNormal(partResult.shape as Shape3D, [0, 0, -1]);
+    (partResult.shape as Shape3D).delete();
+
+    const { doc: docWithPart, feature: partInstance } = addPartInstanceFeature(base, {
+      name: "Part1",
+      part: partDoc,
+      position: [3, 4, 50],
+      rotation: [0, 0, 0],
+    });
+
+    const a: MateFaceRef = { bodyFeatureId: baseExtrude.id, ...baseTopFace, surface: "plane" };
+    const b: MateFaceRef = { bodyFeatureId: partInstance.id, ...partBottomFaceLocal, surface: "plane" };
+    const { doc } = addMateFeature(docWithPart, { name: "Mate1", kind: "coincident", a, b });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.solvedPlacements.length).toBe(1);
+    const placement = result.solvedPlacements[0];
+    expect(placement.featureId).toBe(partInstance.id);
+    expect(placement.position[2]).toBeCloseTo(20, 3);
+    // 拘束されない自由度(法線[Z]以外の並進、回転)は正則化により初期値付近に留まる。
+    expect(placement.position[0]).toBeCloseTo(3, 2);
+    expect(placement.position[1]).toBeCloseTo(4, 2);
+    expect(placement.rotation[0]).toBeCloseTo(0, 2);
+    expect(placement.rotation[1]).toBeCloseTo(0, 2);
+    expect(placement.rotation[2]).toBeCloseTo(0, 2);
+
+    // 実体積(本体60x40x20+部品10x10x10、干渉なし)でも解いた配置がボディへ反映されていることを確認する。
+    const shape = result.shape as Shape3D;
+    expect(measureVolume(shape)).toBeCloseTo(60 * 40 * 20 + 10 * 10 * 10, 2);
+    shape.delete();
+  });
+
+  it("② distance=5: coincidentと同じ組み合わせにvalue=5を指定すると、部品zが25(=20+5)に収束する", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const base = boxDoc(60, 40, 20);
+    const baseExtrude = base.features.find((f) => f.type === "extrude")!;
+
+    const baseResult = evaluateDocument(base);
+    expect(baseResult.ok).toBe(true);
+    if (!baseResult.ok) return;
+    const baseTopFace = findFaceByNormal(baseResult.shape as Shape3D, [0, 0, 1]);
+    (baseResult.shape as Shape3D).delete();
+
+    const partDoc = boxDoc(10, 10, 10);
+    const partResult = evaluateDocument(partDoc);
+    expect(partResult.ok).toBe(true);
+    if (!partResult.ok) return;
+    const partBottomFaceLocal = findFaceByNormal(partResult.shape as Shape3D, [0, 0, -1]);
+    (partResult.shape as Shape3D).delete();
+
+    const { doc: docWithPart, feature: partInstance } = addPartInstanceFeature(base, {
+      name: "Part1",
+      part: partDoc,
+      position: [0, 0, 60],
+      rotation: [0, 0, 0],
+    });
+
+    const a: MateFaceRef = { bodyFeatureId: baseExtrude.id, ...baseTopFace, surface: "plane" };
+    const b: MateFaceRef = { bodyFeatureId: partInstance.id, ...partBottomFaceLocal, surface: "plane" };
+    const { doc } = addMateFeature(docWithPart, { name: "Mate1", kind: "distance", value: 5, a, b });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.solvedPlacements.length).toBe(1);
+    expect(result.solvedPlacements[0].position[2]).toBeCloseTo(25, 3);
+    (result.shape as Shape3D).delete();
+  });
+
+  it("③ concentric: 円柱ボディ+円柱部品の側面を同軸にすると、部品の軸(x,y)がボディの軸(0,0)に収束する", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const base = cylinderDoc(15, 30);
+    const baseExtrude = base.features.find((f) => f.type === "extrude")!;
+
+    const baseResult = evaluateDocument(base);
+    expect(baseResult.ok).toBe(true);
+    if (!baseResult.ok) return;
+    const baseCylFace = findCylinderFace(baseResult.shape as Shape3D);
+    (baseResult.shape as Shape3D).delete();
+
+    const partDoc = cylinderDoc(5, 10);
+    const partResult = evaluateDocument(partDoc);
+    expect(partResult.ok).toBe(true);
+    if (!partResult.ok) return;
+    const partCylFaceLocal = findCylinderFace(partResult.shape as Shape3D);
+    (partResult.shape as Shape3D).delete();
+
+    const { doc: docWithPart, feature: partInstance } = addPartInstanceFeature(base, {
+      name: "Part1",
+      part: partDoc,
+      position: [8, -3, 17],
+      rotation: [0, 0, 0],
+    });
+
+    const a: MateFaceRef = { bodyFeatureId: baseExtrude.id, ...baseCylFace, surface: "cylinder" };
+    const b: MateFaceRef = { bodyFeatureId: partInstance.id, ...partCylFaceLocal, surface: "cylinder" };
+    const { doc } = addMateFeature(docWithPart, { name: "Mate1", kind: "concentric", a, b });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.solvedPlacements.length).toBe(1);
+    const placement = result.solvedPlacements[0];
+    expect(placement.position[0]).toBeCloseTo(0, 2);
+    expect(placement.position[1]).toBeCloseTo(0, 2);
+    // 軸方向(Z)は同軸拘束では決まらないため、正則化により初期値付近(17)に留まる。
+    expect(placement.position[2]).toBeCloseTo(17, 1);
+    (result.shape as Shape3D).delete();
+  });
+
+  it("④ 動かせる部品(partInstance)が無い合致はバリデーションエラーになる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    // AもBも通常ボディ(newBody)のみ。少なくとも一方がpartInstanceである必要がある。
+    const empty = createEmptyDocument();
+    const rectA = createRectangleEntity({ width: 20, height: 20 });
+    const { doc: doc1, feature: sketchA } = addSketchFeature(empty, {
+      name: "SketchA",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rectA],
+    });
+    const { doc: doc2, feature: extrudeA } = addExtrudeFeature(doc1, {
+      name: "BodyA",
+      sketchId: sketchA.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+    const rectB = createRectangleEntity({ center: [100, 0], width: 20, height: 20 });
+    const { doc: doc3, feature: sketchB } = addSketchFeature(doc2, {
+      name: "SketchB",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rectB],
+    });
+    const { doc: doc4, feature: extrudeB } = addExtrudeFeature(doc3, {
+      name: "BodyB",
+      sketchId: sketchB.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const resultA = evaluateDocument(doc4);
+    expect(resultA.ok).toBe(true);
+    if (!resultA.ok) return;
+    const faceA = findFaceByNormal(resultA.shape as Shape3D, [0, 0, 1]);
+    const faceB = findFaceByNormal(resultA.shape as Shape3D, [0, 0, 1]);
+    (resultA.shape as Shape3D).delete();
+
+    const a: MateFaceRef = { bodyFeatureId: extrudeA.id, ...faceA, surface: "plane" };
+    const b: MateFaceRef = { bodyFeatureId: extrudeB.id, ...faceB, surface: "plane" };
+    const { doc, feature: mate } = addMateFeature(doc4, { name: "Mate1", kind: "coincident", a, b });
+
+    const errors = validateFeature(mate, doc.features);
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors.some((e) => e.message.includes("部品配置"))).toBe(true);
+  });
+
+  it("⑤ 矛盾する2つの合致(同じ部品底面を異なる高さの面にそれぞれ一致させる)は収束せずfeatureId付きエラーになる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const base = boxDoc(60, 40, 20);
+    const baseExtrude = base.features.find((f) => f.type === "extrude")!;
+
+    const baseResult = evaluateDocument(base);
+    expect(baseResult.ok).toBe(true);
+    if (!baseResult.ok) return;
+    const topFace = findFaceByNormal(baseResult.shape as Shape3D, [0, 0, 1]);
+    const bottomFace = findFaceByNormal(baseResult.shape as Shape3D, [0, 0, -1]);
+    (baseResult.shape as Shape3D).delete();
+
+    const partDoc = boxDoc(10, 10, 10);
+    const partResult = evaluateDocument(partDoc);
+    expect(partResult.ok).toBe(true);
+    if (!partResult.ok) return;
+    const partBottomFaceLocal = findFaceByNormal(partResult.shape as Shape3D, [0, 0, -1]);
+    (partResult.shape as Shape3D).delete();
+
+    const { doc: docWithPart, feature: partInstance } = addPartInstanceFeature(base, {
+      name: "Part1",
+      part: partDoc,
+      position: [0, 0, 50],
+      rotation: [0, 0, 0],
+    });
+
+    const aTop: MateFaceRef = { bodyFeatureId: baseExtrude.id, ...topFace, surface: "plane" };
+    const aBottom: MateFaceRef = { bodyFeatureId: baseExtrude.id, ...bottomFace, surface: "plane" };
+    const bRef: MateFaceRef = { bodyFeatureId: partInstance.id, ...partBottomFaceLocal, surface: "plane" };
+
+    const { doc: docWithMate1 } = addMateFeature(docWithPart, {
+      name: "Mate1(上面に一致)",
+      kind: "coincident",
+      a: aTop,
+      b: bRef,
+    });
+    const { doc } = addMateFeature(docWithMate1, {
+      name: "Mate2(下面にも一致・矛盾)",
+      kind: "coincident",
+      a: aBottom,
+      b: bRef,
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).toContain("合致");
+    // featureIdは2つの合致(mate1/mate2)のいずれか(残差が大きい方に帰属する)。
+    expect(doc.features.some((f) => f.type === "mate" && f.id === result.featureId)).toBe(true);
   });
 });

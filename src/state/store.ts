@@ -5,6 +5,7 @@ import { create } from "zustand";
 import {
   addExtrudeFeature,
   addFillet3DFeature,
+  addMateFeature,
   addPartInstanceFeature,
   addRevolveFeature,
   addShellFeature,
@@ -13,6 +14,7 @@ import {
   createEmptyDocument,
   effectiveFeatureCount,
   findFeature,
+  patchPartInstanceFeature,
   removeFeatureCascade,
   resolveEvaluationDocument,
   setRollbackIndex as setDocRollbackIndex,
@@ -24,6 +26,8 @@ import type {
   ExtrudeFeature,
   FeatureId,
   FilletEdgeRef,
+  MateFaceRef,
+  MateFeature,
   ShellFaceRef,
   ThreadFaceRef,
   ThreadPreset,
@@ -38,6 +42,7 @@ import type {
   MeshQuality,
   ReferenceEdgeSet,
   SketchPlaneInfo,
+  SolvedPlacement,
   WorkerResponse,
 } from "../protocol/messages";
 import { deserializeProject, serializeProject } from "../project/serialization";
@@ -318,6 +323,13 @@ interface CadStoreState {
   }) => void;
 
   /**
+   * 合致(メイト、Phase 28c)フィーチャーを追加し、選択状態にする。追加直後、Worker評価が
+   * (他のフィーチャー追加と同じ経路で)自動的に発行され、evaluator.ts側のソルバが解いた配置が
+   * evaluate応答経由でこのfeature.a/bが参照するpartInstanceへ書き戻される(即ソルブ)。
+   */
+  addMate: (params: { name: string; kind: MateFeature["kind"]; value?: number; a: MateFaceRef; b: MateFaceRef }) => void;
+
+  /**
    * 干渉チェック(Phase 28b)を実行する。全ボディ(部品配置による追加ボディも含む)をペアごとに
    * 交差判定し、結果をinterferenceResultに反映する(オンデマンド実行のみ、ドキュメント評価の
    * たびに自動実行はしない)。呼び出し側(UI)は戻り値のpairs件数で「干渉なし」トースト表示等を
@@ -339,6 +351,25 @@ interface CadStoreState {
   newProject: () => void;
 }
 
+/**
+ * 合致(メイト、Phase 28c)ソルバが解いた配置を、対応するpartInstanceフィーチャーへ書き戻す。
+ * src/sketch/solver.tsの拘束ソルバの書き戻し(updateDocument内でsolveDocumentSketches()の結果を
+ * そのままdocに反映する)と異なり、こちらはWorker評価応答(非同期)を受け取った後に反映するため、
+ * applyEvaluated()内でupdateReferenceEdgeSnapshots()と同じく「Worker再評価もアンドゥ履歴への
+ * pushも行わない、直接のdoc置き換え」として行う(解いた配置自体は既にジオメトリに反映済みの
+ * meshで表示されているため、doc側の数値を合わせるだけで再評価は不要)。
+ */
+function applyMateSolvedPlacements(doc: CadDocument, placements: SolvedPlacement[]): CadDocument {
+  let next = doc;
+  for (const placement of placements) {
+    next = patchPartInstanceFeature(next, placement.featureId, {
+      position: placement.position,
+      rotation: placement.rotation,
+    });
+  }
+  return next;
+}
+
 function applyEvaluated(
   set: (partial: Partial<CadStoreState>) => void,
   get: () => CadStoreState,
@@ -354,7 +385,9 @@ function applyEvaluated(
     // 発行しない(スナップショット更新自体は現在のジオメトリに影響しないため。マッチした新しい
     // スナップショットは次回のupdateDocument()呼び出しから反映される。既知の制限として
     // docs/PLAN.mdに記載)。
-    const nextDoc = updateReferenceEdgeSnapshots(get().doc, response.referenceEdges);
+    const withReferenceEdges = updateReferenceEdgeSnapshots(get().doc, response.referenceEdges);
+    // 合致(メイト、Phase 28c)ソルバが解いた配置を書き戻す(履歴は積まない、上記コメント参照)。
+    const nextDoc = applyMateSolvedPlacements(withReferenceEdges, response.solvedPlacements);
     set({
       doc: nextDoc,
       status: "ready",
@@ -622,6 +655,13 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
       position: position ?? [0, 0, 0],
       rotation: rotation ?? [0, 0, 0],
     });
+    get().updateDocument(() => nextDoc);
+    set({ selectedFeatureId: feature.id });
+  },
+
+  addMate: ({ name, kind, value, a, b }) => {
+    const doc = get().doc;
+    const { doc: nextDoc, feature } = addMateFeature(doc, { name, kind, value, a, b });
     get().updateDocument(() => nextDoc);
     set({ selectedFeatureId: feature.id });
   },

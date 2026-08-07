@@ -54,6 +54,8 @@ import type {
   FeatureId,
   Fillet3DFeature,
   FilletEdgeRef,
+  MateFaceRef,
+  MateFeature,
   PartInstanceFeature,
   PolygonCorner,
   ShellFaceRef,
@@ -64,13 +66,14 @@ import type {
   ThreadFeature,
 } from "../model/types";
 import { validatePolygonCorners } from "../model/validation";
+import { solveMates, type MateFaceInput, type MateGeom, type MateInput, type PartPlacement } from "../assembly/mateSolver";
 import { effectivePolygonBulges } from "../sketch/bulge";
 import { classifySketchEntities } from "../sketch/containment";
 import { computeFacePlaneBasis, facePlaneRawXDir } from "../sketch/facePlaneBasis";
 import { findClosedRegions, loopPolyline } from "../sketch/regions";
 import { regularPolygonVertices, slotAxisNormal, SLOT_CAP_BULGE } from "../sketch/shapeFromPoints";
 import { MALE_THREAD_MAX_LENGTH, THREAD_PRESET_TABLE, threadDrillDiameter } from "../model/threadPresets";
-import type { BodyGroup, ReferenceEdgeLine, ReferenceEdgeSet, SketchPlaneInfo } from "../protocol/messages";
+import type { BodyGroup, ReferenceEdgeLine, ReferenceEdgeSet, SketchPlaneInfo, SolvedPlacement } from "../protocol/messages";
 
 export interface EvaluationSuccess {
   ok: true;
@@ -103,6 +106,13 @@ export interface EvaluationSuccess {
    * Addするだけのため、ここで集めるfaceIdは最終的なcompound[=shape]上のfaceIdと一致する)。
    */
   bodyGroups: BodyGroup[];
+  /**
+   * 合致(メイト、Phase 28c)フィーチャーの解決結果。合致に関与するpartInstanceの解いた
+   * position/rotationのみを含む(合致が1つも無い、または合致が関与するpartInstanceが無い場合は
+   * 空配列)。Worker応答経由でsrc/state/store.tsが該当partInstanceフィーチャーへ書き戻す
+   * (履歴は積まない。src/sketch/solver.tsの拘束ソルバの書き戻しと同じ設計)。
+   */
+  solvedPlacements: SolvedPlacement[];
 }
 
 export interface EvaluationFailure {
@@ -149,6 +159,9 @@ function normalize(v: Tuple3): Tuple3 {
   const len = length(v);
   if (len < 1e-12) return v;
   return [v[0] / len, v[1] / len, v[2] / len];
+}
+function scaleVec(v: Tuple3, s: number): Tuple3 {
+  return [v[0] * s, v[1] * s, v[2] * s];
 }
 
 interface PlaneBasis {
@@ -1009,22 +1022,280 @@ function evaluatePartDocumentCached(part: CadDocument, partName: string): Shape3
 }
 
 /**
+ * ローカル座標系のシェイプ(部品原点基準)を、rotation(X軸→Y軸→Z軸の順、いずれも[0,0,0]周り)→
+ * position(平行移動)の順で変換する。呼び出し元のshapeをconsumeし、新しいインスタンスを返す
+ * (replicadのShape3D#rotate()/#translate()の規約どおり)。applyPartInstanceToBodies()と
+ * 合致(メイト)ソルバが解いた配置での再変換(applyMateSolvedPlacements())の両方で使う共通処理。
+ */
+function transformLocalShapeToWorld(shape: Shape3D, position: Tuple3, rotation: Tuple3): Shape3D {
+  let result = shape;
+  const [rx, ry, rz] = rotation;
+  if (rx !== 0) result = result.rotate(rx, [0, 0, 0], [1, 0, 0]);
+  if (ry !== 0) result = result.rotate(ry, [0, 0, 0], [0, 1, 0]);
+  if (rz !== 0) result = result.rotate(rz, [0, 0, 0], [0, 0, 1]);
+  result = result.translate(position);
+  return result;
+}
+
+/**
  * 部品配置(簡易アセンブリ、Phase 27b)フィーチャーを評価し、bodiesマップに新規ボディとして
  * 追加する(常に「このpartInstance自身が作った1つの新規ボディ」。newBodyフィーチャーと同じ扱いで、
  * 以降のextrude/revolveのtargetBodyIdで参照できる)。
- * 変換はrotation(X軸→Y軸→Z軸の順、いずれも部品ローカル原点[0,0,0]周り)→position(平行移動)の順に
- * 適用する。replicadのShape3D#rotate()/#translate()はいずれも呼び出し元のシェイプをdelete()して
- * 新しいインスタンスを返す(node_modules/replicad/dist/replicad.jsのShape.rotate/translate実装、
- * このファイルのorientLocalSolidToWorld()と同じパターン)。
+ *
+ * 合致(メイト、Phase 28c)対応: 変換前のローカルシェイプ(部品原点基準)を localShapeById に、
+ * その面ジオメトリ(合致の面マッチング用インデックス)を localFaceIndexById に、いずれも
+ * このpartInstanceのfeatureIdをキーとして保存しておく。合致フィーチャーが1つも無いドキュメントでも
+ * 常に保存する(件数が少なく安価なため、条件分岐で複雑にするより単純さを優先する)。
+ * localShapeById の所有権はevaluateFeatures()側にあり、合致の解決・再変換が終わったら
+ * (成功・失敗を問わず)呼び出し側で delete() する。
  */
-function applyPartInstanceToBodies(bodies: Map<FeatureId, Shape3D>, feature: PartInstanceFeature): void {
-  let shape = evaluatePartDocumentCached(feature.part, feature.name);
-  const [rx, ry, rz] = feature.rotation;
-  if (rx !== 0) shape = shape.rotate(rx, [0, 0, 0], [1, 0, 0]);
-  if (ry !== 0) shape = shape.rotate(ry, [0, 0, 0], [0, 1, 0]);
-  if (rz !== 0) shape = shape.rotate(rz, [0, 0, 0], [0, 0, 1]);
-  shape = shape.translate(feature.position);
+function applyPartInstanceToBodies(
+  bodies: Map<FeatureId, Shape3D>,
+  feature: PartInstanceFeature,
+  localShapeById: Map<FeatureId, Shape3D>,
+  localFaceIndexById: Map<FeatureId, MateFaceIndex>,
+): void {
+  const localShape = evaluatePartDocumentCached(feature.part, feature.name);
+  localShapeById.set(feature.id, localShape);
+  localFaceIndexById.set(feature.id, buildMateFaceIndex(localShape));
+
+  const shape = transformLocalShapeToWorld(localShape.clone(), feature.position, feature.rotation);
   bodies.set(feature.id, shape);
+}
+
+/**
+ * 合致(メイト、Phase 28c)の面マッチングに使う、1面分の抽出済みジオメトリ。
+ * center/normal は面の中心・法線(faceCenterNormal()と同じ取得方法)で、平面はそのまま残差計算にも
+ * 使う。円筒は center/normal を「同じ面を再特定するためのフォールバック識別」のみに使い、実際の
+ * 残差計算(軸の平行判定・軸間距離)には axis(軸上の1点+軸方向)を使う(cylinderのnormalAt()は
+ * クリックした点により向きが変わり、同一性の手がかりとしては弱いため)。
+ */
+interface MateableFaceGeom {
+  surface: "plane" | "cylinder";
+  center: Tuple3;
+  normal: Tuple3;
+  /** surface:"cylinder" のときのみ設定。 */
+  axis?: { point: Tuple3; direction: Tuple3 };
+}
+
+/** MateableFaceGeomの集合+面マッチングの許容距離(shapeのバウンディングボックス対角長ベース)。 */
+interface MateFaceIndex {
+  byFaceId: Map<number, MateableFaceGeom>;
+  maxDist: number;
+}
+
+/**
+ * 円筒面(geomType==="CYLINDRE")の軸(軸上の1点+軸方向単位ベクトル)を、UVサンプリングで推定する
+ * (Phase 28c)。replicadのFace型は軸を直接返すAPIを公開していない(Face._geomAdaptor()経由で
+ * OCCTのBRepAdaptor_Surface#Cylinder()にアクセスすれば取得できるが、protectedメソッドへの
+ * 型キャスト越しアクセスとなり将来のreplicadバージョン変更に対して脆いため、このプロジェクトでは
+ * 公開APIのみで完結するUVサンプリング方式を採用する。設計意図はdocs/PLAN.mdのPhase 28c節参照)。
+ *
+ * OCCTの円筒面パラメトリゼーション(Geom_CylindricalSurface)はV方向が軸方向と一致するため、
+ * 同一U・異なるV(=Face#pointOnSurface()の正規化[0,1]引数)の2点を結ぶ方向はそのまま軸方向になる。
+ * 軸上の点は、同一V(同じ高さ)・異なるU(角度)の3点(円周上の3点)から3点円の外心を求めることで得る
+ * (circumcenter3D()。全周[2π]の面だけでなく部分円弧の面でも成立する。3点がほぼ同一直線上に
+ * なる[Uレンジが極端に狭い]場合はnullを返す)。
+ */
+function extractCylinderAxis(face: Face): { point: Tuple3; direction: Tuple3 } | null {
+  const p0Vec = face.pointOnSurface(0.5, 0.35);
+  const p1Vec = face.pointOnSurface(0.5, 0.65);
+  const p0 = p0Vec.toTuple();
+  const p1 = p1Vec.toTuple();
+  p0Vec.delete();
+  p1Vec.delete();
+  const direction = normalize(subtract(p1, p0));
+  if (length(direction) < 1e-9) return null;
+
+  const uSamples = [0.15, 0.5, 0.85];
+  const pts: Tuple3[] = uSamples.map((u) => {
+    const pVec = face.pointOnSurface(u, 0.5);
+    const t = pVec.toTuple();
+    pVec.delete();
+    return t;
+  });
+  const point = circumcenter3D(pts[0], pts[1], pts[2], direction);
+  if (!point) return null;
+  return { point, direction };
+}
+
+/** 2D点3つの外心(円の中心)を求める(標準的な行列式ベースの公式)。ほぼ一直線上ならnull。 */
+function circumcenter2D(a: [number, number], b: [number, number], c: [number, number]): [number, number] | null {
+  const [ax, ay] = a;
+  const [bx, by] = b;
+  const [cx, cy] = c;
+  const d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+  if (Math.abs(d) < 1e-9) return null;
+  const aa = ax * ax + ay * ay;
+  const bb = bx * bx + by * by;
+  const cc = cx * cx + cy * cy;
+  const ux = (aa * (by - cy) + bb * (cy - ay) + cc * (ay - by)) / d;
+  const uy = (aa * (cx - bx) + bb * (ax - cx) + cc * (bx - ax)) / d;
+  return [ux, uy];
+}
+
+/**
+ * 3D点3つの外心を求める(circumcenter2D()を、normalHintに垂直な正規直交基底e1/e2上へ投影して適用し、
+ * 結果を3D座標へ写像し戻す)。extractCylinderAxis()専用のヘルパー。
+ */
+function circumcenter3D(p1: Tuple3, p2: Tuple3, p3: Tuple3, normalHint: Tuple3): Tuple3 | null {
+  const n = normalize(normalHint);
+  const ref: Tuple3 = Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+  const e1 = normalize(subtract(ref, scaleVec(n, dot(ref, n))));
+  const e2 = normalize(cross(n, e1));
+  const origin = p1;
+  const to2D = (p: Tuple3): [number, number] => {
+    const rel = subtract(p, origin);
+    return [dot(rel, e1), dot(rel, e2)];
+  };
+  const center2D = circumcenter2D(to2D(p1), to2D(p2), to2D(p3));
+  if (!center2D) return null;
+  return [
+    origin[0] + center2D[0] * e1[0] + center2D[1] * e2[0],
+    origin[1] + center2D[0] * e1[1] + center2D[1] * e2[1],
+    origin[2] + center2D[0] * e1[2] + center2D[1] * e2[2],
+  ];
+}
+
+/**
+ * shapeの全面(平面・円筒のみ)から MateFaceIndex を構築する(Phase 28c)。
+ * 平面・円筒以外の面(円錐・球等)は合致の対象外のため索引に含めない。
+ */
+function buildMateFaceIndex(shape: Shape3D): MateFaceIndex {
+  const byFaceId = new Map<number, MateableFaceGeom>();
+  const faces = shape.faces;
+  try {
+    for (const face of faces) {
+      if (face.geomType === "PLANE") {
+        const { center, normal } = faceCenterNormal(face);
+        byFaceId.set(face.hashCode, { surface: "plane", center, normal });
+      } else if (face.geomType === "CYLINDRE") {
+        const { center, normal } = faceCenterNormal(face);
+        const axis = extractCylinderAxis(face);
+        if (axis) byFaceId.set(face.hashCode, { surface: "cylinder", center, normal, axis });
+      }
+    }
+  } finally {
+    faces.forEach((f) => f.delete());
+  }
+  const bbox = shape.boundingBox;
+  const diag = Math.sqrt(bbox.width ** 2 + bbox.height ** 2 + bbox.depth ** 2);
+  bbox.delete();
+  return { byFaceId, maxDist: diag * FACE_DISTANCE_TOLERANCE_RATIO };
+}
+
+/**
+ * MateFaceIndexから、選択時点のスナップショット(MateFaceRef)が指す面を再解決する(Phase 28c)。
+ * resolveFaceGeometry()と同じ2段階(faceId一致優先→幾何マッチング)。平面は中心+法線一致、
+ * 円筒は面ID不一致時、中心距離のみで最近傍を採る(円筒面のnormalAt()はクリック点依存で
+ * 同一性の手がかりとして使えないため、center[面全体の重心]の近さのみで判定する)。
+ */
+function resolveMateFaceGeom(index: MateFaceIndex, ref: MateFaceRef): MateableFaceGeom | null {
+  const byId = index.byFaceId.get(ref.faceId);
+  if (byId && byId.surface === ref.surface) return byId;
+
+  let best: { geom: MateableFaceGeom; dist: number } | null = null;
+  for (const geom of index.byFaceId.values()) {
+    if (geom.surface !== ref.surface) continue;
+    if (geom.surface === "plane" && dot(geom.normal, ref.normal) < FACE_NORMAL_COS_TOLERANCE) continue;
+    const d = distance(geom.center, ref.center);
+    if (d > index.maxDist) continue;
+    if (!best || d < best.dist) best = { geom, dist: d };
+  }
+  return best?.geom ?? null;
+}
+
+/** MateableFaceGeomを、src/assembly/mateSolver.tsの残差計算が使うMateGeom(平面=中心+法線、円筒=軸)へ変換する。 */
+function toSolverGeom(geom: MateableFaceGeom): MateGeom {
+  if (geom.surface === "plane") return { surface: "plane", center: geom.center, normal: geom.normal };
+  const axis = geom.axis as { point: Tuple3; direction: Tuple3 };
+  return { surface: "cylinder", axisPoint: axis.point, axisDir: axis.direction };
+}
+
+/**
+ * 合致フィーチャーの1面(MateFaceRef)を解決し、ソルバ入力(MateFaceInput)へ変換する(Phase 28c)。
+ * bodyFeatureIdがpartInstanceフィーチャーなら「variable」(部品ローカルの面ジオメトリ+
+ * そのpartInstanceのfeatureId。ソルバが毎反復ワールド座標へ写像する)、そうでなければ「fixed」
+ * (bodiesマップの現在のワールド座標のジオメトリ、以後変化しない)として解決する。
+ * fixedBodyIndexCacheは同じボディを複数の合致が参照する場合の重複抽出を避けるためのキャッシュ
+ * (呼び出し側=evaluateFeatures()が1回のドキュメント評価を通じて使い回す)。
+ */
+function resolveMateFaceInput(
+  ref: MateFaceRef,
+  doc: CadDocument,
+  bodies: Map<FeatureId, Shape3D>,
+  localFaceIndexById: Map<FeatureId, MateFaceIndex>,
+  fixedBodyIndexCache: Map<FeatureId, MateFaceIndex>,
+): MateFaceInput {
+  const owner = doc.features.find((f) => f.id === ref.bodyFeatureId);
+  if (owner?.type === "partInstance") {
+    const index = localFaceIndexById.get(ref.bodyFeatureId);
+    if (!index) throw new Error(`合致の対象ボディ(${ref.bodyFeatureId})が見つかりません`);
+    const geom = resolveMateFaceGeom(index, ref);
+    if (!geom) throw new Error("合致の対象面を特定できませんでした。合致を作り直してください");
+    return { kind: "variable", partId: ref.bodyFeatureId, local: toSolverGeom(geom) };
+  }
+
+  let index = fixedBodyIndexCache.get(ref.bodyFeatureId);
+  if (!index) {
+    const body = bodies.get(ref.bodyFeatureId);
+    if (!body) throw new Error(`合致の対象ボディ(${ref.bodyFeatureId})が見つかりません`);
+    index = buildMateFaceIndex(body);
+    fixedBodyIndexCache.set(ref.bodyFeatureId, index);
+  }
+  const geom = resolveMateFaceGeom(index, ref);
+  if (!geom) throw new Error("合致の対象面を特定できませんでした。合致を作り直してください");
+  return { kind: "fixed", geom: toSolverGeom(geom) };
+}
+
+/**
+ * mateFeatures群(全フィーチャー評価後、bodiesが揃った時点)をまとめて解き、収束したら
+ * 関与するpartInstanceのbodiesエントリをlocalShapeByIdから再変換して差し替える(Phase 28c)。
+ * 戻り値のsolvedPlacementsはWorker応答(evaluate)経由でsrc/state/store.tsがドキュメントへ
+ * 書き戻すために使う(mm/度、丸め済み)。収束しない場合はfeatureId(最も残差が大きかった合致)付きの
+ * エラーをthrowする(呼び出し元=evaluateFeatures()のtry/catchでfeatureId付きエラーに変換される)。
+ */
+function solveMateFeatures(
+  mateFeatures: MateFeature[],
+  doc: CadDocument,
+  bodies: Map<FeatureId, Shape3D>,
+  localShapeById: Map<FeatureId, Shape3D>,
+  localFaceIndexById: Map<FeatureId, MateFaceIndex>,
+  setCurrentFeatureId: (id: FeatureId) => void,
+): SolvedPlacement[] {
+  const fixedBodyIndexCache = new Map<FeatureId, MateFaceIndex>();
+  const inputs: MateInput[] = mateFeatures.map((feature) => ({
+    id: feature.id,
+    kind: feature.kind,
+    value: feature.value,
+    a: resolveMateFaceInput(feature.a, doc, bodies, localFaceIndexById, fixedBodyIndexCache),
+    b: resolveMateFaceInput(feature.b, doc, bodies, localFaceIndexById, fixedBodyIndexCache),
+  }));
+
+  const initialPlacements = new Map<string, PartPlacement>();
+  for (const feature of doc.features) {
+    if (feature.type !== "partInstance") continue;
+    if (!localFaceIndexById.has(feature.id)) continue;
+    initialPlacements.set(feature.id, { position: feature.position, rotation: feature.rotation });
+  }
+
+  const result = solveMates(inputs, initialPlacements);
+  if (!result.ok) {
+    setCurrentFeatureId(result.worstMateId as FeatureId);
+    throw new Error("合致を満たす配置が見つかりません");
+  }
+
+  const solvedPlacements: SolvedPlacement[] = [];
+  for (const [partId, placement] of result.placements) {
+    const localShape = localShapeById.get(partId);
+    if (!localShape) continue;
+    const oldBody = bodies.get(partId);
+    if (oldBody) oldBody.delete();
+    const newBody = transformLocalShapeToWorld(localShape.clone(), placement.position, placement.rotation);
+    bodies.set(partId, newBody);
+    solvedPlacements.push({ featureId: partId, position: placement.position, rotation: placement.rotation });
+  }
+  return solvedPlacements;
 }
 
 /**
@@ -1298,6 +1569,8 @@ interface FeatureEvalSuccess {
   sketches: Map<FeatureId, SketchFeature>;
   resolvedFacePlanes: Map<FeatureId, { center: Tuple3; normal: Tuple3 }>;
   referenceEdgesById: Map<FeatureId, ReferenceEdgeLine[]>;
+  /** 合致(メイト、Phase 28c)ソルバが解いた配置(合致が無ければ空配列)。 */
+  solvedPlacements: SolvedPlacement[];
 }
 
 type FeatureEvalResult = FeatureEvalSuccess | EvaluationFailure;
@@ -1328,7 +1601,18 @@ function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
   // 複数ボディ管理(Phase 27a): キー=そのボディを作ったnewBodyフィーチャーのid。
   // 単一の`body`変数を廃止し、常にこのMap経由でボディを読み書きする。
   const bodies = new Map<FeatureId, Shape3D>();
+  // 合致(メイト、Phase 28c)対応: 各partInstanceの変換前ローカルシェイプ・面ジオメトリ索引
+  // (featureId -> )。合致フィーチャーの有無によらず常に保存し、mateFeaturesが1件以上あれば
+  // ループ完走後にsolveMateFeatures()で使う。localShapeByIdの所有権はこの関数にあり、
+  // 成功時・失敗時いずれの経路でも最終的にdelete()する(下記参照)。
+  const localShapeById = new Map<FeatureId, Shape3D>();
+  const localFaceIndexById = new Map<FeatureId, MateFaceIndex>();
+  // ループ中に出現した合致フィーチャー(順序どおり)。ボディを直接変更しないため、
+  // ループ内では収集のみ行い、全フィーチャー評価後にまとめて解く(spec: 全フィーチャー評価後、
+  // bodiesが揃った時点でmateフィーチャー群をまとめて解く)。
+  const mateFeatures: MateFeature[] = [];
   let currentFeatureId: FeatureId | undefined;
+  let solvedPlacements: SolvedPlacement[] = [];
 
   try {
     for (const feature of doc.features) {
@@ -1395,8 +1679,14 @@ function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
       }
 
       if (feature.type === "partInstance") {
-        applyPartInstanceToBodies(bodies, feature);
+        applyPartInstanceToBodies(bodies, feature, localShapeById, localFaceIndexById);
         snapshots.set(feature.id, buildBodiesCompound(bodies));
+        continue;
+      }
+
+      if (feature.type === "mate") {
+        // ボディを直接変更しない(全フィーチャー評価後にまとめて解く。下記参照)。
+        mateFeatures.push(feature);
         continue;
       }
 
@@ -1422,6 +1712,15 @@ function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
       );
       snapshots.set(feature.id, buildBodiesCompound(bodies));
     }
+
+    // 合致(メイト、Phase 28c): 全フィーチャー評価後、bodiesが揃った時点でまとめて解く。
+    // 収束しない場合はsolveMateFeatures()がfeatureId付きエラーをthrowし、下のcatchに合流する
+    // (currentFeatureIdは失敗した合致のidに更新される)。
+    if (mateFeatures.length > 0) {
+      solvedPlacements = solveMateFeatures(mateFeatures, doc, bodies, localShapeById, localFaceIndexById, (id) => {
+        currentFeatureId = id;
+      });
+    }
   } catch (err) {
     for (const b of bodies.values()) b.delete();
     for (const snap of snapshots.values()) snap.delete();
@@ -1430,6 +1729,11 @@ function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
       featureId: currentFeatureId,
       message: err instanceof Error ? err.message : String(err),
     };
+  } finally {
+    // localShapeById(partInstanceの変換前ローカルシェイプ、Phase 28c)は合致の解決・再変換にのみ
+    // 使う一時オブジェクトのため、成功・失敗いずれの経路でも必ずここで解放する
+    // (bodiesマップに格納した「変換後」のクローンとは別インスタンスであり、二重解放にはならない)。
+    for (const s of localShapeById.values()) s.delete();
   }
 
   for (const snap of snapshots.values()) snap.delete();
@@ -1438,7 +1742,7 @@ function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
   // 全スケッチ(world/faceいずれも)の平面基底が解決済みである。bodies(bodies.size===0は
   // newBodyフィーチャーが1つも無い、空ドキュメント/スケッチのみの正常なケース。Phase 13)は
   // 生きたまま返す(delete()は呼び出し側の責務)。
-  return { ok: true, bodies, sketches, resolvedFacePlanes, referenceEdgesById };
+  return { ok: true, bodies, sketches, resolvedFacePlanes, referenceEdgesById, solvedPlacements };
 }
 
 /**
@@ -1449,7 +1753,7 @@ function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
 export function evaluateDocument(doc: CadDocument): EvaluationResult {
   const result = evaluateFeatures(doc);
   if (!result.ok) return result;
-  const { bodies, sketches, resolvedFacePlanes, referenceEdgesById } = result;
+  const { bodies, sketches, resolvedFacePlanes, referenceEdgesById, solvedPlacements } = result;
 
   // 各ボディの面ID集合(Phase 28a)を、compound化してbodiesをdelete()する前に集めておく。
   const bodyGroups: BodyGroup[] = [];
@@ -1481,7 +1785,7 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
     referenceEdges.push({ sketchId, edges });
   }
 
-  return { ok: true, shape, sketchPlanes, referenceEdges, bodyGroups };
+  return { ok: true, shape, sketchPlanes, referenceEdges, bodyGroups, solvedPlacements };
 }
 
 /**

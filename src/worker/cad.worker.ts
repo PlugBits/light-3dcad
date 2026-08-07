@@ -99,11 +99,13 @@ function computeFaceInfo(shape: Shape3D): FaceInfo[] {
   for (const face of shape.faces) {
     const center = face.center;
     const normal = face.normalAt();
+    const surface: FaceInfo["surface"] = face.geomType === "PLANE" ? "plane" : face.geomType === "CYLINDRE" ? "cylinder" : "other";
     infos.push({
       faceId: face.hashCode,
       center: center.toTuple(),
       normal: normal.toTuple(),
       isPlanar: face.geomType === "PLANE",
+      surface,
     });
     center.delete();
     normal.delete();
@@ -140,7 +142,7 @@ function evaluateAndRespond(requestId: string, doc: CadDocument, quality: MeshQu
     return;
   }
 
-  const { shape, sketchPlanes, referenceEdges, bodyGroups } = result;
+  const { shape, sketchPlanes, referenceEdges, bodyGroups, solvedPlacements } = result;
   if (!shape) {
     // ボディなし(Phase 13): 正常ケースとして空メッシュ+空faceInfo/edgeInfoを返す。
     // sketchPlanesは解決済みのため、スケッチだけの状態でもスケッチ線表示は継続する。
@@ -154,6 +156,7 @@ function evaluateAndRespond(requestId: string, doc: CadDocument, quality: MeshQu
       sketchPlanes,
       referenceEdges,
       bodyGroups,
+      solvedPlacements,
     });
     return;
   }
@@ -162,7 +165,7 @@ function evaluateAndRespond(requestId: string, doc: CadDocument, quality: MeshQu
     const faceInfo = computeFaceInfo(shape);
     const edgeInfo = computeEdgeInfo(shape);
     postResponse(
-      { kind: "evaluated", requestId, mesh, faceInfo, edgeInfo, sketchPlanes, referenceEdges, bodyGroups },
+      { kind: "evaluated", requestId, mesh, faceInfo, edgeInfo, sketchPlanes, referenceEdges, bodyGroups, solvedPlacements },
       [mesh.positions.buffer, mesh.normals.buffer, mesh.indices.buffer, mesh.edges.buffer],
     );
   } finally {

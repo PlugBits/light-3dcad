@@ -462,6 +462,41 @@ export function validateFeature(feature: Feature, allFeatures: readonly Feature[
     if (!feature.face.center.every((c) => Number.isFinite(c)) || !feature.face.normal.every((c) => Number.isFinite(c))) {
       errors.push({ featureId: feature.id, message: "ねじの配置面の中心・法線座標が不正です" });
     }
+  } else if (feature.type === "mate") {
+    if (feature.kind !== "coincident" && feature.kind !== "distance" && feature.kind !== "concentric") {
+      errors.push({ featureId: feature.id, message: `合致(${feature.name})の種別が不正です` });
+    }
+    if (!feature.a.center.every((c) => Number.isFinite(c)) || !feature.a.normal.every((c) => Number.isFinite(c))) {
+      errors.push({ featureId: feature.id, message: `合致(${feature.name})の面Aの中心・法線座標が不正です` });
+    }
+    if (!feature.b.center.every((c) => Number.isFinite(c)) || !feature.b.normal.every((c) => Number.isFinite(c))) {
+      errors.push({ featureId: feature.id, message: `合致(${feature.name})の面Bの中心・法線座標が不正です` });
+    }
+    if (feature.kind === "coincident" || feature.kind === "distance") {
+      if (feature.a.surface !== "plane" || feature.b.surface !== "plane") {
+        errors.push({ featureId: feature.id, message: `合致(${feature.name})は両方の面が平面である必要があります` });
+      }
+    } else if (feature.a.surface !== "cylinder" || feature.b.surface !== "cylinder") {
+      errors.push({ featureId: feature.id, message: `合致(${feature.name})は両方の面が円筒面である必要があります` });
+    }
+    if (feature.kind === "distance" && !isPositiveFiniteNumber(feature.value ?? NaN)) {
+      errors.push({ featureId: feature.id, message: `合致(${feature.name})の距離は正の数である必要があります` });
+    }
+    // 少なくとも一方の面がpartInstance(部品配置)のボディに属していること(動かせる対象が必要)。
+    const aOwner = allFeatures.find((f) => f.id === feature.a.bodyFeatureId);
+    const bOwner = allFeatures.find((f) => f.id === feature.b.bodyFeatureId);
+    if (aOwner?.type !== "partInstance" && bOwner?.type !== "partInstance") {
+      errors.push({
+        featureId: feature.id,
+        message: `合致(${feature.name})は少なくとも一方の面が部品配置(パーツ)のボディに属している必要があります`,
+      });
+    }
+    if (!aOwner) {
+      errors.push({ featureId: feature.id, message: `合致(${feature.name})の対象ボディA(${feature.a.bodyFeatureId})が見つかりません` });
+    }
+    if (!bOwner) {
+      errors.push({ featureId: feature.id, message: `合致(${feature.name})の対象ボディB(${feature.b.bodyFeatureId})が見つかりません` });
+    }
   } else if (feature.type === "partInstance") {
     if (!feature.position.every((c) => Number.isFinite(c))) {
       errors.push({ featureId: feature.id, message: `部品配置(${feature.name})の位置座標が不正です` });

@@ -386,6 +386,48 @@ export interface PartInstanceFeature {
   rotation: [number, number, number];
 }
 
+/**
+ * 合致(メイト、Phase 28c)フィーチャーが参照する1つの面のスナップショット。ShellFaceRef等と同じ
+ * 「faceId第一候補+center/normalによる幾何マッチングのフォールバック」の考え方に加え、
+ * bodyFeatureId(その面が属するボディを作ったフィーチャーのid。newBody操作のextrude/revolve、
+ * またはpartInstance)とsurface(平面/円筒の別。合致の種別バリデーション・面マッチングの両方に使う)を持つ。
+ * 円筒面の軸(向き・軸上の点)はここには保存せず、評価のたびにsrc/worker/evaluator.tsが
+ * 解決済みの面ジオメトリから再抽出する(スナップショットはあくまで「同じ面を再特定するための
+ * 手がかり」であり、実際の残差計算に使う幾何情報は毎回ライブに求める設計。他のFaceRef系と同じ方針)。
+ */
+export interface MateFaceRef {
+  bodyFeatureId: FeatureId;
+  faceId: number;
+  center: [number, number, number];
+  normal: [number, number, number];
+  surface: "plane" | "cylinder";
+}
+
+/**
+ * 合致(メイト、Phase 28c、アセンブリの最終ピース)フィーチャー。2つのボディ(少なくとも一方は
+ * partInstanceが作ったボディであること。動かせる対象が無い合致は無意味なため、
+ * src/model/validation.tsのvalidateFeature()で拒否する)の面を指定した関係で満たすよう、
+ * 関与するpartInstanceの位置・回転を数値ソルバ(src/assembly/mateSolver.ts)で solveする。
+ * kind:
+ *   - "coincident": 両面が平面であること。法線が逆平行(面同士が向き合う)かつ同一平面上に載る。
+ *   - "distance": 両面が平面であること。coincidentと同じ向き条件+法線方向にvalue(mm)だけ離す。
+ *   - "concentric": 両面が円筒であること。軸方向が平行かつ軸が一致する(軸に沿った並進・
+ *     軸まわりの回転は拘束しない)。
+ * valueはkind:"distance"のときのみ意味を持つ(mm、正の有限数)。
+ * 解いた結果(関与するpartInstanceのposition/rotation)はWorker評価応答のsolvedPlacementsで返り、
+ * src/state/store.tsが該当partInstanceフィーチャーへ書き戻す(履歴は積まない。
+ * src/sketch/solver.tsの拘束ソルバの書き戻しと同じ設計)。
+ */
+export interface MateFeature {
+  type: "mate";
+  id: FeatureId;
+  name: string;
+  kind: "coincident" | "distance" | "concentric";
+  value?: number;
+  a: MateFaceRef;
+  b: MateFaceRef;
+}
+
 /** フィーチャー(履歴列の1要素)。 */
 export type Feature =
   | SketchFeature
@@ -394,7 +436,8 @@ export type Feature =
   | ShellFeature
   | RevolveFeature
   | ThreadFeature
-  | PartInstanceFeature;
+  | PartInstanceFeature
+  | MateFeature;
 
 /**
  * CADドキュメント全体。features は順序付き(=編集履歴)。

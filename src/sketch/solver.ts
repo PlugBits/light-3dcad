@@ -766,8 +766,12 @@ function buildNormalEquations(eqs: ResidualEq[], m: number): { jtj: number[][]; 
   return { jtj, jtr };
 }
 
-/** ガウスの消去法(部分ピボット選択)でAx=bを解く。特異(ピボットが0近傍)なら null。 */
-function solveLinearSystem(a: number[][], b: number[]): number[] | null {
+/**
+ * ガウスの消去法(部分ピボット選択)でAx=bを解く。特異(ピボットが0近傍)なら null。
+ * exportしているのは src/assembly/mateSolver.ts(合致ソルバ、Phase 28c)が同じ実装を再利用するため
+ * (LM法の正規方程式を解く部分は、対象がスケッチ変数か合致の部品位置/回転変数かによらず共通)。
+ */
+export function solveLinearSystem(a: number[][], b: number[]): number[] | null {
   const n = b.length;
   const m: number[][] = a.map((row, i) => [...row, b[i]]);
 

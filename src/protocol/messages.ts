@@ -71,6 +71,12 @@ export interface FaceInfo {
   center: [number, number, number];
   normal: [number, number, number];
   isPlanar: boolean;
+  /**
+   * 面の種別(平面/円筒/その他、Phase 28c)。isPlanarはgeomType==="PLANE"と同値の後方互換フィールドで
+   * 残す(既存コードとの互換のため)。合致(メイト)ツールは円筒面も選択対象にするため、
+   * isPlanarだけでは平面以外を一括りにしか判定できず、"cylinder"かどうかを個別に判定する必要がある。
+   */
+  surface: "plane" | "cylinder" | "other";
 }
 
 /**
@@ -150,6 +156,17 @@ export interface InterferenceResult {
   meshes: MeshData[];
 }
 
+/**
+ * 合致(メイト、Phase 28c)ソルバが解いたpartInstanceの配置1件。position/rotationは
+ * PartInstanceFeatureと同じ意味・単位(mm/度)。Worker応答(evaluate)経由でsrc/state/store.tsが
+ * 該当partInstanceフィーチャーへ書き戻す(履歴は積まない)。
+ */
+export interface SolvedPlacement {
+  featureId: FeatureId;
+  position: [number, number, number];
+  rotation: [number, number, number];
+}
+
 /** Worker -> UI のレスポンス */
 export type WorkerResponse =
   | { kind: "ready"; requestId: string }
@@ -164,6 +181,8 @@ export type WorkerResponse =
       referenceEdges: ReferenceEdgeSet[];
       /** 各ボディを構成する面IDの集合(Phase 28a)。ボディが無い場合は空配列。 */
       bodyGroups: BodyGroup[];
+      /** 合致(メイト、Phase 28c)ソルバが解いた配置(合致が無ければ空配列)。 */
+      solvedPlacements: SolvedPlacement[];
     }
   | { kind: "stl"; requestId: string; blob: Blob }
   /** STEPエクスポート応答(Phase 26)。 */

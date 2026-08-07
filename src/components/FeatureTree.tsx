@@ -3,7 +3,7 @@
 // 挿入スロットを表示し、クリックでバーをその位置へ移動する(ドラッグはサポートしない)。
 // バー以降(index >= 有効フィーチャー数)のフィーチャーはグレーアウト表示にし、選択不可にする。
 import { useState } from "react";
-import type { CadDocument, Feature, FeatureId } from "../model/types";
+import type { CadDocument, Feature, FeatureId, MateFeature } from "../model/types";
 import { effectiveFeatureCount } from "../model/document";
 
 const ICONS: Record<Feature["type"], string> = {
@@ -14,6 +14,7 @@ const ICONS: Record<Feature["type"], string> = {
   revolve: "◍", // 回転体(Phase 25b)
   thread: "⚙", // ねじ(Phase 25c)
   partInstance: "▣", // 部品配置(簡易アセンブリ、Phase 27b)
+  mate: "⛓", // 合致(メイト、Phase 28c)
 };
 
 const TYPE_LABEL: Record<Feature["type"], string> = {
@@ -24,12 +25,20 @@ const TYPE_LABEL: Record<Feature["type"], string> = {
   revolve: "回転体",
   thread: "ねじ",
   partInstance: "部品配置",
+  mate: "合致",
+};
+
+const MATE_KIND_LABEL: Record<MateFeature["kind"], string> = {
+  coincident: "一致",
+  distance: "距離",
+  concentric: "同軸",
 };
 
 /**
  * フィーチャーツリーに表示する種別ラベル。face参照スケッチは「面上スケッチ」、
  * fillet3dはkindに応じて「フィレット」/「面取り」と表示する(Phase 25a)。
  * threadはhandに応じて「ねじ(雄)」/「ねじ穴(雌・簡易表現)」と表示する(Phase 25c)。
+ * mateはkindに応じて「合致(一致)」等と表示する(Phase 28c)。
  */
 function typeLabel(feature: Feature): string {
   if (feature.type === "sketch" && feature.plane.kind === "face") {
@@ -40,6 +49,9 @@ function typeLabel(feature: Feature): string {
   }
   if (feature.type === "thread") {
     return feature.hand === "male" ? "ねじ(雄)" : "ねじ穴(雌・簡易表現)";
+  }
+  if (feature.type === "mate") {
+    return `合致(${MATE_KIND_LABEL[feature.kind]})`;
   }
   return TYPE_LABEL[feature.type];
 }

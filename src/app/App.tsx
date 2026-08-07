@@ -5,11 +5,13 @@ import { DimensionToolPopup } from "../components/DimensionToolPopup";
 import { ExtrudeEditor } from "../components/ExtrudeEditor";
 import { FeatureTree } from "../components/FeatureTree";
 import { Fillet3DEditor } from "../components/Fillet3DEditor";
+import { MateEditor } from "../components/MateEditor";
 import { PartInstanceEditor } from "../components/PartInstanceEditor";
 import { RevolveEditor } from "../components/RevolveEditor";
 import { ShellEditor } from "../components/ShellEditor";
 import { SketchEditor } from "../components/SketchEditor";
 import { ThreadEditor } from "../components/ThreadEditor";
+import { worldDirectionToLocal, worldPointToLocal } from "../assembly/mateSolver";
 import { downloadBlob } from "../export/downloadBlob";
 import { downloadStl } from "../export/downloadStl";
 import {
@@ -35,7 +37,7 @@ import {
   createRectangleEntity,
   createSlotEntity,
 } from "../model/entity";
-import type { FilletEdgeRef, PolygonCorner, ShellFaceRef, ThreadPreset } from "../model/types";
+import type { FilletEdgeRef, MateFaceRef, MateFeature, PolygonCorner, ShellFaceRef, ThreadPreset } from "../model/types";
 import { MALE_THREAD_MAX_LENGTH, THREAD_PRESET_LIST } from "../model/threadPresets";
 import {
   addConcentricConstraint,
@@ -70,6 +72,7 @@ import {
   CadViewer,
   type ConstraintPickTarget,
   type DimensionToolTarget,
+  type MatePickTarget,
   type SketchOverlayEntry,
 } from "../viewer/CadViewer";
 import type { StandardView } from "../viewer/standardViews";
@@ -145,6 +148,7 @@ export default function App() {
   const addShell3D = useCadStore((s) => s.addShell3D);
   const addThread = useCadStore((s) => s.addThread);
   const addPartInstance = useCadStore((s) => s.addPartInstance);
+  const addMate = useCadStore((s) => s.addMate);
   const exportStl = useCadStore((s) => s.exportStl);
   const exportStep = useCadStore((s) => s.exportStep);
   const loadDocument = useCadStore((s) => s.loadDocument);
@@ -204,6 +208,17 @@ export default function App() {
   // ようrefで保持する。cornerSizeRef等と同じパターン)。
   const partDragFeatureIdRef = useRef<string | null>(null);
   const partDragBasePositionRef = useRef<[number, number, number] | null>(null);
+  // 合致(メイト)ツール(未選択はfalse、Phase 28c)。面を2つ順にクリックし、2つ目確定時に
+  // matePopup(適用可能な合致の選択ポップアップ)を開く。
+  const [mateTool, setMateTool] = useState(false);
+  // 合致ツールの1つ目待ち状態のステータス表示(constraintPendingLabelと同じ位置に表示)。未保留はnull。
+  const [matePendingLabel, setMatePendingLabel] = useState<string | null>(null);
+  // 合致ツールが2つの対象を確定した後に表示する、適用可能な合致種別を選ぶ小さなポップアップ(Phase 28c)。
+  const [matePopup, setMatePopup] = useState<{ a: MatePickTarget; b: MatePickTarget; screen: { x: number; y: number } } | null>(
+    null,
+  );
+  // 合致ポップアップの「距離」入力欄の値(mm、デフォルト5)。
+  const [mateDistanceValue, setMateDistanceValue] = useState(5);
   // トリムツール(未選択はfalse、Phase 19b)。
   const [trimTool, setTrimTool] = useState(false);
   // 寸法ツール(未選択はfalse、Phase 20b)。segmentをクリックしてlength/radius/distance拘束を作成する。
@@ -760,7 +775,7 @@ export default function App() {
 
   /** 指定ツールのボタンをdisabledにすべきか(他のツールが実行中、または対象スケッチ平面が未確定)。 */
   function isToolDisabled(tool: Exclude<DrawingTool, null>): boolean {
-    if (cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool) return true;
+    if (cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool) return true;
     if (activeTool) return activeTool !== tool;
     return !selectedSketchPlane;
   }
@@ -815,7 +830,7 @@ export default function App() {
 
   /** フィレット/面取りボタンをdisabledにすべきか(他の作図ツール実行中、または対象スケッチ平面が未確定)。 */
   function isCornerToolDisabled(kind: "fillet" | "chamfer"): boolean {
-    if (activeTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool) return true;
+    if (activeTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool) return true;
     if (cornerTool) return cornerTool !== kind;
     return !selectedSketchPlane;
   }
@@ -882,7 +897,7 @@ export default function App() {
 
   /** シェルボタンをdisabledにすべきか(他のツール実行中、またはボディが存在しない)。 */
   function isShellToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || threadTool || partDragTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || threadTool || partDragTool || mateTool) return true;
     if (shellTool) return false;
     return !hasBody;
   }
@@ -920,7 +935,7 @@ export default function App() {
 
   /** ねじボタンをdisabledにすべきか(他のツール実行中、またはボディが存在しない)。 */
   function isThreadToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || partDragTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || partDragTool || mateTool) return true;
     if (threadTool) return false;
     return !hasBody;
   }
@@ -970,9 +985,115 @@ export default function App() {
 
   /** 部品移動ボタンをdisabledにすべきか(他のツール実行中、または部品[partInstance]が1つも無い)。 */
   function isPartDragToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || mateTool) return true;
     if (partDragTool) return false;
     return !doc.features.some((f) => f.type === "partInstance");
+  }
+
+  /**
+   * 合致(メイト、Phase 28c)ツールを開始する。ビューア上でボディの面(平面/円筒面)を2つ順に
+   * クリックすると`onPairPicked`が呼ばれ、面の組み合わせ(平面+平面/円筒+円筒/それ以外)に応じて
+   * 適用可能な合致の選択ポップアップ(matePopup)を開く。実際のフィーチャー追加は
+   * handleApplyMateKindが行う(constraintTool[2D拘束ツール]と同じ「ポップアップで選ぶまでは
+   * 確定しない」設計)。適用後もツール自体は継続する(連続して複数の合致を追加できる)。
+   */
+  function handleStartMateTool() {
+    if (!viewerRef.current || !hasBody) return;
+    viewerRef.current.startMateTool({
+      onPairPicked: (a, b, screenX, screenY) => {
+        setMatePopup({ a, b, screen: { x: screenX, y: screenY } });
+      },
+      onCancel: () => {
+        setMateTool(false);
+        setMatePopup(null);
+        setMatePendingLabel(null);
+      },
+      onPendingChange: (pending) => {
+        if (!pending) {
+          setMatePendingLabel(null);
+          return;
+        }
+        const label = pending.surface === "plane" ? "平面" : pending.surface === "cylinder" ? "円筒面" : "面";
+        setMatePendingLabel(`1つ目: ${label} → 2つ目の面を選択`);
+      },
+    });
+    setMateTool(true);
+  }
+
+  function handleCancelMateTool() {
+    viewerRef.current?.cancelMateTool();
+  }
+
+  /** 合致ボタンをdisabledにすべきか(他のツール実行中、または部品[partInstance]と他ボディの組み合わせが無い)。 */
+  function isMateToolDisabled(): boolean {
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool) {
+      return true;
+    }
+    if (mateTool) return false;
+    const hasPart = doc.features.some((f) => f.type === "partInstance");
+    return !hasPart || bodyCount < 2;
+  }
+
+  /**
+   * ピックした2面の組み合わせから適用可能な合致の選択肢を返す(表示ラベル+kind)。
+   * 平面+平面=一致/距離、円筒+円筒=同軸、それ以外の組み合わせは空配列(ポップアップ側で
+   * 「適用できる合致がありません」メッセージを表示する)。
+   */
+  function mateOptionsFor(a: MatePickTarget, b: MatePickTarget): { label: string; kind: MateFeature["kind"] }[] {
+    if (a.surface === "plane" && b.surface === "plane") {
+      return [
+        { label: "一致", kind: "coincident" },
+        { label: "距離", kind: "distance" },
+      ];
+    }
+    if (a.surface === "cylinder" && b.surface === "cylinder") {
+      return [{ label: "同軸", kind: "concentric" }];
+    }
+    return [];
+  }
+
+  /**
+   * MatePickTarget(ビューアがワールド座標で報告するピック結果)をMateFaceRefへ変換する。
+   * bodyFeatureIdがpartInstanceの場合、center/normalを「そのpartInstanceの現在の位置・回転」を
+   * 使って部品ローカル座標系へ逆変換する(worldPointToLocal/worldDirectionToLocal、
+   * src/assembly/mateSolver.ts)。replicadのface.hashCodeはrotate()/translate()後は保持されないため
+   * (実測確認済み)、partInstanceが作ったボディの面参照は評価のたびに幾何マッチングの
+   * フォールバックで解決される。マッチング対象(evaluator.tsのlocalFaceIndexById)が
+   * 部品ローカル座標系のジオメトリであるため、ここで保存するcenter/normalも同じ座標系に
+   * 揃えておく必要がある(通常ボディ[fixedとして扱う]はワールド座標のまま=変換しない)。
+   */
+  function toMateFaceRef(target: MatePickTarget): MateFaceRef | null {
+    if (target.surface === "other") return null;
+    const owner = findFeature(doc, target.bodyFeatureId);
+    if (owner?.type === "partInstance") {
+      const center = worldPointToLocal(target.center, owner.position, owner.rotation);
+      const normal = worldDirectionToLocal(target.normal, owner.rotation);
+      return { bodyFeatureId: target.bodyFeatureId, faceId: target.faceId, center, normal, surface: target.surface };
+    }
+    return {
+      bodyFeatureId: target.bodyFeatureId,
+      faceId: target.faceId,
+      center: target.center,
+      normal: target.normal,
+      surface: target.surface,
+    };
+  }
+
+  /** 合致ポップアップで種別が選ばれたときの合致フィーチャー追加(即ソルブ、Worker評価は既存経路で自動発行される)。 */
+  function handleApplyMateKind(kind: MateFeature["kind"]) {
+    if (!matePopup) return;
+    const aRef = toMateFaceRef(matePopup.a);
+    const bRef = toMateFaceRef(matePopup.b);
+    if (!aRef || !bRef) return;
+    const count = doc.features.filter((f) => f.type === "mate").length + 1;
+    addMate({
+      name: `合致${count}`,
+      kind,
+      value: kind === "distance" ? mateDistanceValue : undefined,
+      a: aRef,
+      b: bRef,
+    });
+    setMatePopup(null);
   }
 
   /**
@@ -992,7 +1113,7 @@ export default function App() {
 
   /** 干渉チェックボタンをdisabledにすべきか(他のツール実行中、またはボディが2個未満)。 */
   function isInterferenceCheckDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || partDragTool || threadTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || partDragTool || threadTool || mateTool) return true;
     return bodyCount < 2;
   }
 
@@ -1037,7 +1158,7 @@ export default function App() {
 
   /** トリムボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isTrimToolDisabled(): boolean {
-    if (activeTool || cornerTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool) return true;
+    if (activeTool || cornerTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool) return true;
     if (trimTool) return false;
     return !selectedSketchPlane;
   }
@@ -1187,7 +1308,7 @@ export default function App() {
 
   /** 寸法ツールボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isDimensionToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool) return true;
+    if (activeTool || cornerTool || trimTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool) return true;
     if (dimensionTool) return false;
     return !selectedSketchPlane;
   }
@@ -1325,14 +1446,14 @@ export default function App() {
 
   /** 拘束ツールボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isConstraintToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || edgeTool || shellTool || threadTool || partDragTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || edgeTool || shellTool || threadTool || partDragTool || mateTool) return true;
     if (constraintTool) return false;
     return !selectedSketchPlane;
   }
 
   /** 3Dフィレット/面取りボタンをdisabledにすべきか(他のツール実行中、またはボディが無い)。 */
   function isEdgeToolDisabled(kind: "fillet" | "chamfer"): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || shellTool || threadTool || partDragTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || shellTool || threadTool || partDragTool || mateTool) return true;
     if (edgeTool) return edgeTool !== kind;
     return !hasBody;
   }
@@ -1875,6 +1996,16 @@ export default function App() {
             </button>
             <button
               type="button"
+              data-testid="btn-mate"
+              className={mateTool ? "toolbar-btn-active" : undefined}
+              onClick={mateTool ? handleCancelMateTool : handleStartMateTool}
+              disabled={isMateToolDisabled()}
+              title="面(平面/円筒面)を2つ順にクリックして合致(一致/距離/同軸)を作成します(Escで終了)"
+            >
+              {mateTool ? "合致キャンセル(Esc)" : "合致"}
+            </button>
+            <button
+              type="button"
               data-testid="btn-check-interference"
               onClick={handleCheckInterference}
               disabled={isInterferenceCheckDisabled() || interferenceChecking}
@@ -1978,6 +2109,16 @@ export default function App() {
           {edgeTool && (
             <span data-testid="edge-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
               エッジをクリックして選択(複数可)、サイズを入力して「適用」
+            </span>
+          )}
+          {mateTool && (
+            <span data-testid="mate-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
+              面(平面/円筒面)をクリックして一致・距離・同軸を指定
+            </span>
+          )}
+          {mateTool && matePendingLabel && (
+            <span data-testid="mate-pending-status" style={{ fontSize: 11, fontWeight: "bold", color: "#ffb74d" }}>
+              {matePendingLabel}
             </span>
           )}
           <span data-testid="status-text" style={{ fontSize: 12, opacity: 0.8, marginLeft: "auto" }}>
@@ -2117,6 +2258,7 @@ export default function App() {
               {selectedFeature.type === "revolve" && <RevolveEditor revolve={selectedFeature} doc={doc} />}
               {selectedFeature.type === "thread" && <ThreadEditor thread={selectedFeature} />}
               {selectedFeature.type === "partInstance" && <PartInstanceEditor instance={selectedFeature} />}
+              {selectedFeature.type === "mate" && <MateEditor mate={selectedFeature} />}
             </div>
           )}
 
@@ -2189,6 +2331,80 @@ export default function App() {
                 type="button"
                 data-testid="constraint-tool-popup-cancel"
                 onClick={() => setConstraintPopup(null)}
+                style={{ fontSize: 11 }}
+              >
+                キャンセル
+              </button>
+            </div>
+          )}
+          {matePopup && (
+            <div
+              data-testid="mate-tool-popup"
+              style={{
+                position: "absolute",
+                left: matePopup.screen.x,
+                top: matePopup.screen.y,
+                transform: "translate(-50%, 10px)",
+                pointerEvents: "auto",
+                background: "#2a2f3a",
+                border: "1px solid #555",
+                borderRadius: 6,
+                padding: 8,
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+                fontSize: 12,
+                zIndex: 20,
+                boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
+                minWidth: 160,
+              }}
+            >
+              <p style={{ margin: 0, fontSize: 10, color: "#9aa5b1" }}>適用する合致を選択</p>
+              {mateOptionsFor(matePopup.a, matePopup.b).length === 0 && (
+                <p data-testid="mate-tool-popup-incompatible" style={{ margin: 0, fontSize: 11, color: "#ff6b6b" }}>
+                  この組み合わせの面には合致を適用できません(平面同士または円筒面同士を選んでください)
+                </p>
+              )}
+              {mateOptionsFor(matePopup.a, matePopup.b).map((opt) =>
+                opt.kind === "distance" ? (
+                  <div key={opt.kind} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <input
+                      type="number"
+                      data-testid="mate-tool-popup-distance-value"
+                      value={mateDistanceValue}
+                      min={0.001}
+                      step="any"
+                      style={{ width: 56 }}
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        if (Number.isFinite(v) && v > 0) setMateDistanceValue(v);
+                      }}
+                    />
+                    <button
+                      type="button"
+                      data-testid="mate-tool-popup-distance"
+                      onClick={() => handleApplyMateKind(opt.kind)}
+                      style={{ fontSize: 12 }}
+                    >
+                      {opt.label}
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    key={opt.kind}
+                    type="button"
+                    data-testid={`mate-tool-popup-${opt.kind}`}
+                    onClick={() => handleApplyMateKind(opt.kind)}
+                    style={{ fontSize: 12 }}
+                  >
+                    {opt.label}
+                  </button>
+                ),
+              )}
+              <button
+                type="button"
+                data-testid="mate-tool-popup-cancel"
+                onClick={() => setMatePopup(null)}
                 style={{ fontSize: 11 }}
               >
                 キャンセル

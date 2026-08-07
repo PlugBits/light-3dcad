@@ -9,6 +9,8 @@ import type {
   FeatureId,
   Fillet3DFeature,
   FilletEdgeRef,
+  MateFaceRef,
+  MateFeature,
   PartInstanceFeature,
   PlaneRef,
   PolygonCorner,
@@ -237,6 +239,39 @@ export function patchPartInstanceFeature(
   patch: Partial<Pick<PartInstanceFeature, "name" | "position" | "rotation">>,
 ): CadDocument {
   return updateFeature<PartInstanceFeature>(doc, featureId, (f) => ({ ...f, ...patch }));
+}
+
+/**
+ * 新しい合致(メイト、Phase 28c)フィーチャーを作成して末尾に追加する。IDは自動生成される。
+ * valueはkind:"distance"のときのみ渡す(coincident/concentricでは無視される想定。
+ * evaluator.ts側もkind:"distance"のときのみfeature.valueを参照する)。
+ */
+export function addMateFeature(
+  doc: CadDocument,
+  params: { name: string; kind: MateFeature["kind"]; value?: number; a: MateFaceRef; b: MateFaceRef },
+): { doc: CadDocument; feature: MateFeature } {
+  const feature: MateFeature = {
+    type: "mate",
+    id: generateId("mate"),
+    name: params.name,
+    kind: params.kind,
+    a: params.a,
+    b: params.b,
+    ...(params.value !== undefined ? { value: params.value } : {}),
+  };
+  return { doc: addFeature(doc, feature), feature };
+}
+
+/**
+ * mate フィーチャーの一部フィールド(name, value)を更新する(Phase 28c)。kind/a/bは
+ * 再選択が必要なため対象外(v1、ShellEditor等と同じ「再選択UIは持たない」方針)。
+ */
+export function patchMateFeature(
+  doc: CadDocument,
+  featureId: FeatureId,
+  patch: Partial<Pick<MateFeature, "name" | "value">>,
+): CadDocument {
+  return updateFeature<MateFeature>(doc, featureId, (f) => ({ ...f, ...patch }));
 }
 
 /** 指定IDのフィーチャーを探す。見つからなければ undefined。 */
@@ -501,6 +536,12 @@ export function getDirectDependentFeatureIds(doc: CadDocument, featureId: Featur
       dependents.push(feature.id);
     }
     if (feature.type === "sketch" && feature.plane.kind === "face" && feature.plane.featureId === featureId) {
+      dependents.push(feature.id);
+    }
+    // 合致(メイト、Phase 28c)は参照する2つの面のいずれかのボディが削除されると解決できなくなるため、
+    // 対象ボディを作ったフィーチャー(newBody操作のextrude/revolve、またはpartInstance)を削除する際は
+    // カスケード削除の対象にする(他のフィーチャー参照と同じ扱い)。
+    if (feature.type === "mate" && (feature.a.bodyFeatureId === featureId || feature.b.bodyFeatureId === featureId)) {
       dependents.push(feature.id);
     }
   }
