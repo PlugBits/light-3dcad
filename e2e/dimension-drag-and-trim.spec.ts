@@ -110,6 +110,87 @@ test("①寸法ラベルをドラッグすると寸法線ごと移動し、リ�
   expect(pageErrors).toEqual([]);
 });
 
+test("①b 拘束由来の寸法ラベル(長さ)をドラッグすると移動し、リロード後も位置が維持される(実機報告の根本原因の回帰テスト、Phase 33)", async ({
+  page,
+}) => {
+  // 実機報告の根本原因: DimensionOverlay.commitOffset()がconstraintDimensionKey()の返す
+  // "c-"+constraintId をそのままsetConstraintLabelOffset()のconstraintId引数へ渡していたため、
+  // c.id(プレフィックス無し)と一致せず書き込みが常に無効だった(=拘束由来の寸法ラベルは
+  // 実測寸法[矩形の幅/高さ等]と異なりドラッグしても一切動かなかった)。寸法ツールで作る
+  // 長さ・距離・X/Y距離・半径は全てこの「拘束由来」に該当するため、実機で最も使われる経路が
+  // 影響を受けていた。
+  const pageErrors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForReady(page);
+
+  await page.getByTestId("btn-add-sketch").click();
+  await expect(page.getByTestId("feature-item-Sketch2")).toBeVisible();
+  await waitForReady(page);
+  await page.getByTestId("btn-align-to-plane").click();
+
+  await page.getByTestId("btn-draw-segment").click();
+  await drawSingleSegment(page, [0, 0], [20, 0]);
+  await expect(page.getByTestId("btn-draw-segment")).toHaveText("線分");
+
+  // 長さ拘束(現在の長さ20のまま)を付ける→拘束由来の寸法ラベルが表示される。
+  await page.getByTestId("btn-dimension").click();
+  const segMid = await screenPointForWorld(page, [10, 0, 0]);
+  await page.mouse.click(segMid.x, segMid.y);
+  const popup = page.getByTestId("dimension-tool-popup");
+  await expect(popup).toBeVisible();
+  await expect(page.getByTestId("dimension-tool-popup-value")).toHaveValue("20.00");
+  await page.getByTestId("dimension-tool-popup-apply").click();
+  await expect(popup).toHaveCount(0);
+  await waitForReady(page);
+  await page.getByTestId("btn-dimension").click(); // 寸法ツールを終了する。
+
+  const lengthLabel = page.locator('[data-testid^="dim-label-c-"]').filter({ hasText: "20.0" });
+  await expect(lengthLabel).toBeVisible();
+  const before = await lengthLabel.boundingBox();
+  if (!before) throw new Error("長さラベルのbounding boxが取得できません");
+
+  const startX = before.x + before.width / 2;
+  const startY = before.y + before.height / 2;
+  const dx = 60;
+  const dy = 40;
+
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  await page.mouse.move(startX + 15, startY + 10, { steps: 3 });
+  await page.mouse.move(startX + dx, startY + dy, { steps: 5 });
+  await page.mouse.up();
+
+  // クリック扱いにならず、編集ポップアップは開かない。
+  await expect(page.getByTestId("dim-edit-popup")).toHaveCount(0);
+  await expect(page.getByTestId("dimension-tool-popup")).toHaveCount(0);
+
+  const afterDrag = await lengthLabel.boundingBox();
+  if (!afterDrag) throw new Error("ドラッグ後の長さラベルのbounding boxが取得できません");
+  // 修正前はここが0(全く動かない)だった。
+  expect(afterDrag.x - before.x).toBeGreaterThan(30);
+  expect(afterDrag.y - before.y).toBeGreaterThan(20);
+
+  await page.screenshot({ path: "test-results/dim-drag-constraint-1-after-drag.png" });
+
+  // 自動保存のデバウンス(500ms)を待ってリロードし、位置が維持されることを確認する。
+  await page.waitForTimeout(800);
+  await page.reload();
+  await waitForReady(page);
+  await page.getByTestId("feature-item-Sketch2").click();
+  await waitForReady(page);
+  await page.getByTestId("btn-align-to-plane").click();
+
+  const labelAfterReload = page.locator('[data-testid^="dim-label-c-"]').filter({ hasText: "20.0" });
+  await expect(labelAfterReload).toBeVisible();
+  const afterReload = await labelAfterReload.boundingBox();
+  if (!afterReload) throw new Error("リロード後の長さラベルのbounding boxが取得できません");
+  expect(Math.abs(afterReload.x - afterDrag.x)).toBeLessThan(6);
+  expect(Math.abs(afterReload.y - afterDrag.y)).toBeLessThan(6);
+
+  await page.screenshot({ path: "test-results/dim-drag-constraint-2-after-reload.png" });
+  expect(pageErrors).toEqual([]);
+});
+
 test("②一致+水平+垂直+長さが付いた線分チェーンをトリム→水平・垂直・一致・(残せる)長さ寸法は残り、断片化した長さ寸法だけが通知付きで消える", async ({
   page,
 }) => {

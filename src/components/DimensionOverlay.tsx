@@ -205,8 +205,15 @@ const DRAG_THRESHOLD_PX = 4;
 /** ドラッグ中、ドキュメント更新(ソルバ+Worker評価リクエスト)を間引く最小間隔(ms)。部品移動ツールの150msスロットルより短いが、寸法ソルバ+再評価は軽量なため許容する。 */
 const DRAG_EMIT_INTERVAL_MS = 50;
 
-/** ドラッグ対象の寸法ラベル1件を指す(measured=実測寸法[dimensionKey]、constraint=拘束寸法[constraintId])。 */
-type LabelDragTarget = { scope: "measured"; key: string } | { scope: "constraint"; key: string };
+/**
+ * ドラッグ対象の寸法ラベル1件を指す(measured=実測寸法[dimensionKey]、constraint=拘束寸法)。
+ * constraint scopeは2つのIDを別々に持つ: key(="c-"+constraintId、constraintGraphicsRef/
+ * constraintDimensionsRefのMapキー・検索に使う表示用キー)と、constraintId(setConstraintLabelOffset
+ * へそのまま渡す実際の拘束ID)。実機報告バグの修正(Phase 33): 以前はkey(cプレフィックス付き)を
+ * そのままsetConstraintLabelOffsetのconstraintId引数に渡してしまい、"c-"+idがどの拘束のidとも
+ * 一致しないため書き込みが常に無効(=拘束由来の寸法ラベルは一切ドラッグできなかった)。
+ */
+type LabelDragTarget = { scope: "measured"; key: string } | { scope: "constraint"; key: string; constraintId: string };
 
 interface DimensionOverlayProps {
   sketch: SketchFeature;
@@ -235,7 +242,9 @@ const labelStyle: React.CSSProperties = {
   padding: "1px 6px",
   fontSize: 11,
   fontFamily: "monospace",
-  cursor: "pointer",
+  // ドラッグで移動できることの発見性向上(実機報告対応、Phase 33)。クリックでも編集ポップアップが
+  // 開くが、ホバー時のカーソルは主要操作(ドラッグ)を示すmoveにする(titleのツールチップと合わせて)。
+  cursor: "move",
   lineHeight: 1.5,
   whiteSpace: "nowrap",
 };
@@ -252,6 +261,24 @@ const constraintLabelStyle: React.CSSProperties = {
 interface ConstraintEditingState {
   dimension: ConstraintDimension;
   screen: { x: number; y: number };
+}
+
+/**
+ * 拘束寸法ラベルの編集ポップアップで軸(距離/X距離/Y距離)選択肢を出すべき種別かどうか
+ * (X/Y距離、寸法値の符号仕様の明確化、Phase 33)。
+ */
+function isAxisDistanceDimensionKind(kind: ConstraintDimension["kind"]): boolean {
+  return kind === "entity-distance-entity" || kind === "seg-distance" || kind === "point-distance-origin";
+}
+
+/**
+ * 拘束寸法ラベルの編集ポップアップでvalue=0を許容すべき種別かどうか(寸法値の符号仕様の明確化、
+ * Phase 33)。X/Y距離の3種(axis:"x"/"y"時は符号付きで負も許容、axis:"direct"時は0のみ許容)・
+ * 端点↔辺の距離(point-distance-line)・線↔線の距離(seg-distance-line-line)が対象。
+ * 長さ・半径・中心↔原点/辺の距離・角度は対象外(従来通り正の数のみ)。
+ */
+function isZeroAllowedDimensionKind(kind: ConstraintDimension["kind"]): boolean {
+  return isAxisDistanceDimensionKind(kind) || kind === "point-distance-line" || kind === "seg-distance-line-line";
 }
 
 const CONSTRAINT_DIMENSION_LABELS: Record<ConstraintDimension["kind"], string> = {
@@ -508,7 +535,10 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
     if (target.scope === "measured") {
       useCadStore.getState().updateDocumentDuringDrag((d) => setDimensionOffset(d, sketch.id, target.key, offset));
     } else {
-      useCadStore.getState().updateDocumentDuringDrag((d) => setConstraintLabelOffset(d, sketch.id, target.key, offset));
+      // constraintId(cプレフィックス無し)を渡す。target.key("c-"+constraintId)を誤って渡すと
+      // setConstraintLabelOffset内のc.id === constraintId比較が常に不一致になり無効化される(上記の
+      // LabelDragTarget型コメント参照、実機報告バグの根本原因)。
+      useCadStore.getState().updateDocumentDuringDrag((d) => setConstraintLabelOffset(d, sketch.id, target.constraintId, offset));
     }
   }
 
@@ -617,7 +647,7 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
             }}
             data-testid={`dim-label-${key}`}
             title="拘束による寸法(クリックして数値を編集、ドラッグで移動)"
-            onMouseDown={(e) => handleLabelMouseDown(e, { scope: "constraint", key })}
+            onMouseDown={(e) => handleLabelMouseDown(e, { scope: "constraint", key, constraintId: dimension.constraintId })}
             onClick={(e) => {
               if (justDraggedRef.current) {
                 justDraggedRef.current = false;
@@ -646,16 +676,11 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
           titleLabel={CONSTRAINT_DIMENSION_LABELS[editingConstraint.dimension.kind]}
           initialValue={editingConstraint.dimension.value}
           screen={editingConstraint.screen}
-          axisOptions={
-            editingConstraint.dimension.kind === "entity-distance-entity" ||
-            editingConstraint.dimension.kind === "seg-distance" ||
-            editingConstraint.dimension.kind === "point-distance-origin"
-          }
+          axisOptions={isAxisDistanceDimensionKind(editingConstraint.dimension.kind)}
+          allowZero={isZeroAllowedDimensionKind(editingConstraint.dimension.kind)}
           initialAxis={
-            editingConstraint.dimension.kind === "entity-distance-entity" ||
-            editingConstraint.dimension.kind === "seg-distance" ||
-            editingConstraint.dimension.kind === "point-distance-origin"
-              ? (editingConstraint.dimension.axis ?? "direct")
+            isAxisDistanceDimensionKind(editingConstraint.dimension.kind)
+              ? ((editingConstraint.dimension as { axis?: "direct" | "x" | "y" }).axis ?? "direct")
               : undefined
           }
           onCancel={() => setEditingConstraint(null)}
