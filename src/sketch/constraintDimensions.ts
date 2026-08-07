@@ -110,6 +110,9 @@ export function upsertRadiusConstraint(constraints: readonly SketchConstraint[],
  * 2点間のdistance拘束を追加/更新する(a/bの順序は問わず一致を判定。既存があれば値だけ差し替え)。
  * axis(頂点ベースの寸法指定、Phase 30。省略=direct・後方互換)はupsertDistanceEntityEntityConstraintの
  * axisと同じ意味。
+ * 新規作成時のみ signed:true を付ける(寸法値の符号仕様の明確化、Phase 33)。既存拘束の値だけを
+ * 差し替える場合(idx>=0)はsignedフィールドに触れない(スプレッドでそのまま引き継がれる)ため、
+ * 旧データ(signed省略=絶対値時代の拘束)は編集後も絶対値のまま解釈され続ける(後方互換)。
  */
 export function upsertDistanceConstraint(
   constraints: readonly SketchConstraint[],
@@ -124,7 +127,7 @@ export function upsertDistanceConstraint(
     next[idx] = { ...next[idx], value, axis } as SketchConstraint;
     return next;
   }
-  return [...constraints, { id: generateId("constraint"), kind: "distance", a, b, value, axis }];
+  return [...constraints, { id: generateId("constraint"), kind: "distance", a, b, value, axis, signed: true }];
 }
 
 /** 指定IDの拘束を削除する(見つからない場合は元の配列と等価な新しい配列を返す)。 */
@@ -159,6 +162,7 @@ export function upsertDistanceEntityOriginConstraint(
  * セグメント端点↔原点のdistancePointOrigin拘束を追加/更新する(追加項目)。
  * upsertDistanceEntityOriginConstraintのPointRef版。originLocalの意味・扱いは同じ。
  * axis(頂点ベースの寸法指定、Phase 30。省略=direct・後方互換)はupsertDistanceConstraintと同じ意味。
+ * signed(Phase 33)の付与規則もupsertDistanceConstraintと同じ(新規作成時のみtrue)。
  */
 export function upsertDistancePointOriginConstraint(
   constraints: readonly SketchConstraint[],
@@ -173,7 +177,7 @@ export function upsertDistancePointOriginConstraint(
     next[idx] = { ...next[idx], value, axis, ...(originLocal ? { originLocal } : {}) } as SketchConstraint;
     return next;
   }
-  return [...constraints, { id: generateId("constraint"), kind: "distancePointOrigin", point, value, originLocal, axis }];
+  return [...constraints, { id: generateId("constraint"), kind: "distancePointOrigin", point, value, originLocal, axis, signed: true }];
 }
 
 /**
@@ -205,6 +209,8 @@ function sameEntityPair(constraint: SketchConstraint, a: EntityRef, b: EntityRef
 /**
  * 2つのcircleエンティティの中心間のdistanceEntityEntity拘束を追加/更新する(a/bの順序は問わず一致を判定)。
  * axis(UI改善対応、省略=direct・後方互換)は"x"/"y"のとき片方の軸成分のみを距離として扱う。
+ * signed(Phase 33)の付与規則はupsertDistanceConstraintと同じ(新規作成時のみtrue)。fromEntityId(a)が
+ * 「1点目」、toEntityId(b、後にクリックした[=移動する]方)が「2点目」になる。
  */
 export function upsertDistanceEntityEntityConstraint(
   constraints: readonly SketchConstraint[],
@@ -221,7 +227,7 @@ export function upsertDistanceEntityEntityConstraint(
     next[idx] = { ...next[idx], value, axis } as SketchConstraint;
     return next;
   }
-  return [...constraints, { id: generateId("constraint"), kind: "distanceEntityEntity", a, b, value, axis }];
+  return [...constraints, { id: generateId("constraint"), kind: "distanceEntityEntity", a, b, value, axis, signed: true }];
 }
 
 /** circleエンティティの中心↔辺(LineRef)のdistanceEntityLine拘束を追加/更新する(entityId+同一のlineが既にあれば値だけ差し替え)。 */

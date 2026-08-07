@@ -154,10 +154,14 @@ function lengthLikeResidual(
 }
 
 /**
- * 2点間の距離のうち、片方の軸成分のみを対象にした残差式(distanceEntityEntityのaxis:"x"/"y"、
- * UI改善対応)。絶対値の符号は残差評価のたび現在のx(引数)から都度決め直す(2点とも可変なので
- * pointToFixedLineResidualのような固定sign化はできないが、通常は拘束値が正でありb側がa側より
- * 大きい/小さいの向きが反復中に反転することは稀なため、この単純な実装で十分収束する)。
+ * 2点間の距離のうち、片方の軸成分のみを対象にした残差式(distance/distanceEntityEntityの
+ * axis:"x"/"y"、UI改善対応)。
+ * signed=false(既定・旧データ、後方互換): 絶対値|b-a|-value。符号は残差評価のたび現在のx(引数)から
+ * 都度決め直す(2点とも可変なのでpointToFixedLineResidualのような固定sign化はできないが、通常は
+ * 拘束値が正でありb側がa側より大きい/小さいの向きが反復中に反転することは稀なため、この単純な実装で
+ * 十分収束する)。
+ * signed=true(寸法値の符号仕様の明確化、Phase 33、新規拘束のみ): 符号付き(b-a)-value。1点目(a)→
+ * 2点目(b)のクリック順が符号の基準になり、value自体に符号(負も含む)・0(軸整列)を許容できる。
  * axisIndex 0=x, 1=y。
  */
 function axisDistanceResidual(
@@ -166,10 +170,20 @@ function axisDistanceResidual(
   bIdx: [number, number],
   value: number,
   axisIndex: 0 | 1,
+  signed = false,
 ): ResidualEq {
   const ai = aIdx[axisIndex];
   const bi = bIdx[axisIndex];
   const d = x[bi] - x[ai];
+  if (signed) {
+    return {
+      value: d - value,
+      terms: [
+        { index: ai, coef: -1 },
+        { index: bi, coef: 1 },
+      ],
+    };
+  }
   const sign = d >= 0 ? 1 : -1;
   return {
     value: sign * d - value,
@@ -183,8 +197,12 @@ function axisDistanceResidual(
 /**
  * 可変点(idx)から固定点(fixed)への距離のうち、片方の軸成分のみを対象にした残差式
  * (distance/distancePointOriginのaxis:"x"/"y"、頂点ベースの寸法指定、Phase 30)。
- * axisDistanceResidual(2点とも可変)の「片方が固定値」版。符号は現在のx(引数)から都度決め直す
- * (axisDistanceResidualと同じ単純な実装で十分収束する、pointToFixedDistanceResidualと対になる関数)。
+ * axisDistanceResidual(2点とも可変)の「片方が固定値」版。
+ * signed=false(既定・旧データ、後方互換): 絶対値|point-fixed|-value。符号は現在のx(引数)から都度
+ * 決め直す(axisDistanceResidualと同じ単純な実装で十分収束する、pointToFixedDistanceResidualと
+ * 対になる関数)。
+ * signed=true(Phase 33、新規拘束のみ): 符号付き(point-fixed)-value(fixed[=origin]を基準、pointが
+ * 「2点目」)。
  * axisIndex 0=x, 1=y。
  */
 function axisDistanceToFixedResidual(
@@ -193,9 +211,16 @@ function axisDistanceToFixedResidual(
   fixed: Point2,
   value: number,
   axisIndex: 0 | 1,
+  signed = false,
 ): ResidualEq {
   const ai = idx[axisIndex];
   const d = x[ai] - fixed[axisIndex];
+  if (signed) {
+    return {
+      value: d - value,
+      terms: [{ index: ai, coef: 1 }],
+    };
+  }
   const sign = d >= 0 ? 1 : -1;
   return {
     value: sign * d - value,
@@ -549,8 +574,8 @@ function buildConstraintResiduals(
         const a = pointVarIndex(varIndex, c.a);
         const b = pointVarIndex(varIndex, c.b);
         if (!a || !b) break;
-        if (c.axis === "x") eqs.push(axisDistanceResidual(x, a, b, c.value, 0));
-        else if (c.axis === "y") eqs.push(axisDistanceResidual(x, a, b, c.value, 1));
+        if (c.axis === "x") eqs.push(axisDistanceResidual(x, a, b, c.value, 0, c.signed === true));
+        else if (c.axis === "y") eqs.push(axisDistanceResidual(x, a, b, c.value, 1, c.signed === true));
         else eqs.push(lengthLikeResidual(x, a, b, c.value));
         break;
       }
@@ -577,8 +602,8 @@ function buildConstraintResiduals(
         const idx = pointVarIndex(varIndex, c.point);
         if (!idx) break;
         const origin = c.originLocal ?? [0, 0];
-        if (c.axis === "x") eqs.push(axisDistanceToFixedResidual(x, idx, origin, c.value, 0));
-        else if (c.axis === "y") eqs.push(axisDistanceToFixedResidual(x, idx, origin, c.value, 1));
+        if (c.axis === "x") eqs.push(axisDistanceToFixedResidual(x, idx, origin, c.value, 0, c.signed === true));
+        else if (c.axis === "y") eqs.push(axisDistanceToFixedResidual(x, idx, origin, c.value, 1, c.signed === true));
         else eqs.push(pointToFixedDistanceResidual(x, idx, origin, c.value));
         break;
       }
@@ -592,8 +617,8 @@ function buildConstraintResiduals(
         const a = entityVarIndex(entityVarIdx, c.a);
         const b = entityVarIndex(entityVarIdx, c.b);
         if (!a || !b) break;
-        if (c.axis === "x") eqs.push(axisDistanceResidual(x, a, b, c.value, 0));
-        else if (c.axis === "y") eqs.push(axisDistanceResidual(x, a, b, c.value, 1));
+        if (c.axis === "x") eqs.push(axisDistanceResidual(x, a, b, c.value, 0, c.signed === true));
+        else if (c.axis === "y") eqs.push(axisDistanceResidual(x, a, b, c.value, 1, c.signed === true));
         else eqs.push(lengthLikeResidual(x, a, b, c.value));
         break;
       }

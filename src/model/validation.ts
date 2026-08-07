@@ -11,6 +11,22 @@ function isPositiveFiniteNumber(value: number): boolean {
   return Number.isFinite(value) && value > 0;
 }
 
+/** 0以上(0を含む)の有限数であること。0を許可する距離系拘束(下記参照)のバリデーションに使う。 */
+function isNonNegativeFiniteNumber(value: number): boolean {
+  return Number.isFinite(value) && value >= 0;
+}
+
+/**
+ * 符号付き軸距離拘束(distance/distancePointOrigin/distanceEntityEntityのaxis:"x"/"y"、寸法値の
+ * 符号仕様の明確化、Phase 33)のvalueバリデーション。axis:"x"/"y"は符号(1点目→2点目の向き)・0(軸整列)
+ * のいずれも許容するため有限数であればよい。axis:"direct"(直線距離、ユークリッド)は0(点一致)を
+ * 許可するが負は不可。
+ */
+function isValidAxisDistanceValue(value: number, axis: "direct" | "x" | "y" | undefined): boolean {
+  if (axis === "x" || axis === "y") return Number.isFinite(value);
+  return isNonNegativeFiniteNumber(value);
+}
+
 /** 隣接する頂点間の距離がこの値以下なら重複とみなす(mm)。 */
 const POLYGON_MIN_VERTEX_DISTANCE = 1e-6;
 
@@ -223,7 +239,12 @@ function validatePointRef(
  * スケッチ拘束(Phase 20a)のバリデーション。
  * - coincident/distance/fix: 参照するPointRefのsegmentIdがsegments内に存在すること
  * - horizontal/vertical/length/radius: segmentIdがsegments内に存在すること
- * - length/distance/radius: valueが正の有限数であること
+ * - length/radius: valueが正の有限数であること
+ * - distance/distancePointOrigin/distanceEntityEntity: axis:"x"/"y"は符号付きのため有限数であれば
+ *   よい(0・負を許可)、axis:"direct"/省略(直線距離)は0以上(点一致を許可、負は不可、寸法値の符号仕様の
+ *   明確化Phase 33)
+ * - distancePointLine/distanceLineLine/distanceLineRefEdge: valueが0以上の有限数であること
+ *   (線上一致を許可、負は不可、Phase 33)
  * - radius: 参照先セグメントがkind:"arc"であること(lineには指定できない)
  * - perpendicular: 参照先セグメントが2本ともkind:"line"であること(Phase 23)
  * - concentric/tangent: 参照先entityがcircleエンティティとして存在すること(Phase 23)
@@ -266,8 +287,55 @@ function validateConstraint(
     case "distance": {
       errors.push(...validatePointRef(constraint.a, segments, constraint.id, "a", featureId));
       errors.push(...validatePointRef(constraint.b, segments, constraint.id, "b", featureId));
-      if (!isPositiveFiniteNumber(constraint.value)) {
-        errors.push({ featureId, message: `拘束(${constraint.id})の距離は正の数である必要があります` });
+      // 0を許可(整列)。axis:"x"/"y"は符号付き(寸法値の符号仕様の明確化、Phase 33)のため負も許可、
+      // axis:"direct"/省略(直線距離)は0以上(点一致)のみ許可(負は不可)。
+      if (!isValidAxisDistanceValue(constraint.value, constraint.axis)) {
+        errors.push({
+          featureId,
+          message:
+            constraint.axis === "x" || constraint.axis === "y"
+              ? `拘束(${constraint.id})の距離は有限の数である必要があります`
+              : `拘束(${constraint.id})の距離は0以上の数である必要があります`,
+        });
+      }
+      break;
+    }
+    case "distancePointOrigin": {
+      errors.push(...validatePointRef(constraint.point, segments, constraint.id, "point", featureId));
+      if (!isValidAxisDistanceValue(constraint.value, constraint.axis)) {
+        errors.push({
+          featureId,
+          message:
+            constraint.axis === "x" || constraint.axis === "y"
+              ? `拘束(${constraint.id})の距離は有限の数である必要があります`
+              : `拘束(${constraint.id})の距離は0以上の数である必要があります`,
+        });
+      }
+      break;
+    }
+    case "distanceEntityEntity": {
+      if (!entities.find((e) => e.id === constraint.a.entityId && e.kind === "circle")) {
+        errors.push({ featureId, message: `拘束(${constraint.id})の参照先の円(${constraint.a.entityId})が見つかりません` });
+      }
+      if (!entities.find((e) => e.id === constraint.b.entityId && e.kind === "circle")) {
+        errors.push({ featureId, message: `拘束(${constraint.id})の参照先の円(${constraint.b.entityId})が見つかりません` });
+      }
+      if (!isValidAxisDistanceValue(constraint.value, constraint.axis)) {
+        errors.push({
+          featureId,
+          message:
+            constraint.axis === "x" || constraint.axis === "y"
+              ? `拘束(${constraint.id})の距離は有限の数である必要があります`
+              : `拘束(${constraint.id})の距離は0以上の数である必要があります`,
+        });
+      }
+      break;
+    }
+    case "distancePointLine": {
+      errors.push(...validatePointRef(constraint.point, segments, constraint.id, "point", featureId));
+      // 点↔線距離は0を許可(線上一致として機能、寸法値の符号仕様の明確化、Phase 33)。負は不可。
+      if (!isNonNegativeFiniteNumber(constraint.value)) {
+        errors.push({ featureId, message: `拘束(${constraint.id})の距離は0以上の数である必要があります` });
       }
       break;
     }
@@ -306,8 +374,9 @@ function validateConstraint(
       else if (a.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は直線セグメントにのみ指定できます(${constraint.a})` });
       if (!b) errors.push({ featureId, message: `拘束(${constraint.id})の参照先セグメント(${constraint.b})が見つかりません` });
       else if (b.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は直線セグメントにのみ指定できます(${constraint.b})` });
-      if (!isPositiveFiniteNumber(constraint.value)) {
-        errors.push({ featureId, message: `拘束(${constraint.id})の距離は正の数である必要があります` });
+      // 線↔線距離は0を許可(平行かつ線上一致として機能、寸法値の符号仕様の明確化、Phase 33)。負は不可。
+      if (!isNonNegativeFiniteNumber(constraint.value)) {
+        errors.push({ featureId, message: `拘束(${constraint.id})の距離は0以上の数である必要があります` });
       }
       break;
     }
@@ -327,8 +396,9 @@ function validateConstraint(
       const seg = findSegmentById(segments, constraint.segmentId);
       if (!seg) errors.push({ featureId, message: `拘束(${constraint.id})の参照先セグメント(${constraint.segmentId})が見つかりません` });
       else if (seg.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は直線セグメントにのみ指定できます(${constraint.segmentId})` });
-      if (!isPositiveFiniteNumber(constraint.value)) {
-        errors.push({ featureId, message: `拘束(${constraint.id})の距離は正の数である必要があります` });
+      // 線↔参照エッジ距離も線↔線距離と同じく0を許可(Phase 33)。負は不可。
+      if (!isNonNegativeFiniteNumber(constraint.value)) {
+        errors.push({ featureId, message: `拘束(${constraint.id})の距離は0以上の数である必要があります` });
       }
       break;
     }

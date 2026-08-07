@@ -140,10 +140,15 @@ export type SketchConstraint =
   /**
    * 2点間の距離(mm)。同一セグメント内・別セグメント間のどちらの点も指定できる。
    * axis(頂点ベースの寸法指定、Phase 30。省略=direct・後方互換)は"x"/"y"のとき
-   * それぞれ|bx-ax|/|by-ay|のみを距離として扱う(直線距離ではなく片方の軸成分のみを拘束する。
+   * それぞれbx-ax/by-ayのみを距離として扱う(直線距離ではなく片方の軸成分のみを拘束する。
    * distanceEntityEntityのaxisと同じ考え方)。
+   * signed(寸法値の符号仕様の明確化、Phase 33。省略=false・後方互換)がtrueかつaxis:"x"/"y"のとき、
+   * 残差は|座標2-座標1|-valueではなく(座標2-座標1[=b-a])-valueになる(1点目[a]→2点目[b]の
+   * クリック順が符号の基準、0=軸整列、負=bがaより小さい側)。旧データ(signed省略)は従来通り
+   * 絶対値(常に非負のvalueを維持する挙動)のまま解釈する。axis:"direct"のときはsignedの影響を受けない
+   * (直線距離は常に非負)。
    */
-  | { id: string; kind: "distance"; a: PointRef; b: PointRef; value: number; axis?: "direct" | "x" | "y"; labelOffset?: [number, number] }
+  | { id: string; kind: "distance"; a: PointRef; b: PointRef; value: number; axis?: "direct" | "x" | "y"; signed?: boolean; labelOffset?: [number, number] }
   /** kind:"arc" のセグメントにのみ指定できる半径拘束(mm)。bulge(挟角)は維持したまま端点間距離を調整して解く。 */
   | { id: string; kind: "radius"; segmentId: string; value: number; labelOffset?: [number, number] }
   /** 点を(拘束追加時点の)現在位置に固定する。値はsolveSketch呼び出し時の入力座標から都度求める(拘束自体には持たない)。 */
@@ -173,6 +178,8 @@ export type SketchConstraint =
    * originLocalスナップショットの扱いはdistanceEntityOriginと同一。
    * axis(頂点ベースの寸法指定、Phase 30。省略=direct・後方互換)は"distance"拘束のaxisと同じ意味
    * (原点のoriginLocal[x,y]を固定側の座標として片方の軸成分のみを拘束する)。
+   * signed(寸法値の符号仕様の明確化、Phase 33。省略=false・後方互換)は"distance"拘束のsignedと同じ意味。
+   * point-origin間では原点を基準("1点目")・pointを"2点目"として(point[axis]-origin[axis])-valueを残差にする。
    */
   | {
       id: string;
@@ -181,6 +188,7 @@ export type SketchConstraint =
       value: number;
       originLocal?: [number, number];
       axis?: "direct" | "x" | "y";
+      signed?: boolean;
       /** 寸法ラベルのドラッグ移動オフセット(Phase 31a)。省略=既定位置(後方互換)。 */
       labelOffset?: [number, number];
     }
@@ -193,8 +201,9 @@ export type SketchConstraint =
   | { id: string; kind: "coincidentOrigin"; point: PointRef | EntityRef; originLocal?: [number, number] }
   /**
    * circleエンティティの中心↔中心の距離(mm、Phase 22)。axis(UI改善対応、省略=direct・後方互換)は
-   * "x"/"y"のときそれぞれ|cx_b-cx_a|/|cy_b-cy_a|のみを距離として扱う(中心間の直線距離ではなく、
+   * "x"/"y"のときそれぞれcx_b-cx_a/cy_b-cy_aのみを距離として扱う(中心間の直線距離ではなく、
    * 片方の軸成分のみを拘束する)。
+   * signed(寸法値の符号仕様の明確化、Phase 33。省略=false・後方互換)は"distance"拘束のsignedと同じ意味。
    */
   | {
       id: string;
@@ -203,6 +212,7 @@ export type SketchConstraint =
       b: EntityRef;
       value: number;
       axis?: "direct" | "x" | "y";
+      signed?: boolean;
       /** 寸法ラベルのドラッグ移動オフセット(Phase 31a)。省略=既定位置(後方互換)。 */
       labelOffset?: [number, number];
     }

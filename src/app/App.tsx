@@ -280,6 +280,12 @@ export default function App() {
     /** 円↔円の距離のときだけtrue: 距離/X距離/Y距離の3択を表示する(UI改善対応)。 */
     axisOptions?: boolean;
     /**
+     * 0を許容する距離系の値かどうか(寸法値の符号仕様の明確化、Phase 33)。X/Y距離
+     * (axisOptions対象の3種)・端点↔線の距離・線↔線(参照エッジ含む)の距離のときtrue。
+     * 長さ・半径・幅・高さ・中心↔原点/辺の距離・角度は対象外(常に正の数のみ、従来通り)。
+     */
+    allowZero?: boolean;
+    /**
      * 線分↔線分・線分↔参照エッジの寸法(Phase 24)のときだけ設定: 「距離/角度」の選択(ラジオ)を
      * 表示する。distanceValue/angleValueはそれぞれの入力欄の初期値、initialは既定の選択
      * (折り畳み角<5度なら"distance"、それ以外は"angle")。
@@ -1505,6 +1511,9 @@ export default function App() {
         let initialValue = 0;
         let hintLabel: string | undefined;
         let axisOptions = false;
+        // 0を許容する距離系の値かどうか(寸法値の符号仕様の明確化、Phase 33)。対象の種別ごとに
+        // 下のif連鎖で該当すればtrueにする(axisOptions対象の3種・端点↔線距離・線↔線距離)。
+        let allowZero = false;
         if (target.kind === "length") {
           titleLabel = "長さ (mm)";
           const seg = segments.find((s) => s.id === target.segmentId);
@@ -1517,6 +1526,7 @@ export default function App() {
           // 端点↔端点の距離(頂点ベースの寸法指定、Phase 30: X/Y距離にも対応)。
           initialValue = distanceBetweenRefs(segments, target.a, target.b) ?? 0;
           axisOptions = true;
+          allowZero = true;
         } else if (target.kind === "entity-radius") {
           titleLabel = "半径 (mm)";
           const entity = entities.find((e) => e.id === target.entityId);
@@ -1539,6 +1549,7 @@ export default function App() {
           const p = seg ? (target.point.end === "p1" ? seg.p1 : seg.p2) : null;
           initialValue = p ? distanceBetweenPoints(p, originLocal) : 0;
           axisOptions = true;
+          allowZero = true;
         } else if (target.kind === "point-distance-line") {
           // 頂点↔線の距離(頂点ベースの寸法指定、Phase 30新設)。circle-distance-edge/refedgeと同じ
           // 考え方だが対象がcircleの中心ではなく自由な端点である点のみが異なる。
@@ -1546,6 +1557,7 @@ export default function App() {
           const seg = segments.find((s) => s.id === target.point.segmentId);
           const p = seg ? (target.point.end === "p1" ? seg.p1 : seg.p2) : null;
           initialValue = p ? distancePointToLine(p, target.edgeA, target.edgeB) : 0;
+          allowZero = true;
           hintLabel =
             target.line.kind === "refEdge"
               ? "参照エッジは動かず、端点だけが移動します"
@@ -1558,6 +1570,7 @@ export default function App() {
             from?.kind === "circle" && to?.kind === "circle" ? distanceBetweenPoints(from.center, to.center) : 0;
           hintLabel = "後にクリックした円(この円)が移動します";
           axisOptions = true;
+          allowZero = true;
         } else if (target.kind === "circle-distance-edge" || target.kind === "circle-distance-refedge") {
           titleLabel = target.kind === "circle-distance-refedge" ? "中心↔参照エッジの距離 (mm)" : "中心↔辺の距離 (mm)";
           const entity = entities.find((e) => e.id === target.entityId);
@@ -1571,6 +1584,11 @@ export default function App() {
               : "円を固定していれば辺が、していなければ円が移動します";
         }
         let quantityOptions: { distanceValue: number; angleValue: number; initial: "distance" | "angle" } | undefined;
+        if (target.kind === "line-line" || target.kind === "line-refedge") {
+          // 線↔線距離は0を許可(平行かつ線上一致、寸法値の符号仕様の明確化、Phase 33)。
+          // DimensionToolPopup側で「角度」選択中はこのフラグを無視する(角度は従来通り正の数のみ)。
+          allowZero = true;
+        }
         if (target.kind === "line-line") {
           // 線分↔線分の寸法(Phase 24): ほぼ平行(折り畳み角<5度)なら平行距離、それ以外は角度を
           // デフォルト選択する。逆向きに描いた平行線(なす角≈180度)も折り畳んで平行判定するため、
@@ -1604,6 +1622,7 @@ export default function App() {
           screen: { x: screenX, y: screenY },
           hintLabel,
           axisOptions,
+          allowZero,
           quantityOptions,
         });
       },
@@ -2789,6 +2808,7 @@ export default function App() {
               screen={dimensionPopup.screen}
               hintLabel={dimensionPopup.hintLabel}
               axisOptions={dimensionPopup.axisOptions}
+              allowZero={dimensionPopup.allowZero}
               quantityOptions={dimensionPopup.quantityOptions}
               onCancel={() => setDimensionPopup(null)}
               onApply={handleApplyDimensionTarget}

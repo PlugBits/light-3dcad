@@ -55,6 +55,20 @@ describe("upsertDistanceConstraint", () => {
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({ kind: "distance", a, b, value: 15 });
   });
+
+  it("新規作成時のみsigned:trueを付ける(寸法値の符号仕様の明確化、Phase 33)。既存拘束の値だけ差し替える場合は既存のsignedをそのまま保つ", () => {
+    const a = { segmentId: "s1", end: "p1" as const };
+    const b = { segmentId: "s2", end: "p2" as const };
+    const created = upsertDistanceConstraint([], a, b, 15, "x");
+    expect(created[0]).toMatchObject({ signed: true });
+
+    // 旧データ(signedフィールドが無い)を編集しても、signedは付与されない(後方互換: 絶対値のまま解釈させる)。
+    const legacy = [{ id: "c-1", kind: "distance" as const, a, b, value: 5, axis: "x" as const }];
+    const edited = upsertDistanceConstraint(legacy, a, b, 30, "x");
+    expect(edited).toHaveLength(1);
+    expect(edited[0].value).toBe(30);
+    expect((edited[0] as { signed?: boolean }).signed).toBeUndefined();
+  });
 });
 
 describe("upsertDistanceEntityLineConstraint(寸法ツールが実際に生成する形式、ユーザー報告対応)", () => {

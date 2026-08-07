@@ -10,6 +10,7 @@ export function DimensionToolPopup({
   hintLabel,
   axisOptions,
   initialAxis,
+  allowZero,
   quantityOptions,
   onDelete,
   onApply,
@@ -29,6 +30,15 @@ export function DimensionToolPopup({
   axisOptions?: boolean;
   /** axisOptions表示時の初期選択(既存拘束の編集時、未指定は"direct")。 */
   initialAxis?: "direct" | "x" | "y";
+  /**
+   * 0を許容する距離系の値かどうか(寸法値の符号仕様の明確化、Phase 33。省略=false=従来通り正の数のみ)。
+   * axisOptions指定時、axisが"x"/"y"のときは(このフラグに関わらず)符号付きとして負の値も許容する
+   * (1点目→2点目の向きが符号の基準、0=軸整列)。axisが"direct"、またはaxisOptions非指定のときは
+   * このフラグがtrueなら0以上、falseなら正の数のみを許容する(負は常に不可)。
+   * quantityOptions指定時は"距離"選択中のみこのフラグの意味で扱い、"角度"選択中は常に正の数のみ
+   * (角度に0許容は含まない)。
+   */
+  allowZero?: boolean;
   /**
    * 線分↔線分・線分↔参照エッジの寸法のときだけ設定: 「距離/角度」の2択(ラジオ)を表示する
    * (Phase 24項目3、UI改善)。切り替えるとtitleLabel/入力値がdistanceValue/angleValueに差し替わる。
@@ -63,11 +73,23 @@ export function DimensionToolPopup({
 
   const effectiveTitleLabel = quantityOptions ? (quantity === "distance" ? "距離 (mm)" : "角度 (°)") : titleLabel;
 
+  // X/Y距離は符号付き(1点目→2点目の向きが基準、0=軸整列、寸法値の符号仕様の明確化、Phase 33)。
+  const axisIsSigned = axisOptions === true && axis !== "direct";
+  // 0を許容するかどうか。quantityOptions("距離"/"角度"の切替)がある場合は"角度"選択中は対象外
+  // (角度に0許容は含まない、従来通り正の数のみ)。
+  const effectiveAllowZero = quantityOptions ? quantity === "distance" && allowZero === true : allowZero === true;
+  const valueHint = axisIsSigned
+    ? "符号は1点目→2点目の向き(0=整列)"
+    : effectiveAllowZero
+      ? "0以上(方向は現在の配置を維持)"
+      : undefined;
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const num = Number(value);
-    if (!Number.isFinite(num) || num <= 0) {
-      setError("正の数を入力してください");
+    const valid = axisIsSigned ? Number.isFinite(num) : Number.isFinite(num) && (effectiveAllowZero ? num >= 0 : num > 0);
+    if (!valid) {
+      setError(axisIsSigned ? "数値を入力してください" : effectiveAllowZero ? "0以上の数を入力してください" : "正の数を入力してください");
       return;
     }
     onApply(num, axisOptions ? axis : undefined, quantityOptions ? quantity : undefined);
@@ -153,6 +175,11 @@ export function DimensionToolPopup({
           onChange={(e) => setValue(e.target.value)}
         />
       </label>
+      {valueHint && (
+        <p data-testid="dimension-tool-popup-value-hint" style={{ margin: 0, fontSize: 10, color: "#9aa5b1" }}>
+          {valueHint}
+        </p>
+      )}
       {error && (
         <p data-testid="dimension-tool-popup-error" role="alert" style={{ margin: 0, fontSize: 10, color: "#ff6b6b" }}>
           {error}

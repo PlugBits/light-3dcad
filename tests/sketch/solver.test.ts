@@ -345,6 +345,70 @@ describe("solveSketch circleエンティティの位置拘束(Phase 22)", () => 
     expect(dist(outA.center, outB.center)).toBeCloseTo(25, 4);
   });
 
+  // ---- 寸法値の符号仕様の明確化(Phase 33): signed:trueのdistanceEntityEntity/distance/
+  // distancePointOriginは、axis:"x"/"y"の残差が絶対値[|Δ|-value]ではなく符号付き
+  // [(座標2-座標1)-value]になる(1点目→2点目のクリック順が符号の基準)。signed省略(旧データ)は
+  // 従来通り絶対値のまま解釈される(後方互換)。----
+
+  it("②d distanceEntityEntity(axis:x, signed:true, 負値): 2点目(b)が1点目(a、固定)より小さいXへ解ける", () => {
+    const a = circle("a", [0, 0]);
+    const b = circle("b", [5, 8]);
+    const constraints: SketchConstraint[] = [
+      { id: "fixA", kind: "fixEntity", entity: { entityId: "a" } },
+      { id: "d1", kind: "distanceEntityEntity", a: { entityId: "a" }, b: { entityId: "b" }, value: -15, axis: "x", signed: true },
+    ];
+    const result = solveSketch([], constraints, [a, b]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outA = result.entities.find((e) => e.id === "a")!;
+    const outB = result.entities.find((e) => e.id === "b")!;
+    if (outA.kind !== "circle" || outB.kind !== "circle") throw new Error("not circle");
+    expect(outA.center[0]).toBeCloseTo(0, 4);
+    // 符号付き: b.x - a.x = -15 (絶対値[旧挙動]なら|d|=-15は解なしになるはずだが、signed:trueなので
+    // 単純にb.xがa.xより15小さい値[-15]に解ける)。
+    expect(outB.center[0] - outA.center[0]).toBeCloseTo(-15, 3);
+    expect(outB.center[0]).toBeCloseTo(-15, 3);
+  });
+
+  it("②e distanceEntityEntity(axis:x, signed:true, 0): 2点目(b)が1点目(a、固定)と同じXに解ける(垂直整列)", () => {
+    const a = circle("a", [0, 0]);
+    const b = circle("b", [5, 8]);
+    const constraints: SketchConstraint[] = [
+      { id: "fixA", kind: "fixEntity", entity: { entityId: "a" } },
+      { id: "d1", kind: "distanceEntityEntity", a: { entityId: "a" }, b: { entityId: "b" }, value: 0, axis: "x", signed: true },
+    ];
+    const result = solveSketch([], constraints, [a, b]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outA = result.entities.find((e) => e.id === "a")!;
+    const outB = result.entities.find((e) => e.id === "b")!;
+    if (outA.kind !== "circle" || outB.kind !== "circle") throw new Error("not circle");
+    expect(outB.center[0]).toBeCloseTo(outA.center[0], 4);
+    // X以外(Y)は拘束されていないため、入力の相対Y差(8)付近を維持する(正則化)。
+    expect(outB.center[1] - outA.center[1]).toBeCloseTo(8, 2);
+  });
+
+  it("②f distanceEntityEntity(axis:x, signed省略[旧データ]): 絶対値のまま解釈され、負の値は指定できない(後方互換)", () => {
+    // bがaより左(x=-5、負のX差)にある状態で、正の値20を指定する従来通りの使い方(絶対値=20)。
+    // signedを付けていない旧データはこれまで通り|Δ|=valueとして解ける(現在の側[左]を保つ)。
+    const a = circle("a", [0, 0]);
+    const b = circle("b", [-5, 8]);
+    const constraints: SketchConstraint[] = [
+      { id: "fixA", kind: "fixEntity", entity: { entityId: "a" } },
+      { id: "d1", kind: "distanceEntityEntity", a: { entityId: "a" }, b: { entityId: "b" }, value: 20, axis: "x" },
+    ];
+    const result = solveSketch([], constraints, [a, b]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outA = result.entities.find((e) => e.id === "a")!;
+    const outB = result.entities.find((e) => e.id === "b")!;
+    if (outA.kind !== "circle" || outB.kind !== "circle") throw new Error("not circle");
+    // 絶対値: |b.x - a.x| = 20。現在の側(左、負)を保つため b.x ≈ -20 に解ける(bが右[+20]に
+    // 飛び移ることはない)。
+    expect(Math.abs(outB.center[0] - outA.center[0])).toBeCloseTo(20, 3);
+    expect(outB.center[0]).toBeCloseTo(-20, 3);
+  });
+
   it("③ distanceEntityLine(entityEdge): rectangleを固定すれば円の中心↔rectangle辺の垂直距離が指定値に解ける(辺は動かない)", () => {
     const c = circle("c1", [5, 5]);
     const rect: SketchEntity = { kind: "rectangle", id: "r1", center: [0, 0], width: 20, height: 20 };

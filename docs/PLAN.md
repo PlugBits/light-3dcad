@@ -822,3 +822,27 @@ tangent(円↔直線)のsideを拘束作成時に永続化し、収束失敗時�
 (`src/sketch/solver.ts`/`constraintLabels.ts`)。SketchEditorのセグメント一覧を個別行+削除ボタン化し、
 Deleteキーでの直接選択削除(参照拘束カスケード+件数トースト)を追加した(`removeSketchElementCascade`)。
 Vitest455件、E2E新設`tangent-fix-and-segment-delete.spec.ts`4件でブラウザ実機確認した。
+
+## Phase 33: 寸法ラベルのドラッグが効かないバグの修正と寸法値の符号仕様の明確化(実機報告2件)
+
+Phase 31aで実装したはずのラベルドラッグが「拘束由来の寸法(寸法ツールで作る長さ・距離・X/Y距離・
+半径)だけ効かない」という実機報告を再現し、根本原因を特定した:
+`DimensionOverlay.commitOffset()`が`constraintDimensionKey()`の返す`"c-"+constraintId`をそのまま
+`setConstraintLabelOffset()`のconstraintId引数へ渡していたため、実際の拘束id(cプレフィックス無し)
+と一致せず書き込みが常に無効だった(実測寸法[矩形の幅/高さ等]は別経路[dimensionKey]で正しく動くため
+気づかれにくかった)。`LabelDragTarget`にconstraintIdを別フィールドとして持たせて修正し、ラベルの
+カーソルを`move`にして発見性を上げた。
+
+寸法値の符号仕様も明確化した。X/Y距離(distance/distancePointOrigin/distanceEntityEntityの
+axis:"x"/"y")は、新設の`signed`フラグ(新規作成時のみtrue、既存拘束の値だけ差し替える場合は
+そのまま引き継ぐため旧データ[signed省略]は従来通り絶対値のまま解釈される後方互換)により、
+残差が`|Δ|-value`(絶対値)ではなく`(座標2-座標1)-value`(符号付き、1点目→2点目のクリック順が基準、
+0=軸整列)になった。あわせて距離系のバリデーション(`value>0`)を、X/Y距離・点↔線距離・線↔線距離
+(参照エッジ版含む)で`value>=0`に緩和した(直線距離は0[点一致]を許可するが負は不可、X/Y距離は
+負も許可)。`DimensionToolPopup`に軸選択に応じた一行ヒント(「符号は1点目→2点目の向き(0=整列)」/
+「0以上(方向は現在の配置を維持)」)を追加した。Vitest450件(signed:trueの符号付き軸距離2件+0整列1件+
+signed省略[旧データ]の絶対値互換1件のソルバテスト+signed付与のconstraintDimensionsテスト1件が新規)。
+E2E新設2件(拘束由来の寸法ラベルのドラッグ回帰テスト[修正前は失敗することを確認済み]、円↔円のX距離が
+負値で左側配置・0で垂直整列し編集ポップアップの初期値が符号付きになる/端点↔辺の距離に0を指定すると
+端点が辺上に乗る)を追加し、既存の寸法ラベルドラッグE2Eは本番ビルド相当(`vite build`+`vite preview`)
+でも1回確認した(既存26件は無傷、計29件)。
