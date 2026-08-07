@@ -504,6 +504,22 @@ interface CadStoreState {
    * アンドゥ履歴は保持しない(空にリセットする)。選択状態(フィーチャー・面)もクリアし、直ちに再評価する。
    */
   loadDocument: (doc: CadDocument) => void;
+
+  /**
+   * 参照切れ時の再選択UI(Phase 29b)用のプレビュー: featureIdの「直前」まで(featureId自体・
+   * それ以降は除く)だけを評価した結果を、mesh/faceInfo/edgeInfo/bodyGroupsとして一時的に
+   * ビューアへ反映する。doc・history・errorMessage/errorFeatureId・latestEvaluateRequestIdは
+   * 一切変更しない、fire-and-forgetの補助リクエスト(通常の評価フローの結果と競合しない)。
+   *
+   * fillet3d/shell/thread/mateフィーチャーが参照切れでエラーになっている間、
+   * ストアのmesh/faceInfo/edgeInfoは「最後に成功した評価」のまま止まっている(直前の編集
+   * [ボディ寸法変更等]が反映されていない)。エッジ/面選択ツール・ねじ配置ツール・合致ツールは
+   * ビューア側が保持するmesh由来のデータ(edgeGroups等)をクリック時点でライブ参照するため、
+   * 再選択を始める前にこれを呼んで「対象フィーチャーを適用する直前の、今の最新ボディ」を
+   * 一度だけ取り直しておくことで、選び直しが最新のジオメトリに対して行われるようにする
+   * (truncated評価も失敗した場合は何もしない=現在表示中のmesh/faceInfo/edgeInfoのままにする)。
+   */
+  previewFeatureContext: (featureId: FeatureId) => void;
   /**
    * 新規プロジェクト(Phase 26)。空ドキュメントに差し替え、自動保存も消去する
    * (呼び出し側=UIで確認ダイアログを出してから呼ぶ想定)。
@@ -993,6 +1009,24 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   newProject: () => {
     clearAutosave();
     get().loadDocument(createEmptyDocument());
+  },
+
+  previewFeatureContext: (featureId) => {
+    const doc = get().doc;
+    const idx = doc.features.findIndex((f) => f.id === featureId);
+    if (idx === -1) return;
+    const truncated: CadDocument = { ...doc, features: doc.features.slice(0, idx) };
+    const { promise } = postRequest({ kind: "evaluate", doc: resolveEvaluationDocument(truncated) });
+    promise.then((response) => {
+      if (response.kind !== "evaluated") return;
+      // 通常の評価フロー(applyEvaluated)とは独立: latestEvaluateRequestId等は変更しない。
+      set({
+        mesh: response.mesh,
+        faceInfo: response.faceInfo,
+        edgeInfo: response.edgeInfo,
+        bodyGroups: response.bodyGroups,
+      });
+    });
   },
 }));
 

@@ -102,13 +102,26 @@ export function addFillet3DFeature(
   return { doc: addFeature(doc, feature), feature };
 }
 
-/** fillet3d フィーチャーの一部フィールド(name, size)を更新する。edges/kindは再選択が必要なため対象外(v1)。 */
+/**
+ * fillet3d フィーチャーの一部フィールド(name, size)を更新する。edges(対象エッジ)の差し替えは
+ * replaceFillet3DEdges()を使う(kindの変更は非対応、削除して作り直す運用のまま)。
+ */
 export function patchFillet3DFeature(
   doc: CadDocument,
   featureId: FeatureId,
   patch: Partial<Pick<Fillet3DFeature, "name" | "size">>,
 ): CadDocument {
   return updateFeature<Fillet3DFeature>(doc, featureId, (f) => ({ ...f, ...patch }));
+}
+
+/**
+ * fillet3d フィーチャーの対象エッジ(edges)スナップショットを丸ごと差し替える(Phase 29b、
+ * 参照切れ時の再選択UI)。ビューアのエッジ選択ツール(startEdgeSelectTool)で選び直した
+ * FilletEdgeRef配列をそのまま渡す想定。純粋な置き換え操作のみ行い、幾何マッチング・
+ * 空配列チェック等は呼び出し側(App.tsx、ツールの「適用」ボタン)の責務とする。
+ */
+export function replaceFillet3DEdges(doc: CadDocument, featureId: FeatureId, edges: FilletEdgeRef[]): CadDocument {
+  return updateFeature<Fillet3DFeature>(doc, featureId, (f) => ({ ...f, edges }));
 }
 
 /** 新しいシェル(中抜き)フィーチャーを作成して末尾に追加する。IDは自動生成される(Phase 25b)。 */
@@ -126,13 +139,25 @@ export function addShellFeature(
   return { doc: addFeature(doc, feature), feature };
 }
 
-/** shell フィーチャーの一部フィールド(name, thickness)を更新する。faces(対象面)は再選択が必要なため対象外(v1)。 */
+/**
+ * shell フィーチャーの一部フィールド(name, thickness)を更新する。faces(対象面)の差し替えは
+ * replaceShellFaces()を使う。
+ */
 export function patchShellFeature(
   doc: CadDocument,
   featureId: FeatureId,
   patch: Partial<Pick<ShellFeature, "name" | "thickness">>,
 ): CadDocument {
   return updateFeature<ShellFeature>(doc, featureId, (f) => ({ ...f, ...patch }));
+}
+
+/**
+ * shell フィーチャーの開口面(faces)スナップショットを丸ごと差し替える(Phase 29b、
+ * 参照切れ時の再選択UI)。ビューアの面選択ツール(startFaceSelectTool)で選び直した
+ * ShellFaceRef配列をそのまま渡す想定。
+ */
+export function replaceShellFaces(doc: CadDocument, featureId: FeatureId, faces: ShellFaceRef[]): CadDocument {
+  return updateFeature<ShellFeature>(doc, featureId, (f) => ({ ...f, faces }));
 }
 
 /**
@@ -199,13 +224,30 @@ export function addThreadFeature(
   return { doc: addFeature(doc, feature), feature };
 }
 
-/** thread フィーチャーの一部フィールド(name, preset, length, hand)を更新する。face/position/directionは再選択が必要なため対象外(v1)。 */
+/**
+ * thread フィーチャーの一部フィールド(name, preset, length, hand)を更新する。face/positionの
+ * 差し替えはreplaceThreadPlacement()を使う。
+ */
 export function patchThreadFeature(
   doc: CadDocument,
   featureId: FeatureId,
   patch: Partial<Pick<ThreadFeature, "name" | "preset" | "length" | "hand">>,
 ): CadDocument {
   return updateFeature<ThreadFeature>(doc, featureId, (f) => ({ ...f, ...patch }));
+}
+
+/**
+ * thread フィーチャーの配置面・位置(face, position)を丸ごと差し替える(Phase 29b、
+ * 参照切れ時の再選択UI)。ビューアのねじ配置ツール(startThreadPlaceTool)が確定した
+ * ThreadPlaceRefから作ったface/positionを渡す想定。direction(雄雌に対する法線方向)は
+ * 既存のまま維持する(面が変わっても雄雌の関係自体は変わらないため)。
+ */
+export function replaceThreadPlacement(
+  doc: CadDocument,
+  featureId: FeatureId,
+  patch: { face: ThreadFaceRef; position: [number, number] },
+): CadDocument {
+  return updateFeature<ThreadFeature>(doc, featureId, (f) => ({ ...f, face: patch.face, position: patch.position }));
 }
 
 /**
@@ -263,8 +305,8 @@ export function addMateFeature(
 }
 
 /**
- * mate フィーチャーの一部フィールド(name, value)を更新する(Phase 28c)。kind/a/bは
- * 再選択が必要なため対象外(v1、ShellEditor等と同じ「再選択UIは持たない」方針)。
+ * mate フィーチャーの一部フィールド(name, value)を更新する(Phase 28c)。a/b(対象面)の
+ * 差し替えはreplaceMateFaces()を使う(Phase 29b)。kindの変更は非対応(削除して作り直す運用のまま)。
  */
 export function patchMateFeature(
   doc: CadDocument,
@@ -293,6 +335,15 @@ export function mateHasSubsequentBodyEdit(doc: CadDocument, mateFeatureId: Featu
     }
   }
   return false;
+}
+
+/**
+ * mate フィーチャーが参照する2つの面(a, b)を丸ごと差し替える(Phase 29b、参照切れ時の再選択UI)。
+ * ビューアの合致ツール(startMateTool)で選び直した2面をApp.tsxのtoMateFaceRef()で変換した
+ * MateFaceRefをそのまま渡す想定。kind(一致/距離/同軸)は既存のまま維持する。
+ */
+export function replaceMateFaces(doc: CadDocument, featureId: FeatureId, patch: { a: MateFaceRef; b: MateFaceRef }): CadDocument {
+  return updateFeature<MateFeature>(doc, featureId, (f) => ({ ...f, a: patch.a, b: patch.b }));
 }
 
 /** 指定IDのフィーチャーを探す。見つからなければ undefined。 */

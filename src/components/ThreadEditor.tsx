@@ -1,13 +1,23 @@
-// ねじフィーチャー選択時の編集パネル(Phase 25c)。
-// v1: 名前・呼び径プリセット・種別(雄/雌)・長さのみ編集可能(配置面の再選択UIは持たない。
-// 面が解決できなくなった場合は評価エラーになるため、フィーチャーを削除して作り直す運用。
-// Fillet3DEditor/ShellEditorと同じ方針)。
+// ねじフィーチャー選択時の編集パネル(Phase 25c、Phase 29bで配置面再選択UIを追加)。
+// 名前・呼び径プリセット・種別(雄/雌)・長さの編集に加え、「配置し直す」ボタンでビューアの
+// ねじ配置ツールを再選択モードで起動できる。面選択ツールと異なりクリック1回で即座に確定する
+// (「適用」ボタンは無い、通常のねじ配置ツールと同じ操作感)。
 import { patchThreadFeature } from "../model/document";
 import { MALE_THREAD_MAX_LENGTH, THREAD_PRESET_LIST, threadDrillDiameter, threadPitch } from "../model/threadPresets";
 import type { ThreadFeature, ThreadPreset } from "../model/types";
 import { useCadStore } from "../state/store";
 
-export function ThreadEditor({ thread }: { thread: ThreadFeature }) {
+export interface ThreadEditorProps {
+  thread: ThreadFeature;
+  /** このフィーチャーが評価エラー中(store.errorFeatureId一致)かどうか。ボタンを目立たせる。 */
+  hasError: boolean;
+  /** 配置し直しモード中かどうか(App.tsx側のthreadReselectTargetIdがこのフィーチャーと一致)。 */
+  isReselecting: boolean;
+  onStartReselect: () => void;
+  onCancelReselect: () => void;
+}
+
+export function ThreadEditor({ thread, hasError, isReselecting, onStartReselect, onCancelReselect }: ThreadEditorProps) {
   const updateDocument = useCadStore((s) => s.updateDocument);
 
   function patch(p: Partial<Pick<ThreadFeature, "name" | "preset" | "length" | "hand">>) {
@@ -78,10 +88,36 @@ export function ThreadEditor({ thread }: { thread: ThreadFeature }) {
           ? `${thread.preset}(呼び径・ピッチ${threadPitch(thread.preset)}mmのISO並目)の実ねじ山です。`
           : `${thread.preset}ねじ穴(簡易表現・下穴φ${drillDiameter.toFixed(1)}mm)。ねじ山は作成されません。`}
       </p>
-      <p style={{ fontSize: 11, opacity: 0.6, margin: 0 }}>
-        配置面: 選び直しはできません(削除して作り直してください)。ねじを含むドキュメントは再評価に
-        数秒かかることがあります。編集中はロールバックバーをねじの前に置くと軽くなります。
-      </p>
+
+      {hasError && !isReselecting && (
+        <p data-testid="thread-error-hint" style={{ fontSize: 12, color: "#ff6b6b", margin: 0 }}>
+          参照が解決できません。配置面を選び直してください。
+        </p>
+      )}
+
+      {!isReselecting && (
+        <button
+          type="button"
+          data-testid="btn-reselect-thread-placement"
+          onClick={onStartReselect}
+          style={
+            hasError
+              ? { background: "#5c1f1f", color: "#fff", border: "1px solid #ff6b6b", fontWeight: "bold" }
+              : undefined
+          }
+        >
+          配置し直す
+        </button>
+      )}
+
+      {isReselecting && (
+        <div data-testid="thread-reselect-panel" style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12 }}>
+          <p style={{ margin: 0 }}>ビューア上で平面をクリックすると即座に配置し直されます。Escでキャンセルします。</p>
+          <button type="button" data-testid="btn-cancel-thread-reselect" onClick={onCancelReselect}>
+            キャンセル
+          </button>
+        </div>
+      )}
     </div>
   );
 }

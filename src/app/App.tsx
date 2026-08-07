@@ -22,6 +22,10 @@ import {
   findFeature,
   getDependentFeatureIds,
   patchPartInstanceFeature,
+  replaceFillet3DEdges,
+  replaceMateFaces,
+  replaceShellFaces,
+  replaceThreadPlacement,
   setPolygonVertexCorner,
   setSketchConstraints,
   setSketchSegments,
@@ -37,7 +41,18 @@ import {
   createRectangleEntity,
   createSlotEntity,
 } from "../model/entity";
-import type { FilletEdgeRef, MateFaceRef, MateFeature, PolygonCorner, ShellFaceRef, ThreadPreset } from "../model/types";
+import type {
+  FeatureId,
+  Fillet3DFeature,
+  FilletEdgeRef,
+  MateFaceRef,
+  MateFeature,
+  PolygonCorner,
+  ShellFaceRef,
+  ShellFeature,
+  ThreadFeature,
+  ThreadPreset,
+} from "../model/types";
 import { MALE_THREAD_MAX_LENGTH, THREAD_PRESET_LIST } from "../model/threadPresets";
 import {
   addConcentricConstraint,
@@ -157,6 +172,7 @@ export default function App() {
   const exportStep = useCadStore((s) => s.exportStep);
   const loadDocument = useCadStore((s) => s.loadDocument);
   const newProject = useCadStore((s) => s.newProject);
+  const previewFeatureContext = useCadStore((s) => s.previewFeatureContext);
   const setShowSketches = useCadStore((s) => s.setShowSketches);
   const updateDocument = useCadStore((s) => s.updateDocument);
   const undo = useCadStore((s) => s.undo);
@@ -223,6 +239,20 @@ export default function App() {
   );
   // 合致ポップアップの「距離」入力欄の値(mm、デフォルト5)。
   const [mateDistanceValue, setMateDistanceValue] = useState(5);
+
+  /**
+   * 参照切れ時の再選択UI(Phase 29b)。フィーチャー編集パネルの「選び直す」ボタンで、対応する
+   * ビューアツールを再選択モードで起動する(既存の「新規追加」フロー[edgeTool/shellTool/
+   * threadTool/mateTool]とは別の状態として管理し、対象フィーチャーIDを持つ。エッジ/面の
+   * 選択集合自体は既存のedgeSelection/shellSelectionを流用する(新規追加フローと再選択フローは
+   * CadViewer側の排他制御により同時に片方しかアクティブにならないため、状態の使い回しで問題ない)。
+   * 適用時は新規フィーチャー追加ではなく、対象フィーチャーの参照スナップショットを直接差し替える。
+   */
+  const [edgeReselectTargetId, setEdgeReselectTargetId] = useState<FeatureId | null>(null);
+  const [shellReselectTargetId, setShellReselectTargetId] = useState<FeatureId | null>(null);
+  const [threadReselectTargetId, setThreadReselectTargetId] = useState<FeatureId | null>(null);
+  const [mateReselectTargetId, setMateReselectTargetId] = useState<FeatureId | null>(null);
+  const anyReselectActive = !!(edgeReselectTargetId || shellReselectTargetId || threadReselectTargetId || mateReselectTargetId);
   // トリムツール(未選択はfalse、Phase 19b)。
   const [trimTool, setTrimTool] = useState(false);
   // 寸法ツール(未選択はfalse、Phase 20b)。segmentをクリックしてlength/radius/distance拘束を作成する。
@@ -398,6 +428,23 @@ export default function App() {
       viewerRef.current?.cancelConstraintTool();
     }
   }, [activeTool, cornerTool, trimTool, dimensionTool, constraintTool, selectedFeatureId, drawingSketchId]);
+
+  // 参照切れ再選択UI(Phase 29b): 再選択モード中にフィーチャーツリーの選択が他のフィーチャーへ
+  // 移った場合は、対応するビューアツールをキャンセルする(元の参照のまま、Escキャンセルと同じ経路)。
+  useEffect(() => {
+    if (edgeReselectTargetId && selectedFeatureId !== edgeReselectTargetId) {
+      viewerRef.current?.cancelEdgeSelectTool();
+    }
+    if (shellReselectTargetId && selectedFeatureId !== shellReselectTargetId) {
+      viewerRef.current?.cancelFaceSelectTool();
+    }
+    if (threadReselectTargetId && selectedFeatureId !== threadReselectTargetId) {
+      viewerRef.current?.cancelThreadPlaceTool();
+    }
+    if (mateReselectTargetId && selectedFeatureId !== mateReselectTargetId) {
+      viewerRef.current?.cancelMateTool();
+    }
+  }, [selectedFeatureId, edgeReselectTargetId, shellReselectTargetId, threadReselectTargetId, mateReselectTargetId]);
 
   // フィレット/面取りツール中、対象スケッチのentities/segmentsが変わった場合はヒット判定対象を更新する
   // (rectangle→polygon変換・線分同士のコーナー適用はentities/segmentsの両方を変えるため必須、Phase 24)。
@@ -790,7 +837,7 @@ export default function App() {
 
   /** 指定ツールのボタンをdisabledにすべきか(他のツールが実行中、または対象スケッチ平面が未確定)。 */
   function isToolDisabled(tool: Exclude<DrawingTool, null>): boolean {
-    if (cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool) return true;
+    if (cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
     if (activeTool) return activeTool !== tool;
     return !selectedSketchPlane;
   }
@@ -845,7 +892,7 @@ export default function App() {
 
   /** フィレット/面取りボタンをdisabledにすべきか(他の作図ツール実行中、または対象スケッチ平面が未確定)。 */
   function isCornerToolDisabled(kind: "fillet" | "chamfer"): boolean {
-    if (activeTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool) return true;
+    if (activeTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
     if (cornerTool) return cornerTool !== kind;
     return !selectedSketchPlane;
   }
@@ -882,6 +929,38 @@ export default function App() {
   }
 
   /**
+   * 「エッジを選び直す」(Phase 29b、Fillet3DEditor): 既存のfillet3dフィーチャーを対象に
+   * エッジ選択ツールを再選択モードで起動する(空の選択から選び直す)。previewFeatureContext()で
+   * このフィーチャーを適用する直前の最新ボディを一度取り直してからツールを開始することで、
+   * 参照切れの原因になった直前の編集(ボディ寸法変更等)を反映したエッジをクリックできるようにする。
+   */
+  function handleStartEdgeReselect(fillet: Fillet3DFeature) {
+    if (!viewerRef.current) return;
+    previewFeatureContext(fillet.id);
+    viewerRef.current.startEdgeSelectTool({
+      onSelectionChange: (edges) => setEdgeSelection(edges),
+      onCancel: () => {
+        setEdgeReselectTargetId(null);
+        setEdgeSelection([]);
+      },
+    });
+    setEdgeSelection([]);
+    setEdgeReselectTargetId(fillet.id);
+  }
+
+  /** エッジ再選択の「適用」: 選択中のエッジ集合で対象フィーチャーのedgesスナップショットを差し替える。 */
+  function handleApplyEdgeReselect() {
+    if (!edgeReselectTargetId || edgeSelection.length === 0) return;
+    const targetId = edgeReselectTargetId;
+    updateDocument((d) => replaceFillet3DEdges(d, targetId, edgeSelection));
+    viewerRef.current?.cancelEdgeSelectTool();
+  }
+
+  function handleCancelEdgeReselect() {
+    viewerRef.current?.cancelEdgeSelectTool();
+  }
+
+  /**
    * シェルツール(Phase 25b)を開始する。3Dフィレット/面取りツールと同じく、ボディのB-Rep面を
    * 直接クリックして選択する(スケッチ選択・スケッチ平面は不要、ボディが存在すればよい)。
    * 実際のフィーチャー追加は「適用」ボタン(handleApplyShellTool)が行う。
@@ -910,9 +989,40 @@ export default function App() {
     viewerRef.current?.cancelFaceSelectTool();
   }
 
+  /**
+   * 「面を選び直す」(Phase 29b、ShellEditor): 既存のshellフィーチャーを対象に面選択ツールを
+   * 再選択モードで起動する。handleStartEdgeReselectと同じくpreviewFeatureContext()で最新ボディを
+   * 一度取り直してから開始する。
+   */
+  function handleStartShellReselect(shell: ShellFeature) {
+    if (!viewerRef.current) return;
+    previewFeatureContext(shell.id);
+    viewerRef.current.startFaceSelectTool({
+      onSelectionChange: (faces) => setShellSelection(faces),
+      onCancel: () => {
+        setShellReselectTargetId(null);
+        setShellSelection([]);
+      },
+    });
+    setShellSelection([]);
+    setShellReselectTargetId(shell.id);
+  }
+
+  /** 面再選択の「適用」: 選択中の面集合で対象フィーチャーのfacesスナップショットを差し替える。 */
+  function handleApplyShellReselect() {
+    if (!shellReselectTargetId || shellSelection.length === 0) return;
+    const targetId = shellReselectTargetId;
+    updateDocument((d) => replaceShellFaces(d, targetId, shellSelection));
+    viewerRef.current?.cancelFaceSelectTool();
+  }
+
+  function handleCancelShellReselect() {
+    viewerRef.current?.cancelFaceSelectTool();
+  }
+
   /** シェルボタンをdisabledにすべきか(他のツール実行中、またはボディが存在しない)。 */
   function isShellToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || threadTool || partDragTool || mateTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
     if (shellTool) return false;
     return !hasBody;
   }
@@ -948,9 +1058,39 @@ export default function App() {
     viewerRef.current?.cancelThreadPlaceTool();
   }
 
+  /**
+   * 「配置し直す」(Phase 29b、ThreadEditor): 既存のthreadフィーチャーを対象にねじ配置ツールを
+   * 再選択モードで起動する。平面のクリック1回でonPickが呼ばれ、即座にface/positionを差し替える
+   * (通常のねじ配置ツールと同じく「適用」ボタンは無い)。previewFeatureContext()は
+   * handleStartEdgeReselectと同じ理由で呼ぶ。
+   */
+  function handleStartThreadReselect(thread: ThreadFeature) {
+    if (!viewerRef.current) return;
+    previewFeatureContext(thread.id);
+    viewerRef.current.startThreadPlaceTool({
+      onPick: (ref) => {
+        updateDocument((d) =>
+          replaceThreadPlacement(d, thread.id, {
+            face: { faceId: ref.faceId, center: ref.center, normal: ref.normal },
+            position: ref.position,
+          }),
+        );
+        setThreadReselectTargetId(null);
+      },
+      onCancel: () => {
+        setThreadReselectTargetId(null);
+      },
+    });
+    setThreadReselectTargetId(thread.id);
+  }
+
+  function handleCancelThreadReselect() {
+    viewerRef.current?.cancelThreadPlaceTool();
+  }
+
   /** ねじボタンをdisabledにすべきか(他のツール実行中、またはボディが存在しない)。 */
   function isThreadToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || partDragTool || mateTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || partDragTool || mateTool || anyReselectActive) return true;
     if (threadTool) return false;
     return !hasBody;
   }
@@ -1000,7 +1140,7 @@ export default function App() {
 
   /** 部品移動ボタンをdisabledにすべきか(他のツール実行中、または部品[partInstance]が1つも無い)。 */
   function isPartDragToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || mateTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || mateTool || anyReselectActive) return true;
     if (partDragTool) return false;
     return !doc.features.some((f) => f.type === "partInstance");
   }
@@ -1039,9 +1179,51 @@ export default function App() {
     viewerRef.current?.cancelMateTool();
   }
 
+  /**
+   * 「面を選び直す」(Phase 29b、MateEditor): 既存のmateフィーチャーを対象に合致ツールを
+   * 再選択モードで起動する。通常の合致ツール(handleStartMateTool)と違い、2つ目の面が確定しても
+   * 種別選択ポップアップ(matePopup)は開かず、既存のkindを維持したままa/bだけを即座に差し替える。
+   * ピックした組み合わせがtoMateFaceRef()で変換できない(平面/円筒面以外)場合は一時トーストで
+   * 知らせ、ツール自体は継続する(選び直せる)。previewFeatureContext()は他の再選択と同じ理由で呼ぶ。
+   */
+  function handleStartMateReselect(mate: MateFeature) {
+    if (!viewerRef.current) return;
+    previewFeatureContext(mate.id);
+    viewerRef.current.startMateTool({
+      onPairPicked: (a, b) => {
+        const aRef = toMateFaceRef(a);
+        const bRef = toMateFaceRef(b);
+        if (!aRef || !bRef) {
+          showTransientMessage("この組み合わせの面は選択できません(平面または円筒面を選んでください)");
+          return;
+        }
+        updateDocument((d) => replaceMateFaces(d, mate.id, { a: aRef, b: bRef }));
+        viewerRef.current?.cancelMateTool();
+        setMateReselectTargetId(null);
+      },
+      onCancel: () => {
+        setMateReselectTargetId(null);
+        setMatePendingLabel(null);
+      },
+      onPendingChange: (pending) => {
+        if (!pending) {
+          setMatePendingLabel(null);
+          return;
+        }
+        const label = pending.surface === "plane" ? "平面" : pending.surface === "cylinder" ? "円筒面" : "面";
+        setMatePendingLabel(`1つ目: ${label} → 2つ目の面を選択`);
+      },
+    });
+    setMateReselectTargetId(mate.id);
+  }
+
+  function handleCancelMateReselect() {
+    viewerRef.current?.cancelMateTool();
+  }
+
   /** 合致ボタンをdisabledにすべきか(他のツール実行中、または部品[partInstance]と他ボディの組み合わせが無い)。 */
   function isMateToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool) {
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || anyReselectActive) {
       return true;
     }
     if (mateTool) return false;
@@ -1128,7 +1310,7 @@ export default function App() {
 
   /** 干渉チェックボタンをdisabledにすべきか(他のツール実行中、またはボディが2個未満)。 */
   function isInterferenceCheckDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || partDragTool || threadTool || mateTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || partDragTool || threadTool || mateTool || anyReselectActive) return true;
     return bodyCount < 2;
   }
 
@@ -1173,7 +1355,7 @@ export default function App() {
 
   /** トリムボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isTrimToolDisabled(): boolean {
-    if (activeTool || cornerTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool) return true;
+    if (activeTool || cornerTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
     if (trimTool) return false;
     return !selectedSketchPlane;
   }
@@ -1323,7 +1505,7 @@ export default function App() {
 
   /** 寸法ツールボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isDimensionToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool) return true;
+    if (activeTool || cornerTool || trimTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
     if (dimensionTool) return false;
     return !selectedSketchPlane;
   }
@@ -1461,14 +1643,14 @@ export default function App() {
 
   /** 拘束ツールボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isConstraintToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || edgeTool || shellTool || threadTool || partDragTool || mateTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || edgeTool || shellTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
     if (constraintTool) return false;
     return !selectedSketchPlane;
   }
 
   /** 3Dフィレット/面取りボタンをdisabledにすべきか(他のツール実行中、またはボディが無い)。 */
   function isEdgeToolDisabled(kind: "fillet" | "chamfer"): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || shellTool || threadTool || partDragTool || mateTool) return true;
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || shellTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
     if (edgeTool) return edgeTool !== kind;
     return !hasBody;
   }
@@ -2318,12 +2500,50 @@ export default function App() {
             <div style={{ borderTop: "1px solid #444", paddingTop: 12 }}>
               {selectedFeature.type === "sketch" && <SketchEditor sketch={selectedFeature} />}
               {selectedFeature.type === "extrude" && <ExtrudeEditor extrude={selectedFeature} doc={doc} />}
-              {selectedFeature.type === "fillet3d" && <Fillet3DEditor fillet={selectedFeature} />}
-              {selectedFeature.type === "shell" && <ShellEditor shell={selectedFeature} />}
+              {selectedFeature.type === "fillet3d" && (
+                <Fillet3DEditor
+                  fillet={selectedFeature}
+                  hasError={errorFeatureId === selectedFeature.id}
+                  isReselecting={edgeReselectTargetId === selectedFeature.id}
+                  reselectCount={edgeSelection.length}
+                  onStartReselect={() => handleStartEdgeReselect(selectedFeature)}
+                  onApplyReselect={handleApplyEdgeReselect}
+                  onCancelReselect={handleCancelEdgeReselect}
+                />
+              )}
+              {selectedFeature.type === "shell" && (
+                <ShellEditor
+                  shell={selectedFeature}
+                  hasError={errorFeatureId === selectedFeature.id}
+                  isReselecting={shellReselectTargetId === selectedFeature.id}
+                  reselectCount={shellSelection.length}
+                  onStartReselect={() => handleStartShellReselect(selectedFeature)}
+                  onApplyReselect={handleApplyShellReselect}
+                  onCancelReselect={handleCancelShellReselect}
+                />
+              )}
               {selectedFeature.type === "revolve" && <RevolveEditor revolve={selectedFeature} doc={doc} />}
-              {selectedFeature.type === "thread" && <ThreadEditor thread={selectedFeature} />}
+              {selectedFeature.type === "thread" && (
+                <ThreadEditor
+                  thread={selectedFeature}
+                  hasError={errorFeatureId === selectedFeature.id}
+                  isReselecting={threadReselectTargetId === selectedFeature.id}
+                  onStartReselect={() => handleStartThreadReselect(selectedFeature)}
+                  onCancelReselect={handleCancelThreadReselect}
+                />
+              )}
               {selectedFeature.type === "partInstance" && <PartInstanceEditor instance={selectedFeature} />}
-              {selectedFeature.type === "mate" && <MateEditor mate={selectedFeature} doc={doc} />}
+              {selectedFeature.type === "mate" && (
+                <MateEditor
+                  mate={selectedFeature}
+                  doc={doc}
+                  hasError={errorFeatureId === selectedFeature.id}
+                  isReselecting={mateReselectTargetId === selectedFeature.id}
+                  reselectPendingLabel={mateReselectTargetId === selectedFeature.id ? matePendingLabel : null}
+                  onStartReselect={() => handleStartMateReselect(selectedFeature)}
+                  onCancelReselect={handleCancelMateReselect}
+                />
+              )}
             </div>
           )}
 

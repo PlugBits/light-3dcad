@@ -1,6 +1,7 @@
-// 合致(メイト)フィーチャー選択時の編集パネル(Phase 28c)。
-// v1: 種別(表示のみ)・名前・distance時のみ値を編集可能(面の再選択UIは持たない。ShellEditor等と
-// 同じ「再選択が必要な場合は削除して作り直す」方針)。
+// 合致(メイト)フィーチャー選択時の編集パネル(Phase 28c、Phase 29bで面再選択UIを追加)。
+// 名前・distance時のみ値の編集に加え、「面を選び直す」ボタンで合致ツールを再選択モードで
+// 起動できる(2面をピックすると即座にa/bを差し替える。kindは変更しない)。
+// 合致より後ろのcut/addには注意アイコンを表示する(Phase 29a、mateHasSubsequentBodyEdit)。
 import { mateHasSubsequentBodyEdit, patchMateFeature } from "../model/document";
 import type { CadDocument, MateFeature } from "../model/types";
 import { useCadStore } from "../state/store";
@@ -11,7 +12,28 @@ const KIND_LABEL: Record<MateFeature["kind"], string> = {
   concentric: "同軸(円筒の軸を一致させる)",
 };
 
-export function MateEditor({ mate, doc }: { mate: MateFeature; doc: CadDocument }) {
+export interface MateEditorProps {
+  mate: MateFeature;
+  doc: CadDocument;
+  /** このフィーチャーが評価エラー中(store.errorFeatureId一致)かどうか。ボタンを目立たせる。 */
+  hasError: boolean;
+  /** 面再選択モード中かどうか(App.tsx側のmateReselectTargetIdがこのフィーチャーと一致)。 */
+  isReselecting: boolean;
+  /** 再選択モード中、1つ目の面を選択済みで2つ目待ちの状態表示(未保留はnull)。 */
+  reselectPendingLabel: string | null;
+  onStartReselect: () => void;
+  onCancelReselect: () => void;
+}
+
+export function MateEditor({
+  mate,
+  doc,
+  hasError,
+  isReselecting,
+  reselectPendingLabel,
+  onStartReselect,
+  onCancelReselect,
+}: MateEditorProps) {
   const updateDocument = useCadStore((s) => s.updateDocument);
   const removeFeature = useCadStore((s) => s.removeFeature);
   const hasSubsequentBodyEdit = mateHasSubsequentBodyEdit(doc, mate.id);
@@ -50,9 +72,40 @@ export function MateEditor({ mate, doc }: { mate: MateFeature; doc: CadDocument 
         </label>
       )}
 
-      <p style={{ fontSize: 11, opacity: 0.6, margin: 0 }}>
-        面の選び直しはできません。作り直すには削除してから合致ツールで面を選択し直してください。
-      </p>
+      {hasError && !isReselecting && (
+        <p data-testid="mate-error-hint" style={{ fontSize: 12, color: "#ff6b6b", margin: 0 }}>
+          参照が解決できません。面を選び直してください。
+        </p>
+      )}
+
+      {!isReselecting && (
+        <button
+          type="button"
+          data-testid="btn-reselect-mate-faces"
+          onClick={onStartReselect}
+          style={
+            hasError
+              ? { background: "#5c1f1f", color: "#fff", border: "1px solid #ff6b6b", fontWeight: "bold" }
+              : undefined
+          }
+        >
+          面を選び直す
+        </button>
+      )}
+
+      {isReselecting && (
+        <div data-testid="mate-reselect-panel" style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12 }}>
+          <p style={{ margin: 0 }}>ビューア上で面を2つ順にクリックすると即座にa/bを差し替えます。Escでキャンセルします。</p>
+          {reselectPendingLabel && (
+            <p data-testid="mate-reselect-pending" style={{ margin: 0, fontWeight: "bold", color: "#ffb74d" }}>
+              {reselectPendingLabel}
+            </p>
+          )}
+          <button type="button" data-testid="btn-cancel-mate-reselect" onClick={onCancelReselect}>
+            キャンセル
+          </button>
+        </div>
+      )}
 
       {hasSubsequentBodyEdit && (
         <p

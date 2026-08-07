@@ -2,10 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   addExtrudeFeature,
+  addFillet3DFeature,
+  addMateFeature,
   addPartInstanceFeature,
+  addShellFeature,
   addSketchEntity,
   addSketchFeature,
   addSketchSegments,
+  addThreadFeature,
   applySegmentCornerToSketch,
   createEmptyDocument,
   createCircleEntity,
@@ -23,6 +27,10 @@ import {
   removeFeature,
   removeFeatureCascade,
   removeSketchEntity,
+  replaceFillet3DEdges,
+  replaceMateFaces,
+  replaceShellFaces,
+  replaceThreadPlacement,
   resolveEvaluationDocument,
   setPolygonVertexCorner,
   setRollbackIndex,
@@ -30,7 +38,21 @@ import {
   validateDocument,
   validateFeature,
 } from "../../src/model";
-import type { CadDocument, ExtrudeFeature, PartInstanceFeature, SketchConstraint, SketchFeature, SketchSegment } from "../../src/model";
+import type {
+  CadDocument,
+  ExtrudeFeature,
+  Fillet3DFeature,
+  MateFaceRef,
+  MateFeature,
+  PartInstanceFeature,
+  ShellFaceRef,
+  ShellFeature,
+  SketchConstraint,
+  SketchFeature,
+  SketchSegment,
+  ThreadFaceRef,
+  ThreadFeature,
+} from "../../src/model";
 
 function makeRectSketchDoc(): { doc: CadDocument; sketch: SketchFeature } {
   const empty = createEmptyDocument();
@@ -1055,5 +1077,90 @@ describe("部品配置(簡易アセンブリ、Phase 27b)", () => {
     };
     const errors = validateFeature(cutExtrude, [partInstance, sketchFeature, cutExtrude]);
     expect(errors).toEqual([]);
+  });
+});
+
+// Phase 29b: 参照切れ時の再選択UIが使う「スナップショット差し替え」系のpatch関数。
+// いずれも幾何マッチング等は行わず、渡された配列/値でフィールドを丸ごと置き換えるだけの
+// 純粋操作なので、ダミーの参照値でも動作を検証できる。
+describe("replaceFillet3DEdges / replaceShellFaces / replaceThreadPlacement / replaceMateFaces", () => {
+  it("replaceFillet3DEdges: edgesを丸ごと差し替え、kind/sizeは変更しない(非破壊)", () => {
+    const empty = createEmptyDocument();
+    const { doc, feature: fillet } = addFillet3DFeature(empty, {
+      name: "フィレット1",
+      kind: "fillet",
+      size: 3,
+      edges: [{ edgeId: 1, midpoint: [0, 0, 0], p1: [0, 0, 0], p2: [1, 0, 0] }],
+    });
+    const newEdges = [
+      { edgeId: 5, midpoint: [10, 10, 0] as [number, number, number], p1: [10, 0, 0] as [number, number, number], p2: [10, 20, 0] as [number, number, number] },
+      { edgeId: 6, midpoint: [20, 10, 0] as [number, number, number], p1: [20, 0, 0] as [number, number, number], p2: [20, 20, 0] as [number, number, number] },
+    ];
+    const updated = replaceFillet3DEdges(doc, fillet.id, newEdges);
+    const found = findFeature(updated, fillet.id) as Fillet3DFeature;
+    expect(found.edges).toEqual(newEdges);
+    expect(found.kind).toBe("fillet");
+    expect(found.size).toBe(3);
+    // 非破壊: 元のdocは変更されない。
+    expect((findFeature(doc, fillet.id) as Fillet3DFeature).edges).toHaveLength(1);
+  });
+
+  it("replaceShellFaces: facesを丸ごと差し替え、thicknessは変更しない", () => {
+    const empty = createEmptyDocument();
+    const { doc, feature: shell } = addShellFeature(empty, {
+      name: "シェル1",
+      thickness: 2,
+      faces: [{ faceId: 1, center: [0, 0, 0], normal: [0, 0, 1] }],
+    });
+    const newFaces: ShellFaceRef[] = [
+      { faceId: 9, center: [5, 5, 5], normal: [1, 0, 0] },
+    ];
+    const updated = replaceShellFaces(doc, shell.id, newFaces);
+    const found = findFeature(updated, shell.id) as ShellFeature;
+    expect(found.faces).toEqual(newFaces);
+    expect(found.thickness).toBe(2);
+  });
+
+  it("replaceThreadPlacement: face/positionを丸ごと差し替え、preset/length/hand/directionは変更しない", () => {
+    const empty = createEmptyDocument();
+    const { doc, feature: thread } = addThreadFeature(empty, {
+      name: "M6ねじ1",
+      hand: "male",
+      preset: "M6",
+      length: 10,
+      face: { faceId: 1, center: [0, 0, 0], normal: [0, 0, 1] },
+      position: [0, 0],
+      direction: 1,
+    });
+    const newFace: ThreadFaceRef = { faceId: 7, center: [3, 4, 5], normal: [0, 1, 0] };
+    const newPosition: [number, number] = [1.5, -2.5];
+    const updated = replaceThreadPlacement(doc, thread.id, { face: newFace, position: newPosition });
+    const found = findFeature(updated, thread.id) as ThreadFeature;
+    expect(found.face).toEqual(newFace);
+    expect(found.position).toEqual(newPosition);
+    expect(found.preset).toBe("M6");
+    expect(found.length).toBe(10);
+    expect(found.hand).toBe("male");
+    expect(found.direction).toBe(1);
+  });
+
+  it("replaceMateFaces: a/bを丸ごと差し替え、kind/valueは変更しない。存在しないfeatureIdは何もしない", () => {
+    const empty = createEmptyDocument();
+    const aRef: MateFaceRef = { bodyFeatureId: "extrude-a", faceId: 1, center: [0, 0, 0], normal: [0, 0, 1], surface: "plane" };
+    const bRef: MateFaceRef = { bodyFeatureId: "extrude-b", faceId: 2, center: [0, 0, 10], normal: [0, 0, -1], surface: "plane" };
+    const { doc, feature: mate } = addMateFeature(empty, { name: "合致1", kind: "distance", value: 5, a: aRef, b: bRef });
+
+    const newA: MateFaceRef = { bodyFeatureId: "extrude-a", faceId: 3, center: [1, 1, 1], normal: [1, 0, 0], surface: "plane" };
+    const newB: MateFaceRef = { bodyFeatureId: "extrude-c", faceId: 4, center: [1, 1, 20], normal: [-1, 0, 0], surface: "plane" };
+    const updated = replaceMateFaces(doc, mate.id, { a: newA, b: newB });
+    const found = findFeature(updated, mate.id) as MateFeature;
+    expect(found.a).toEqual(newA);
+    expect(found.b).toEqual(newB);
+    expect(found.kind).toBe("distance");
+    expect(found.value).toBe(5);
+
+    // 存在しないfeatureIdを渡した場合はupdateFeature()と同じく元のdocをそのまま返す。
+    const untouched = replaceMateFaces(doc, "does-not-exist", { a: newA, b: newB });
+    expect(untouched).toBe(doc);
   });
 });

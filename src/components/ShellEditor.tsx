@@ -1,11 +1,32 @@
-// シェル(中抜き)フィーチャー選択時の編集パネル(Phase 25b)。
-// v1: 肉厚のみ編集可能(対象面の再選択UIは持たない。面が解決できなくなった場合は
-// 評価エラーになるため、フィーチャーを削除して作り直す運用。Fillet3DEditorと同じ方針)。
+// シェル(中抜き)フィーチャー選択時の編集パネル(Phase 25b、Phase 29bで面再選択UIを追加)。
+// 肉厚編集に加え、「面を選び直す」ボタンでビューアの面選択ツールを再選択モードで起動し、
+// 適用でfacesスナップショットを差し替えられる(Fillet3DEditorと同じ方針)。
 import { patchShellFeature } from "../model/document";
 import type { ShellFeature } from "../model/types";
 import { useCadStore } from "../state/store";
 
-export function ShellEditor({ shell }: { shell: ShellFeature }) {
+export interface ShellEditorProps {
+  shell: ShellFeature;
+  /** このフィーチャーが評価エラー中(store.errorFeatureId一致)かどうか。ボタンを目立たせる。 */
+  hasError: boolean;
+  /** 面再選択モード中かどうか(App.tsx側のshellReselectTargetIdがこのフィーチャーと一致)。 */
+  isReselecting: boolean;
+  /** 再選択モード中、ビューアで現在選択済みの面数。 */
+  reselectCount: number;
+  onStartReselect: () => void;
+  onApplyReselect: () => void;
+  onCancelReselect: () => void;
+}
+
+export function ShellEditor({
+  shell,
+  hasError,
+  isReselecting,
+  reselectCount,
+  onStartReselect,
+  onApplyReselect,
+  onCancelReselect,
+}: ShellEditorProps) {
   const updateDocument = useCadStore((s) => s.updateDocument);
 
   function patch(p: Partial<Pick<ShellFeature, "name" | "thickness">>) {
@@ -36,9 +57,46 @@ export function ShellEditor({ shell }: { shell: ShellFeature }) {
         />
       </label>
 
-      <p style={{ fontSize: 11, opacity: 0.6, margin: 0 }}>
-        開口面: {shell.faces.length}面(面の選び直しはできません。削除して作り直してください)
-      </p>
+      {hasError && !isReselecting && (
+        <p data-testid="shell-error-hint" style={{ fontSize: 12, color: "#ff6b6b", margin: 0 }}>
+          参照が解決できません。面を選び直してください。
+        </p>
+      )}
+
+      {!isReselecting && (
+        <>
+          <p style={{ fontSize: 11, opacity: 0.6, margin: 0 }}>開口面: {shell.faces.length}面</p>
+          <button
+            type="button"
+            data-testid="btn-reselect-shell-faces"
+            onClick={onStartReselect}
+            style={
+              hasError
+                ? { background: "#5c1f1f", color: "#fff", border: "1px solid #ff6b6b", fontWeight: "bold" }
+                : undefined
+            }
+          >
+            面を選び直す
+          </button>
+        </>
+      )}
+
+      {isReselecting && (
+        <div data-testid="shell-reselect-panel" style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12 }}>
+          <p style={{ margin: 0 }}>ビューア上で面をクリックして選択(複数可)。Escでキャンセルします。</p>
+          <p data-testid="shell-reselect-count" style={{ margin: 0, fontWeight: "bold" }}>
+            選択中: {reselectCount}面
+          </p>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button type="button" data-testid="btn-apply-shell-reselect" onClick={onApplyReselect} disabled={reselectCount === 0}>
+              適用
+            </button>
+            <button type="button" data-testid="btn-cancel-shell-reselect" onClick={onCancelReselect}>
+              キャンセル
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
