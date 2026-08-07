@@ -28,8 +28,8 @@ import {
   replaceThreadPlacement,
   setPolygonVertexCorner,
   setSketchConstraints,
-  setSketchSegments,
   trimSketchEntityAtPoint,
+  trimSketchSegmentAtPoint,
   updateSketchEntity,
 } from "../model/document";
 import { buildAutoConstraintsForChain } from "../sketch/autoConstraints";
@@ -87,7 +87,6 @@ import { deserializeProject, serializeProject } from "../project/serialization";
 import { distanceBetweenPoints, distancePointToLine } from "../sketch/positionDimensions";
 import { worldOriginLocal } from "../sketch/originRef";
 import { rectangleFromCorners, regularPolygonVertices } from "../sketch/shapeFromPoints";
-import { trimSegmentAtPoint } from "../sketch/trim";
 import { updateDocumentWithConflictRollback } from "../state/constraintUpdate";
 import { useCadStore } from "../state/store";
 import {
@@ -1323,8 +1322,12 @@ export default function App() {
 
   /**
    * トリムツール(Phase 19b)を開始する。ビューア上でセグメントの区間をクリックすると
-   * その区間を削除する(実際のtrimSegmentAtPoint()適用はここで行う。onTrimClickは
-   * startTrimTool呼び出し時に一度だけ渡すコールバックのため、最新のドキュメントはgetState()から読む)。
+   * その区間を削除する(実際の適用はここで行う。onTrimClickはstartTrimTool呼び出し時に一度だけ
+   * 渡すコールバックのため、最新のドキュメントはgetState()から読む)。
+   * 自由な線分・円弧(isEntity:false)のトリムはtrimSketchSegmentAtPoint()(実機報告対応、Phase 31a)を
+   * 使う。断片へのID引き継ぎ・拘束の付け替えを行った上で、意味が変わるlength拘束を削除した場合は
+   * 一時トーストで件数を知らせる。entity輪郭のトリム(isEntity:true)は従来通り
+   * trimSketchEntityAtPoint()(拘束引き継ぎ非対応、既知の制限のまま)。
    */
   function handleStartTrimTool() {
     if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
@@ -1342,8 +1345,11 @@ export default function App() {
             useCadStore.getState().updateDocument((d) => trimSketchEntityAtPoint(d, sketchId, targetId, clickPoint));
             return;
           }
-          const nextSegments = trimSegmentAtPoint(feature.segments ?? [], targetId, clickPoint, feature.entities ?? []);
-          useCadStore.getState().updateDocument((d) => setSketchSegments(d, sketchId, nextSegments));
+          const { doc: nextDoc, removedLengthConstraintCount } = trimSketchSegmentAtPoint(currentDoc, sketchId, targetId, clickPoint);
+          useCadStore.getState().updateDocument(() => nextDoc);
+          if (removedLengthConstraintCount > 0) {
+            showTransientMessage(`トリムにより長さ寸法${removedLengthConstraintCount}件を削除しました`);
+          }
         },
         onCancel: () => {
           setTrimTool(false);

@@ -5,7 +5,7 @@
 // 毎フレーム呼んでも計算コストは無視できる。既存の描画モードのライブ座標オーバーレイと同じ方針)。
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { setSketchConstraints, updateSketchEntity } from "../model/document";
+import { setConstraintLabelOffset, setDimensionOffset, setSketchConstraints, updateSketchEntity } from "../model/document";
 import type { CadDocument, SketchEntity, SketchFeature, SketchSegment } from "../model/types";
 import { arcGeometryFromBulge } from "../sketch/bulge";
 import { resolveLineRefPoints } from "../sketch/entityEdges";
@@ -56,9 +56,14 @@ import { DimensionToolPopup } from "./DimensionToolPopup";
  * 対応する図形が見つからない/退化している場合はnull(その寸法は線を描かず、ラベルのみ
  * dimension.anchorにフォールバックする)。
  */
-function measuredDimensionGraphics(dimension: SketchDimension, entities: SketchEntity[]): DimensionGraphics | null {
+function measuredDimensionGraphics(
+  dimension: SketchDimension,
+  entities: SketchEntity[],
+  offsetVec?: Point2,
+): DimensionGraphics | null {
   const entity = entities.find((e) => e.id === dimension.entityId);
   if (!entity) return null;
+  const ov = offsetVec ? { offsetVec } : {};
   if (dimension.kind === "polygon-edge" && entity.kind === "polygon") {
     const { points } = entity;
     const p1 = points[dimension.edgeIndex];
@@ -71,22 +76,22 @@ function measuredDimensionGraphics(dimension: SketchDimension, entities: SketchE
       cy += y;
     }
     const centroid: Point2 = [cx / points.length, cy / points.length];
-    return computeLinearDimensionGraphics(p1, p2, { awayFrom: centroid });
+    return computeLinearDimensionGraphics(p1, p2, { awayFrom: centroid, ...ov });
   }
   if (dimension.kind === "rect-width" && entity.kind === "rectangle") {
     const [cx, cy] = entity.center;
     const hw = entity.width / 2;
     const hh = entity.height / 2;
-    return computeLinearDimensionGraphics([cx - hw, cy + hh], [cx + hw, cy + hh], { awayFrom: [cx, cy] });
+    return computeLinearDimensionGraphics([cx - hw, cy + hh], [cx + hw, cy + hh], { awayFrom: [cx, cy], ...ov });
   }
   if (dimension.kind === "rect-height" && entity.kind === "rectangle") {
     const [cx, cy] = entity.center;
     const hw = entity.width / 2;
     const hh = entity.height / 2;
-    return computeLinearDimensionGraphics([cx + hw, cy - hh], [cx + hw, cy + hh], { awayFrom: [cx, cy] });
+    return computeLinearDimensionGraphics([cx + hw, cy - hh], [cx + hw, cy + hh], { awayFrom: [cx, cy], ...ov });
   }
   if (dimension.kind === "circle-radius" && entity.kind === "circle") {
-    return computeRadiusDimensionGraphics(entity.center, entity.radius, { angleDeg: 90 });
+    return computeRadiusDimensionGraphics(entity.center, entity.radius, { angleDeg: 90, ...ov });
   }
   return null;
 }
@@ -104,35 +109,38 @@ function constraintDimensionGraphics(
     const e = entities.find((en) => en.id === entityId);
     return e && e.kind === "circle" ? e.center : null;
   };
+  // ラベルのドラッグ移動オフセット(Phase 31a)。対応する拘束のlabelOffsetをそのまま各計算関数の
+  // offsetVecへ渡す(未指定なら各関数の既定位置になる)。
+  const ov = dimension.labelOffset ? { offsetVec: dimension.labelOffset } : {};
   if (dimension.kind === "seg-length") {
     const seg = segments.find((s) => s.id === dimension.segmentId);
     if (!seg) return null;
-    return computeLinearDimensionGraphics(seg.p1, seg.p2);
+    return computeLinearDimensionGraphics(seg.p1, seg.p2, ov);
   }
   if (dimension.kind === "seg-distance") {
     const pa = pointFromRef(segments, dimension.a);
     const pb = pointFromRef(segments, dimension.b);
     if (!pa || !pb) return null;
-    if (dimension.axis === "x" || dimension.axis === "y") return computeAxisDimensionGraphics(pa, pb, dimension.axis);
-    return computeLinearDimensionGraphics(pa, pb);
+    if (dimension.axis === "x" || dimension.axis === "y") return computeAxisDimensionGraphics(pa, pb, dimension.axis, ov);
+    return computeLinearDimensionGraphics(pa, pb, ov);
   }
   if (dimension.kind === "entity-distance-origin") {
     const c = circleCenter(dimension.entityId);
     if (!c) return null;
-    return computeLinearDimensionGraphics(c, dimension.origin);
+    return computeLinearDimensionGraphics(c, dimension.origin, ov);
   }
   if (dimension.kind === "point-distance-origin") {
     const p = pointFromRef(segments, dimension.point);
     if (!p) return null;
-    if (dimension.axis === "x" || dimension.axis === "y") return computeAxisDimensionGraphics(p, dimension.origin, dimension.axis);
-    return computeLinearDimensionGraphics(p, dimension.origin);
+    if (dimension.axis === "x" || dimension.axis === "y") return computeAxisDimensionGraphics(p, dimension.origin, dimension.axis, ov);
+    return computeLinearDimensionGraphics(p, dimension.origin, ov);
   }
   if (dimension.kind === "entity-distance-entity") {
     const a = circleCenter(dimension.aEntityId);
     const b = circleCenter(dimension.bEntityId);
     if (!a || !b) return null;
-    if (dimension.axis === "x" || dimension.axis === "y") return computeAxisDimensionGraphics(a, b, dimension.axis);
-    return computeLinearDimensionGraphics(a, b);
+    if (dimension.axis === "x" || dimension.axis === "y") return computeAxisDimensionGraphics(a, b, dimension.axis, ov);
+    return computeLinearDimensionGraphics(a, b, ov);
   }
   if (dimension.kind === "entity-distance-line") {
     const c = circleCenter(dimension.entityId);
@@ -146,7 +154,7 @@ function constraintDimensionGraphics(
     if (lenSq < 1e-12) return null;
     const t = ((c[0] - a[0]) * dx + (c[1] - a[1]) * dy) / lenSq;
     const foot: Point2 = [a[0] + t * dx, a[1] + t * dy];
-    return computeLinearDimensionGraphics(c, foot);
+    return computeLinearDimensionGraphics(c, foot, ov);
   }
   if (dimension.kind === "point-distance-line") {
     const p = pointFromRef(segments, dimension.point);
@@ -160,7 +168,7 @@ function constraintDimensionGraphics(
     if (lenSq < 1e-12) return null;
     const t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / lenSq;
     const foot: Point2 = [a[0] + t * dx, a[1] + t * dy];
-    return computeLinearDimensionGraphics(p, foot);
+    return computeLinearDimensionGraphics(p, foot, ov);
   }
   if (dimension.kind === "seg-distance-line-line") {
     const segA = segments.find((s) => s.id === dimension.a);
@@ -174,17 +182,31 @@ function constraintDimensionGraphics(
     if (lenSq < 1e-12) return null;
     const t = ((mid[0] - segB.p1[0]) * dx + (mid[1] - segB.p1[1]) * dy) / lenSq;
     const foot: Point2 = [segB.p1[0] + t * dx, segB.p1[1] + t * dy];
-    return computeLinearDimensionGraphics(mid, foot);
+    return computeLinearDimensionGraphics(mid, foot, ov);
   }
   // seg-angle-line-line(Phase 24)は弧の描画をv1では省略し、ラベルのみ表示する(既知の制限)。
+  // labelOffset(Phase 31a)はDimensionOverlayのonFrameがd.anchorへ直接加算する形で反映する。
   if (dimension.kind === "seg-angle-line-line") return null;
   const seg = segments.find((s) => s.id === dimension.segmentId);
   if (!seg || seg.kind !== "arc" || !seg.bulge) return null;
   const geo = arcGeometryFromBulge(seg.p1, seg.p2, seg.bulge);
   if (!geo) return null;
   const angleDeg = ((geo.startAngle + geo.sweep / 2) * 180) / Math.PI;
-  return computeRadiusDimensionGraphics(geo.center, geo.radius, { angleDeg, labelOffset: DEFAULT_RADIUS_LABEL_OFFSET });
+  return computeRadiusDimensionGraphics(geo.center, geo.radius, { angleDeg, labelOffset: DEFAULT_RADIUS_LABEL_OFFSET, ...ov });
 }
+
+/** base(スケッチローカル座標)にオフセット(スケッチローカルのベクトル)を加算する。未指定ならbaseそのまま。 */
+function applyOffsetPoint(base: Point2, offset?: Point2): Point2 {
+  return offset ? [base[0] + offset[0], base[1] + offset[1]] : base;
+}
+
+/** 寸法ラベルのドラッグ判定の閾値(画面px)。この距離未満の移動はドラッグ扱いせず、クリック(編集ポップアップ)として扱う。 */
+const DRAG_THRESHOLD_PX = 4;
+/** ドラッグ中、ドキュメント更新(ソルバ+Worker評価リクエスト)を間引く最小間隔(ms)。部品移動ツールの150msスロットルより短いが、寸法ソルバ+再評価は軽量なため許容する。 */
+const DRAG_EMIT_INTERVAL_MS = 50;
+
+/** ドラッグ対象の寸法ラベル1件を指す(measured=実測寸法[dimensionKey]、constraint=拘束寸法[constraintId])。 */
+type LabelDragTarget = { scope: "measured"; key: string } | { scope: "constraint"; key: string };
 
 interface DimensionOverlayProps {
   sketch: SketchFeature;
@@ -250,6 +272,9 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
   const labelRefs = useRef(new Map<string, HTMLButtonElement>());
   const [editing, setEditing] = useState<EditingState | null>(null);
   const [editingConstraint, setEditingConstraint] = useState<ConstraintEditingState | null>(null);
+  // 直前のmousedown〜mouseupがドラッグ(閾値以上の移動)だった場合、後続のclickイベントで
+  // 編集ポップアップを開かないようにする一時フラグ(ドラッグ終了時にtrue、onClickの先頭で読んでリセット)。
+  const justDraggedRef = useRef(false);
 
   const dimensions = useMemo(() => computeSketchDimensions(sketch.entities), [sketch.entities]);
   const constraintDimensions = useMemo(
@@ -263,11 +288,12 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
   const measuredGraphics = useMemo(() => {
     const map = new Map<string, DimensionGraphics>();
     for (const d of dimensions) {
-      const g = measuredDimensionGraphics(d, sketch.entities);
-      if (g) map.set(dimensionKey(d), g);
+      const key = dimensionKey(d);
+      const g = measuredDimensionGraphics(d, sketch.entities, sketch.dimensionOffsets?.[key]);
+      if (g) map.set(key, g);
     }
     return map;
-  }, [dimensions, sketch.entities]);
+  }, [dimensions, sketch.entities, sketch.dimensionOffsets]);
   const constraintGraphics = useMemo(() => {
     const map = new Map<string, DimensionGraphics>();
     for (const d of constraintDimensions) {
@@ -288,20 +314,27 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
   constraintGraphicsRef.current = constraintGraphics;
   const basisRef = useRef(basis);
   basisRef.current = basis;
+  // ラベルのドラッグ移動オフセット(Phase 31a)。graphicsが無い寸法(seg-angle-line-line等)の
+  // アンカー計算に使う(onFrameコールバックはマウント時に一度だけ登録するため、他のrefと同じく
+  // 常に最新値を読めるようにrefで持つ)。
+  const dimensionOffsetsRef = useRef(sketch.dimensionOffsets);
+  dimensionOffsetsRef.current = sketch.dimensionOffsets;
 
   useEffect(() => {
     const viewer = viewerRef.current;
     if (!viewer) return;
     const update = () => {
       const allDims: { key: string; anchor: [number, number] }[] = [
-        ...dimensionsRef.current.map((d) => ({
-          key: dimensionKey(d),
-          anchor: measuredGraphicsRef.current.get(dimensionKey(d))?.labelPos ?? d.anchor,
-        })),
-        ...constraintDimensionsRef.current.map((d) => ({
-          key: constraintDimensionKey(d),
-          anchor: constraintGraphicsRef.current.get(constraintDimensionKey(d))?.labelPos ?? d.anchor,
-        })),
+        ...dimensionsRef.current.map((d) => {
+          const key = dimensionKey(d);
+          const g = measuredGraphicsRef.current.get(key);
+          return { key, anchor: g?.labelPos ?? applyOffsetPoint(d.anchor, dimensionOffsetsRef.current?.[key]) };
+        }),
+        ...constraintDimensionsRef.current.map((d) => {
+          const key = constraintDimensionKey(d);
+          const g = constraintGraphicsRef.current.get(key);
+          return { key, anchor: g?.labelPos ?? applyOffsetPoint(d.anchor, d.labelOffset) };
+        }),
       ];
       for (const dimension of allDims) {
         const el = labelRefs.current.get(dimension.key);
@@ -454,6 +487,90 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
     setEditing(null);
   }
 
+  /**
+   * 現在表示中のoffsetVec(スケッチローカル、mm)を返す(ドラッグ開始時の基準値)。
+   * graphicsが存在すればそこから読む(既定オフセットも含めて常に埋まっている)。graphicsが無い
+   * (seg-angle-line-line等)場合は、既存の永続化済みlabelOffsetがあればそれを、無ければ[0,0]を返す
+   * (=このケースの「既定位置」はd.anchorそのもの、オフセット無しに相当)。
+   */
+  function currentOffsetVecFor(target: LabelDragTarget): Point2 {
+    if (target.scope === "measured") {
+      return measuredGraphicsRef.current.get(target.key)?.offsetVec ?? dimensionOffsetsRef.current?.[target.key] ?? [0, 0];
+    }
+    const g = constraintGraphicsRef.current.get(target.key);
+    if (g) return g.offsetVec;
+    const dim = constraintDimensionsRef.current.find((d) => constraintDimensionKey(d) === target.key);
+    return dim?.labelOffset ?? [0, 0];
+  }
+
+  /** ドラッグ中/終了時の永続化(履歴を積まないupdateDocumentDuringDrag経由、部品移動ツールと同じパターン)。 */
+  function commitOffset(target: LabelDragTarget, offset: Point2) {
+    if (target.scope === "measured") {
+      useCadStore.getState().updateDocumentDuringDrag((d) => setDimensionOffset(d, sketch.id, target.key, offset));
+    } else {
+      useCadStore.getState().updateDocumentDuringDrag((d) => setConstraintLabelOffset(d, sketch.id, target.key, offset));
+    }
+  }
+
+  /**
+   * 寸法ラベルのドラッグ移動(実機報告対応、Phase 31a)。mousedown後、画面上でDRAG_THRESHOLD_PX以上
+   * 動いたら初めてドラッグとみなす(beginDragHistory()を1回だけ呼び、アンドゥ1回にまとめる。動かなければ
+   * 通常のclickイベントが後続し、既存の編集ポップアップが開く[justDraggedRefで判定・抑止])。
+   * window全体でmousemove/mouseupを監視する(ボタン外に出てもドラッグを継続するため)。
+   */
+  function handleLabelMouseDown(e: React.MouseEvent<HTMLButtonElement>, target: LabelDragTarget) {
+    if (e.button !== 0) return;
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    const startLocal = viewer.screenToLocal(basisRef.current, e.clientX, e.clientY);
+    if (!startLocal) return;
+    const startOffsetVec = currentOffsetVecFor(target);
+    const state = {
+      dragging: false,
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      startLocal,
+      startOffsetVec,
+      lastEmitAt: 0,
+    };
+
+    const computeNextOffset = (clientX: number, clientY: number): Point2 | null => {
+      const v = viewerRef.current;
+      if (!v) return null;
+      const currentLocal = v.screenToLocal(basisRef.current, clientX, clientY);
+      if (!currentLocal) return null;
+      return [state.startOffsetVec[0] + (currentLocal[0] - state.startLocal[0]), state.startOffsetVec[1] + (currentLocal[1] - state.startLocal[1])];
+    };
+
+    const handleMove = (ev: MouseEvent) => {
+      const dxScreen = ev.clientX - state.startClientX;
+      const dyScreen = ev.clientY - state.startClientY;
+      if (!state.dragging) {
+        if (Math.hypot(dxScreen, dyScreen) < DRAG_THRESHOLD_PX) return;
+        state.dragging = true;
+        useCadStore.getState().beginDragHistory();
+      }
+      const now = performance.now();
+      if (now - state.lastEmitAt < DRAG_EMIT_INTERVAL_MS) return;
+      state.lastEmitAt = now;
+      const next = computeNextOffset(ev.clientX, ev.clientY);
+      if (next) commitOffset(target, next);
+    };
+
+    const handleUp = (ev: MouseEvent) => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+      if (!state.dragging) return;
+      // 間引きで最後の移動が未反映の可能性があるため、最終位置を必ずコミットする。
+      const next = computeNextOffset(ev.clientX, ev.clientY);
+      if (next) commitOffset(target, next);
+      justDraggedRef.current = true;
+    };
+
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+  }
+
   return (
     <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
       <style>{`
@@ -472,8 +589,15 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
               else labelRefs.current.delete(key);
             }}
             data-testid={`dim-label-${key}`}
-            title="クリックして数値を編集"
-            onClick={(e) => openEditor(dimension, e.currentTarget)}
+            title="クリックして数値を編集(ドラッグで移動)"
+            onMouseDown={(e) => handleLabelMouseDown(e, { scope: "measured", key })}
+            onClick={(e) => {
+              if (justDraggedRef.current) {
+                justDraggedRef.current = false;
+                return;
+              }
+              openEditor(dimension, e.currentTarget);
+            }}
             style={labelStyle}
           >
             {formatDimensionLabel(dimension)}
@@ -492,8 +616,15 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
               else labelRefs.current.delete(key);
             }}
             data-testid={`dim-label-${key}`}
-            title="拘束による寸法(クリックして数値を編集)"
-            onClick={(e) => openConstraintEditor(dimension, e.currentTarget)}
+            title="拘束による寸法(クリックして数値を編集、ドラッグで移動)"
+            onMouseDown={(e) => handleLabelMouseDown(e, { scope: "constraint", key })}
+            onClick={(e) => {
+              if (justDraggedRef.current) {
+                justDraggedRef.current = false;
+                return;
+              }
+              openConstraintEditor(dimension, e.currentTarget);
+            }}
             style={constraintLabelStyle}
           >
             {formatConstraintDimensionLabel(dimension)}

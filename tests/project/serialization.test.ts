@@ -1,7 +1,14 @@
 // src/project/serialization.ts の単体テスト(Phase 26)。
 import { describe, expect, it } from "vitest";
 
-import { addExtrudeFeature, addPartInstanceFeature, addSketchFeature, createEmptyDocument, createRectangleEntity } from "../../src/model";
+import {
+  addExtrudeFeature,
+  addPartInstanceFeature,
+  addSketchFeature,
+  createEmptyDocument,
+  createLineSegment,
+  createRectangleEntity,
+} from "../../src/model";
 import { deserializeProject, PROJECT_FORMAT, PROJECT_SCHEMA_VERSION, serializeProject } from "../../src/project/serialization";
 
 function sampleDoc() {
@@ -69,6 +76,36 @@ describe("serializeProject / deserializeProject", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.doc).toEqual(doc);
+    }
+  });
+
+  it("寸法ラベルのドラッグ移動オフセット(Phase 31a、拘束labelOffset・sketch.dimensionOffsetsとも)を含むドキュメントもserialize→deserializeで完全一致する(往復テスト)", () => {
+    const rect = createRectangleEntity({ width: 60, height: 40 });
+    const seg = createLineSegment({ p1: [0, 0], p2: [20, 0] });
+    const { doc } = addSketchFeature(createEmptyDocument(), {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+      segments: [seg],
+    });
+    const sketch = doc.features[0];
+    if (sketch.type !== "sketch") throw new Error("unreachable");
+    const docWithOffsets = {
+      ...doc,
+      features: [
+        {
+          ...sketch,
+          constraints: [{ id: "c-length", kind: "length" as const, segmentId: seg.id, value: 20, labelOffset: [3, -4] as [number, number] }],
+          dimensionOffsets: { [`${rect.id}-w`]: [1.5, 2.5] as [number, number] },
+        },
+        ...doc.features.slice(1),
+      ],
+    };
+    const text = serializeProject(docWithOffsets);
+    const result = deserializeProject(text);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.doc).toEqual(docWithOffsets);
     }
   });
 

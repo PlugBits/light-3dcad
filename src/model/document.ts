@@ -1,7 +1,7 @@
 // CadDocument に対する純粋な操作関数群。すべて非破壊(新しい CadDocument を返す)。
 import { generateId } from "./id";
 import { applySegmentCorner, findSharedEndpoint } from "../sketch/segmentCorner";
-import { trimEntityAtPoint, type Point2 } from "../sketch/trim";
+import { trimEntityAtPoint, trimSegmentWithConstraints, type Point2 } from "../sketch/trim";
 import type {
   CadDocument,
   ExtrudeFeature,
@@ -531,6 +531,55 @@ export function trimSketchEntityAtPoint(doc: CadDocument, sketchId: FeatureId, e
     const result = trimEntityAtPoint(sketch.entities, entityId, sketch.segments ?? [], clickPoint);
     return { ...sketch, entities: result.entities, segments: result.segments };
   });
+}
+
+/**
+ * targetId のセグメント(自由な線分・円弧、entity由来ではない)を、clickPoint(ローカル2D、mm)に
+ * 最も近い区間だけ削除する(実機報告対応、Phase 31a)。src/sketch/trim.ts の
+ * trimSegmentWithConstraints() が、削除で生じる断片へのID引き継ぎ・拘束の付け替え(座標一致)・
+ * 意味が変わるlength拘束の削除を一括して行う。segments・constraintsの置き換えを1回のフィーチャー
+ * 更新にまとめることで、undo1回で元に戻せるようにする。
+ * removedLengthConstraintCount(削除されたlength拘束の件数)は呼び出し側(App.tsx)が一時トースト
+ * 表示に使う。sketchIdが見つからない場合は元のドキュメント・件数0をそのまま返す。
+ */
+export function trimSketchSegmentAtPoint(
+  doc: CadDocument,
+  sketchId: FeatureId,
+  targetId: string,
+  clickPoint: Point2,
+): { doc: CadDocument; removedLengthConstraintCount: number } {
+  const feature = findFeature(doc, sketchId);
+  if (!feature || feature.type !== "sketch") return { doc, removedLengthConstraintCount: 0 };
+  const result = trimSegmentWithConstraints(feature.segments ?? [], feature.constraints ?? [], targetId, clickPoint, feature.entities ?? []);
+  const nextDoc = updateFeature<SketchFeature>(doc, sketchId, (sketch) => ({
+    ...sketch,
+    segments: result.segments,
+    constraints: result.constraints,
+  }));
+  return { doc: nextDoc, removedLengthConstraintCount: result.removedLengthConstraintCount };
+}
+
+/**
+ * 実測寸法(entities由来、SketchDimension)の寸法ラベルのドラッグ移動オフセット(Phase 31a)を
+ * sketch.dimensionOffsetsへ設定する。keyはsrc/sketch/dimensions.tsのdimensionKey()と同じ形式。
+ */
+export function setDimensionOffset(doc: CadDocument, sketchId: FeatureId, key: string, offset: [number, number]): CadDocument {
+  return updateFeature<SketchFeature>(doc, sketchId, (sketch) => ({
+    ...sketch,
+    dimensionOffsets: { ...(sketch.dimensionOffsets ?? {}), [key]: offset },
+  }));
+}
+
+/**
+ * 拘束由来の寸法(ConstraintDimension)の寸法ラベルのドラッグ移動オフセット(Phase 31a)を、
+ * 該当拘束(constraintId)のlabelOffsetフィールドへ設定する。該当拘束が見つからない場合は
+ * 元のドキュメントと等価な新しいドキュメントを返す(updateFeatureのmap内で変化なし)。
+ */
+export function setConstraintLabelOffset(doc: CadDocument, sketchId: FeatureId, constraintId: string, offset: [number, number]): CadDocument {
+  return updateFeature<SketchFeature>(doc, sketchId, (sketch) => ({
+    ...sketch,
+    constraints: (sketch.constraints ?? []).map((c) => (c.id === constraintId ? ({ ...c, labelOffset: offset } as SketchConstraint) : c)),
+  }));
 }
 
 /** sketch に1エンティティを追加する。 */

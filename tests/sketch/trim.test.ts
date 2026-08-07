@@ -1,8 +1,8 @@
-// src/sketch/trim.ts の単体テスト(純粋TS、WASM不要、Phase 19b)。
+// src/sketch/trim.ts の単体テスト(純粋TS、WASM不要、Phase 19b。Phase 31aでtrimSegmentWithConstraints追加)。
 import { describe, expect, it } from "vitest";
 
-import { createArcSegment, createCircleEntity, createLineSegment, createRectangleEntity } from "../../src/model";
-import { trimEntityAtPoint, trimSegmentAtPoint } from "../../src/sketch/trim";
+import { createArcSegment, createCircleEntity, createLineSegment, createRectangleEntity, type SketchConstraint } from "../../src/model";
+import { trimEntityAtPoint, trimSegmentAtPoint, trimSegmentWithConstraints } from "../../src/sketch/trim";
 
 describe("trimSegmentAtPoint", () => {
   it("2箇所で交差する線分の中間区間を削除すると両側の2区間が残る(セグメント分割)", () => {
@@ -178,5 +178,100 @@ describe("trimEntityAtPoint(Phase 24: entity輪郭自体のトリム)", () => {
       (s) => (closeTo(s.p1, [-5, -5]) && closeTo(s.p2, [0, -5])) || (closeTo(s.p1, [0, -5]) && closeTo(s.p2, [-5, -5])),
     );
     expect(keptHalf).toBe(true);
+  });
+});
+
+describe("trimSegmentWithConstraints(実機報告対応: トリムの拘束・寸法引き継ぎ、Phase 31a)", () => {
+  // 共通のセットアップ: A(0,0)->(12,0)を x=4, x=8 の2本の縦線でクロスし、(6,0)近傍(中間区間)を
+  // クリックしてトリムする(中間区間の削除により、先頭区間[0,4](元のp1側)・末尾区間[8,12]
+  // (元のp2側)の両方が残る=「断片が2つ」のケース)。
+  function makeChain() {
+    const a = createLineSegment({ p1: [0, 0], p2: [12, 0] });
+    const crossLeft = createLineSegment({ p1: [4, -5], p2: [4, 5] });
+    const crossRight = createLineSegment({ p1: [8, -5], p2: [8, 5] });
+    return { a, crossLeft, crossRight };
+  }
+
+  it("元の端点を含む断片が2つ残る場合、片方(先頭側)は元のsegmentIdを引き継ぎ、もう片方は新IDになる", () => {
+    const { a, crossLeft, crossRight } = makeChain();
+    const result = trimSegmentWithConstraints([a, crossLeft, crossRight], [], a.id, [6, 0]);
+
+    expect(result.removedLengthConstraintCount).toBe(0);
+    const lineFragments = result.segments.filter((s) => s.kind === "line" && s.id !== crossLeft.id && s.id !== crossRight.id);
+    expect(lineFragments).toHaveLength(2);
+
+    const primary = lineFragments.find((s) => s.id === a.id);
+    expect(primary).toBeDefined();
+    // 先頭区間([0,4])が元のp1(0,0)を含み、元のIDを引き継ぐ。
+    const primaryXs = [primary!.p1[0], primary!.p2[0]].sort((x, y) => x - y);
+    expect(primaryXs[0]).toBeCloseTo(0, 6);
+    expect(primaryXs[1]).toBeCloseTo(4, 6);
+
+    const secondary = lineFragments.find((s) => s.id !== a.id);
+    expect(secondary).toBeDefined();
+    expect(secondary!.id).not.toBe(a.id);
+    // 末尾区間([8,12])が元のp2(12,0)を含むが、新しいIDになっている。
+    const secondaryXs = [secondary!.p1[0], secondary!.p2[0]].sort((x, y) => x - y);
+    expect(secondaryXs[0]).toBeCloseTo(8, 6);
+    expect(secondaryXs[1]).toBeCloseTo(12, 6);
+  });
+
+  it("末尾側(新IDを引き継いだ断片)の端点を参照するcoincident拘束は、座標一致する新しい断片へ付け替えられる", () => {
+    const { a, crossLeft, crossRight } = makeChain();
+    const b = createLineSegment({ p1: [12, 0], p2: [12, 5] });
+    const coincident: SketchConstraint = {
+      id: "c-coincident",
+      kind: "coincident",
+      a: { segmentId: a.id, end: "p2" },
+      b: { segmentId: b.id, end: "p1" },
+    };
+    const result = trimSegmentWithConstraints([a, b, crossLeft, crossRight], [coincident], a.id, [6, 0]);
+
+    const nextCoincident = result.constraints.find((c) => c.id === "c-coincident");
+    expect(nextCoincident).toBeDefined();
+    expect(nextCoincident!.kind).toBe("coincident");
+    if (nextCoincident!.kind !== "coincident") throw new Error("unreachable");
+    // a側(元はA,p2)は新IDの断片へ付け替えられ、元のsegmentId(a.id)ではなくなる。
+    expect(nextCoincident!.a.segmentId).not.toBe(a.id);
+    expect(nextCoincident!.a.end).toBe("p2");
+    // b側(元々Aを参照していない)は変化しない。
+    expect(nextCoincident!.b).toEqual({ segmentId: b.id, end: "p1" });
+
+    // 付け替え先の断片は実際に座標(12,0)を持つ([8,12]区間)。
+    const reassignedSeg = result.segments.find((s) => s.id === nextCoincident!.a.segmentId);
+    expect(reassignedSeg).toBeDefined();
+    const p = nextCoincident!.a.end === "p1" ? reassignedSeg!.p1 : reassignedSeg!.p2;
+    expect(p[0]).toBeCloseTo(12, 6);
+    expect(p[1]).toBeCloseTo(0, 6);
+  });
+
+  it("length拘束は断片化で意味が変わるため削除され、削除件数が返る(トースト通知用)", () => {
+    const { a, crossLeft, crossRight } = makeChain();
+    const length: SketchConstraint = { id: "c-length", kind: "length", segmentId: a.id, value: 12 };
+    const result = trimSegmentWithConstraints([a, crossLeft, crossRight], [length], a.id, [6, 0]);
+
+    expect(result.removedLengthConstraintCount).toBe(1);
+    expect(result.constraints.some((c) => c.kind === "length")).toBe(false);
+  });
+
+  it("horizontal拘束(segmentId直接参照)は、元IDを引き継いだ断片にそのまま有効(書き換え不要)", () => {
+    const { a, crossLeft, crossRight } = makeChain();
+    const horizontal: SketchConstraint = { id: "c-horizontal", kind: "horizontal", segmentId: a.id };
+    const result = trimSegmentWithConstraints([a, crossLeft, crossRight], [horizontal], a.id, [6, 0]);
+
+    expect(result.constraints).toContainEqual(horizontal);
+    // 実際に元IDを引き継いだ断片が存在する(参照が解決できる)ことも確認する。
+    expect(result.segments.some((s) => s.id === a.id)).toBe(true);
+  });
+
+  it("entity(円等)由来のトリムはtrimEntityAtPoint()のまま変更されない(全断片が新IDになる、既存挙動)", () => {
+    const circle = createCircleEntity({ center: [0, 0], radius: 5 });
+    const line = createLineSegment({ p1: [-10, 3], p2: [10, 3] });
+    const result = trimEntityAtPoint([circle], circle.id, [line], [0, 5]);
+
+    expect(result.entities).toHaveLength(0);
+    const arcs = result.segments.filter((s) => s.id !== line.id);
+    // entity由来の断片はいずれも円のIDを引き継がない(explodeEntity()が発行する新規IDのまま)。
+    expect(arcs.every((s) => s.id !== circle.id)).toBe(true);
   });
 });

@@ -6,7 +6,8 @@
 // 暗黙の境界として扱われる。src/sketch/intersections.ts の splitSegmentAt() が両者を統合する)
 // で「区間」に分割し、クリック/ホバー位置に最も近い区間を求める(削除候補として提示・実削除する)。
 // 区間が1つしかできない(=他セグメントとの有効な交点が無い)場合は、区間全体=セグメント全体を削除する。
-import type { SketchEntity, SketchSegment } from "../model/types";
+import { generateId } from "../model/id";
+import type { PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
 import { bulgeArcPoints } from "./bulge";
 import { explodeEntity } from "./explode";
 import {
@@ -18,6 +19,13 @@ import {
 } from "./intersections";
 
 export type Point2 = [number, number];
+
+/** 端点座標の一致判定に使う許容誤差(mm、src/sketch/intersections.tsのEPSと同じ)。 */
+const TRIM_POINT_EPS = 1e-6;
+
+function distPts(a: Point2, b: Point2): number {
+  return Math.hypot(a[0] - b[0], a[1] - b[1]);
+}
 
 function isArcWithBulge(seg: SketchSegment): boolean {
   return seg.kind === "arc" && !!seg.bulge;
@@ -154,6 +162,159 @@ export function trimSegmentAtPoint(
   });
   const kept = pieces.filter((_, i) => i !== removeIndex);
   return [...others, ...kept];
+}
+
+/**
+ * splitSegmentAt()が返すpieces(区間、境界順)のうち、removeIndexを除いた「残す区間」にIDを割り当てる
+ * (実機報告対応: トリムで線分が新IDの断片に置き換わり、旧IDを参照する拘束・寸法が消えるバグの修正)。
+ * splitSegmentAt()の実装上、境界順の先頭(index 0)は必ず元のp1を、末尾(index pieces.length-1)は必ず
+ * 元のp2を端点に持つ(区間の途中に生じる分割点は交点であり、元の端点ではない)。そのため:
+ * - 削除された区間が先頭(index 0)なら、元のp1は失われる。末尾が残っていれば末尾がプライマリ
+ *   (元のsegmentIdを継ぐ)。
+ * - 削除された区間が末尾なら、元のp2は失われる。先頭が残っていれば先頭がプライマリ。
+ * - 削除された区間が中間なら、先頭・末尾とも残るため、先頭側をプライマリとする(「片方は新ID」)。
+ * プライマリ以外の残存区間(末尾側の断片や、途中に複数残る中間断片)には新規IDを発行する。
+ */
+function assignPieceIds(target: SketchSegment, pieces: SketchSegment[], removeIndex: number): SketchSegment[] {
+  const n = pieces.length;
+  const hasP1 = removeIndex !== 0;
+  const hasP2 = removeIndex !== n - 1;
+  const primaryIndex = hasP1 ? 0 : hasP2 ? n - 1 : -1;
+  const kept: SketchSegment[] = [];
+  pieces.forEach((piece, i) => {
+    if (i === removeIndex) return;
+    const id = i === primaryIndex ? target.id : generateId("segment");
+    kept.push({ ...piece, id });
+  });
+  return kept;
+}
+
+/** PointRef(a/b/point等)がsegmentId===targetIdを参照しているかの簡易ガード。EntityRefと共用のフィールド名(coincidentOriginのpoint)を誤判定しないよう"segmentId"の有無で判定する。 */
+function isPointRefTo(ref: PointRef | { entityId: string }, targetId: string): ref is PointRef {
+  return "segmentId" in ref && ref.segmentId === targetId;
+}
+
+/**
+ * targetId のセグメントをclickPointに最も近い区間で分割・削除し、segments・constraintsの両方を
+ * 一貫した状態に更新する(実機報告対応、trim後の拘束・寸法引き継ぎ)。
+ * - ID維持: 残った区間のうち1つ(元の端点を含む側、両方残れば元p1側を優先)は元のtargetIdを引き継ぐ
+ *   (assignPieceIds参照)。それ以外の新しい区間には新規IDを発行する。
+ * - 端点参照(coincident/distance/fix/distancePointOrigin/distancePointLine/coincidentOriginのpoint)は、
+ *   対象がtargetIdの場合、旧端点の座標(1e-6mm許容)に一致する新しい区間へ付け替える。一致する区間が
+ *   無くなった(=その端点を含む区間が削除された)場合はその拘束を取り除く。
+ * - segmentId/LineRef(segmentEdge)を直接参照する拘束(horizontal/vertical/radius/perpendicular/
+ *   distanceLineLine/angleLineLine/distanceLineRefEdge/angleLineRefEdge/tangent[segment])は、
+ *   プライマリ断片が元のIDを引き継ぐため書き換え不要でそのまま有効(radiusは断片化しても同じ円弧の
+ *   半径を保つため長さ拘束と異なり削除しない)。
+ * - length拘束(segmentId===targetId)は、区間分割(pieces.length>1)によって対象の長さの意味が変わる
+ *   ため削除し、削除件数をremovedLengthConstraintCountで返す(呼び出し側が一時トースト表示に使う)。
+ * targetIdが見つからない場合はsegments/constraintsをそのまま返す。
+ */
+export function trimSegmentWithConstraints(
+  segments: SketchSegment[],
+  constraints: SketchConstraint[],
+  targetId: string,
+  clickPoint: Point2,
+  entities: SketchEntity[] = [],
+): { segments: SketchSegment[]; constraints: SketchConstraint[]; removedLengthConstraintCount: number } {
+  const split = splitTargetIntoPieces(segments, targetId, entities);
+  if (!split) return { segments, constraints, removedLengthConstraintCount: 0 };
+  const { target, others, pieces } = split;
+
+  if (pieces.length <= 1) {
+    // 分割不能(他セグメント・entities輪郭との有効な交点が無い)= セグメント全体を削除する。
+    // このセグメントを参照していたlength拘束も対象が消えるため取り除き、件数を数える
+    // (それ以外の拘束[coincident等]は既存の挙動通り、参照先を失っても配列には残す。
+    // ソルバは参照解決できない拘束の残差項を単に持たないため実害はない)。
+    let removedLength = 0;
+    const nextConstraints = constraints.filter((c) => {
+      if (c.kind === "length" && c.segmentId === targetId) {
+        removedLength += 1;
+        return false;
+      }
+      return true;
+    });
+    return { segments: others, constraints: nextConstraints, removedLengthConstraintCount: removedLength };
+  }
+
+  let removeIndex = 0;
+  let bestDist = Infinity;
+  pieces.forEach((piece, i) => {
+    const d = distPointToSegmentShape(clickPoint, piece);
+    if (d < bestDist) {
+      bestDist = d;
+      removeIndex = i;
+    }
+  });
+
+  const keptPieces = assignPieceIds(target, pieces, removeIndex);
+  const nextSegments = [...others, ...keptPieces];
+
+  /** targetIdの旧端点を参照するPointRefを、座標一致(1e-6mm)する新しい区間へ付け替える。一致無しはnull。 */
+  const reassignPoint = (ref: PointRef): PointRef | null => {
+    if (ref.segmentId !== targetId) return ref;
+    const oldPoint = ref.end === "p1" ? target.p1 : target.p2;
+    for (const piece of keptPieces) {
+      if (distPts(piece.p1, oldPoint) <= TRIM_POINT_EPS) return { segmentId: piece.id, end: "p1" };
+      if (distPts(piece.p2, oldPoint) <= TRIM_POINT_EPS) return { segmentId: piece.id, end: "p2" };
+    }
+    return null;
+  };
+
+  let removedLength = 0;
+  const nextConstraints: SketchConstraint[] = [];
+  for (const c of constraints) {
+    if (c.kind === "length" && c.segmentId === targetId) {
+      removedLength += 1;
+      continue;
+    }
+    if (c.kind === "coincident") {
+      const a = reassignPoint(c.a);
+      const b = reassignPoint(c.b);
+      if (!a || !b) continue;
+      nextConstraints.push({ ...c, a, b });
+      continue;
+    }
+    if (c.kind === "distance") {
+      const a = reassignPoint(c.a);
+      const b = reassignPoint(c.b);
+      if (!a || !b) continue;
+      nextConstraints.push({ ...c, a, b });
+      continue;
+    }
+    if (c.kind === "fix") {
+      const point = reassignPoint(c.point);
+      if (!point) continue;
+      nextConstraints.push({ ...c, point });
+      continue;
+    }
+    if (c.kind === "distancePointOrigin") {
+      const point = reassignPoint(c.point);
+      if (!point) continue;
+      nextConstraints.push({ ...c, point });
+      continue;
+    }
+    if (c.kind === "distancePointLine") {
+      const point = reassignPoint(c.point);
+      if (!point) continue;
+      // c.line(segmentEdgeでtargetIdを指す場合も含む)はプライマリ断片が元IDを継ぐため書き換え不要。
+      nextConstraints.push({ ...c, point });
+      continue;
+    }
+    if (c.kind === "coincidentOrigin" && isPointRefTo(c.point, targetId)) {
+      const point = reassignPoint(c.point);
+      if (!point) continue;
+      nextConstraints.push({ ...c, point });
+      continue;
+    }
+    // segmentId/LineRef直接参照(horizontal/vertical/radius/perpendicular/distanceLineLine/
+    // angleLineLine/distanceLineRefEdge/angleLineRefEdge/tangent[segment]、coincidentOriginの
+    // point[EntityRef版]、その他entityのみを参照する拘束)は、プライマリ断片が元のsegmentIdを
+    // 引き継ぐため書き換えなしでそのまま有効。
+    nextConstraints.push(c);
+  }
+
+  return { segments: nextSegments, constraints: nextConstraints, removedLengthConstraintCount: removedLength };
 }
 
 /** 点pからentity(rectangle/circle/polygon/slot/regularPolygon)の輪郭への最短距離(explodeEntity()によるポリライン近似)。CadViewerのトリムホバー対象選定に使う。 */

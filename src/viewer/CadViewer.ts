@@ -1322,6 +1322,20 @@ export class CadViewer {
   }
 
   /**
+   * スクリーン座標(clientX/clientY、ページ座標)を、指定平面基底(basis)上へレイキャストして
+   * ローカル2D座標に変換する(寸法ラベルのドラッグ移動、Phase 31a、DimensionOverlay用)。
+   * トリムツール等のraycastDrawingPlane()と同じ考え方(視線と平面の交点)だが、canvas内オフセットの
+   * 計算とワールド→ローカル変換までをまとめて行う。レイと平面が交差しない(視線が平面とほぼ平行)
+   * 場合はnull。
+   */
+  screenToLocal(basis: PlaneBasis, clientX: number, clientY: number): [number, number] | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const hit = this.raycastDrawingPlane(basis, clientX - rect.left, clientY - rect.top, rect);
+    if (!hit) return null;
+    return planeWorldToLocal(basis, hit);
+  }
+
+  /**
    * 寸法/拘束ツールが「原点」としてピック・表示する点のスクリーン座標(px)を返す(仕様変更対応:
    * 原点=ワールド原点[0,0,0]をスケッチ平面へ投影した点。world平面のスケッチでは従来通りローカル
    * (0,0)と一致するが、面上スケッチでは面の基準点[basis.origin]とは一般に異なる)。画面外/背面等で

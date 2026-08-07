@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  computeAxisDimensionGraphics,
   computeLinearDimensionGraphics,
   computeRadiusDimensionGraphics,
   DEFAULT_LINEAR_DIMENSION_OFFSET,
@@ -48,6 +49,46 @@ describe("computeLinearDimensionGraphics", () => {
     expect(ext1[1]).toBeCloseTo(0);
     // 終点は寸法線(y=5)を僅かに超えている。
     expect(ext1[3]).toBeGreaterThan(5);
+  });
+});
+
+describe("offsetVec(寸法ラベルのドラッグ移動、Phase 31a)", () => {
+  it("computeLinearDimensionGraphicsはoffsetVecを渡すと既定のnormal*offsetの代わりにそのベクトルを使い、labelPos=mid(p1,p2)+offsetVecになる", () => {
+    const { labelPos, offsetVec } = computeLinearDimensionGraphics([0, 0], [10, 0], { offsetVec: [3, 12] });
+    expect(offsetVec).toEqual([3, 12]);
+    expect(labelPos[0]).toBeCloseTo(5 + 3);
+    expect(labelPos[1]).toBeCloseTo(0 + 12);
+  });
+
+  it("computeLinearDimensionGraphicsはoffsetVec未指定なら既定のオフセット(normal*offset)をoffsetVecとして返す(既存呼び出しとの後方互換)", () => {
+    const { offsetVec } = computeLinearDimensionGraphics([0, 0], [10, 0], { awayFrom: [5, -5] });
+    expect(offsetVec[0]).toBeCloseTo(0);
+    expect(offsetVec[1]).toBeCloseTo(DEFAULT_LINEAR_DIMENSION_OFFSET);
+  });
+
+  it("computeLinearDimensionGraphicsは引出線(leader)をp1/p2からoffsetVec分だけ離れた点まで繋いだままにする(測定点との接続を保つ)", () => {
+    const { lines } = computeLinearDimensionGraphics([0, 0], [10, 0], { offsetVec: [2, 6] });
+    const ext1 = lines[0]; // p1(0,0) -> 寸法線側(少し超えた点)
+    expect(ext1[0]).toBeCloseTo(0);
+    expect(ext1[1]).toBeCloseTo(0);
+    // 終点はp1+offsetVec付近(オーバーシュート分だけさらに離れる)。
+    expect(ext1[2]).toBeCloseTo(2, 0);
+    expect(ext1[3]).toBeGreaterThan(6);
+  });
+
+  it("computeRadiusDimensionGraphicsはoffsetVecを渡すとlabelPos=center+offsetVecになる(半径の外でも内でも可)", () => {
+    const { labelPos, offsetVec } = computeRadiusDimensionGraphics([1, 1], 10, { offsetVec: [4, 3] });
+    expect(offsetVec).toEqual([4, 3]);
+    expect(labelPos[0]).toBeCloseTo(1 + 4);
+    expect(labelPos[1]).toBeCloseTo(1 + 3);
+  });
+
+  it("computeAxisDimensionGraphicsはoffsetVec未指定なら既定([0,0])、指定すると寸法線(p1/p2)がその分だけ平行移動する", () => {
+    const base = computeAxisDimensionGraphics([0, 0], [10, 4], "x");
+    expect(base.offsetVec).toEqual([0, 0]);
+    const moved = computeAxisDimensionGraphics([0, 0], [10, 4], "x", { offsetVec: [0, 5] });
+    expect(moved.labelPos[1]).toBeCloseTo(base.labelPos[1] + 5);
+    expect(moved.labelPos[0]).toBeCloseTo(base.labelPos[0]);
   });
 });
 
