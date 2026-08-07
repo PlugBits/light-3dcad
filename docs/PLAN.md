@@ -677,3 +677,24 @@ Vitest357件(serialization往復・拒否4件+STEP出力のWASM統合1件が新�
 STEPダウンロードのファイル先頭が`ISO-10303-21;`であることを確認済み。既知の制限: プロジェクトファイルの
 互換性はschemaVersion一致のみを見ており、将来のフィールド追加時のマイグレーション処理は未実装
 (受け口のみ用意)。
+
+## Phase 27a: 複数ボディ対応
+
+evaluator.tsの単一`body`変数を`bodies: Map<FeatureId, Shape3D>`(キー=そのボディを作った
+newBodyフィーチャーのid)へ置き換え、「単一ボディのみ」の制限を撤廃した。newBodyは既存ボディが
+あってもエラーにせず新ボディを追加し、cut/addは新設フィールド`targetBodyId?`(省略時はMapの
+挿入順で最後のキー=最後に作られたボディ)が指すボディのみに適用する。fillet3d/shell/threadは
+エッジ/面の幾何マッチングを全ボディ横断で行い(各ボディで独立にマッチングを試み、全対象が
+解決できたボディのうち距離合計が最小のものを採用)、最良マッチのボディに適用する。面上スケッチ・
+参照エッジ用のスナップショットと最終出力(mesh/faceInfo/edges/STL/STEP)はいずれも「全ボディの
+compound」(replicadの`makeCompound()`、各ボディを`clone()`してから合成)にし、Worker側の
+プロトコル変更は不要だった(Compoundは他のShape3D同様mesh/faces/edges/blobSTL/blobSTEP等を
+サポートするため)。ExtrudeEditor/RevolveEditorにボディが2つ以上ある場合のみ「対象ボディ」
+セレクトを追加(削除等で参照先が候補から外れた場合も表示を維持して復帰できるようにした)。
+Vitest368件(evaluator.ts統合6件+document.ts targetBodyId検証5件が新規、単一ボディ制限を
+検証していた既存1件は新仕様に合わせて成功系に書き換え)。E2E(`error-recovery.spec.ts`の
+1件目は「2つ目のNew Bodyがエラーになる」から「targetBodyIdの参照先削除で参照切れエラーになり、
+対象ボディのリセットで復帰する」に書き換え、新設`multi-body.spec.ts`で離れた位置の2ボディ作成→
+片方のみカット→STL出力をブラウザ実機相当で確認)。既知の制限: cutは指定ボディからのみ減算する
+(v1では全ボディ横断カットは対象外)。アセンブリ機能そのもの(ボディ間の位置合わせ拘束・
+部品ライブラリ等)は依然として未対応で、本フェーズは将来のアセンブリ機能への土台という位置づけ。

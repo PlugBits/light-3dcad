@@ -1,39 +1,63 @@
-// エラーと復帰E2E: 不正な操作(2つ目のNew Body)でフィーチャーにエラーが表示され、
-// 操作をCutに変更すると復帰することを確認する。
+// エラーと復帰E2E(Phase 27a複数ボディ対応で更新): 単一ボディ制限は撤廃されたため、2つ目の
+// New Body自体はもうエラーにならない(むしろ新しい独立ボディが正しく作られることを確認する)。
+// 代わりに、targetBodyIdが参照するボディを削除して参照切れにするとフィーチャーにエラーが表示され、
+// 対象ボディを「(最新のボディ)」に戻すと復帰することを確認する。
 import { expect, test } from "@playwright/test";
 
 import { collectPageErrors, gotoApp, waitForReady, waitForStatus } from "./helpers";
 
-test("2つ目のNew Bodyはエラーになり、Cutへの変更で復帰する", async ({ page }) => {
+test("2つ目のNew Bodyは成功し、targetBodyIdの参照先削除はエラーになり、対象ボディのリセットで復帰する", async ({
+  page,
+}) => {
   const pageErrors = collectPageErrors(page);
 
   await gotoApp(page);
   await waitForReady(page);
 
-  // 新しいXYスケッチを追加し、矩形を1つ入れる(初期ボディと重なる位置・20x20)。
+  // 離れた位置(x=150)に2つ目のスケッチ+矩形を追加し、New Bodyで押し出す。
+  // 単一ボディ制限は撤廃されているため、New Bodyのままでもエラーにならず成功する(Phase 27a)。
   await page.getByTestId("btn-add-sketch").click();
   await waitForReady(page);
   await expect(page.getByTestId("feature-item-Sketch2")).toBeVisible();
 
   await page.getByTestId("btn-add-rectangle").click();
   await waitForReady(page);
+  await page.getByTestId("entity-rectangle-0-center-x").fill("150");
+  await waitForReady(page);
 
-  // 押し出しを追加する。既に初期ボディ(Extrude1)が存在するためデフォルトのoperationは
-  // "add"であり、直ちに評価が成功する(Phase 13)。
   await page.getByTestId("btn-add-extrude").click();
   await waitForReady(page);
   await expect(page.getByTestId("feature-item-Extrude2")).toBeVisible();
+  await page.getByTestId("extrude-operation-select").selectOption("newBody");
+  await waitForReady(page);
   await expect(page.getByTestId("eval-error")).toHaveCount(0);
 
-  // 明示的にoperationをNew Bodyへ変更すると「単一ボディのみ対応」エラーになる。
-  await page.getByTestId("extrude-operation-select").selectOption("newBody");
+  // 3つ目のスケッチ(原点付近、初期ボディ=Extrude1と重なる)を、対象ボディをExtrude1に明示して
+  // Addする。ボディが2つあるため「対象ボディ」セレクトが表示される。
+  await page.getByTestId("btn-add-sketch").click();
+  await waitForReady(page);
+  await expect(page.getByTestId("feature-item-Sketch3")).toBeVisible();
+
+  await page.getByTestId("btn-add-rectangle").click();
+  await waitForReady(page);
+
+  await page.getByTestId("btn-add-extrude").click();
+  await waitForReady(page);
+  await expect(page.getByTestId("feature-item-Extrude3")).toBeVisible();
+  await expect(page.getByTestId("extrude-operation-select")).toHaveValue("add");
+  await expect(page.getByTestId("extrude-target-body-select")).toBeVisible();
+  await page.getByTestId("extrude-target-body-select").selectOption({ label: "Extrude1" });
+  await waitForReady(page);
+  await expect(page.getByTestId("eval-error")).toHaveCount(0);
+
+  // Extrude1(Extrude3のtargetBodyIdが指すボディ)を削除すると、参照切れでエラーになる。
+  await page.getByTestId("feature-delete-Extrude1").click();
   await waitForStatus(page, "error");
   await expect(page.getByTestId("eval-error")).toBeVisible();
-  await expect(page.getByTestId("eval-error")).toContainText("単一ボディ");
+  await expect(page.getByTestId("eval-error")).toContainText("対象ボディ");
 
-  // 修正: 操作をCutに変更する。矩形は原点付近(20x20)で初期ボディと重なるため、
-  // カットとして成立し評価が成功する。
-  await page.getByTestId("extrude-operation-select").selectOption("cut");
+  // 修正: 対象ボディを「(最新のボディ)」に戻す(targetBodyIdをクリア)と復帰する。
+  await page.getByTestId("extrude-target-body-select").selectOption("");
   await waitForReady(page);
   await expect(page.getByTestId("eval-error")).toHaveCount(0);
   await expect(page.getByTestId("status-text")).toContainText("状態: ready");
