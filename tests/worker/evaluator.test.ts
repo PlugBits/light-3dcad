@@ -30,7 +30,7 @@ import {
   setRollbackIndex,
 } from "../../src/model";
 import type { CadDocument, FilletEdgeRef, SketchSegment } from "../../src/model/types";
-import { evaluateDocument } from "../../src/worker/evaluator";
+import { checkInterference, evaluateDocument } from "../../src/worker/evaluator";
 
 const initOpenCascade = initOpenCascadeUntyped as unknown as (moduleOverrides: {
   locateFile: (path: string) => string;
@@ -2836,5 +2836,138 @@ describe("evaluateDocument (WASM統合): bodyGroups(部品ドラッグ配置の�
     // 部品側と本体側でfaceIdの重複が無い(独立したボディとして分類されている)。
     const overlap = partGroup!.faceIds.filter((id) => mainGroup!.faceIds.includes(id));
     expect(overlap.length).toBe(0);
+  });
+});
+
+describe("checkInterference (WASM統合): 干渉チェック(Phase 28b)", () => {
+  it("① 重なる2箱は1ペア検出され、体積が重なり領域の体積と一致する", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    // BodyA: 20x20x10、中心(0,0) -> x:[-10,10] y:[-10,10] z:[0,10]。
+    const rect1 = createRectangleEntity({ width: 20, height: 20 });
+    const { doc: doc1, feature: sketch1 } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect1],
+    });
+    const { doc: doc2, feature: extrude1 } = addExtrudeFeature(doc1, {
+      name: "BodyA",
+      sketchId: sketch1.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    // BodyB: 20x20x10、中心(10,0) -> x:[0,20] y:[-10,10] z:[0,10]。BodyAとx:[0,10]で重なる。
+    const rect2 = createRectangleEntity({ center: [10, 0], width: 20, height: 20 });
+    const { doc: doc3, feature: sketch2 } = addSketchFeature(doc2, {
+      name: "Sketch2",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect2],
+    });
+    const { doc, feature: extrude2 } = addExtrudeFeature(doc3, {
+      name: "BodyB",
+      sketchId: sketch2.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = checkInterference(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.pairs.length).toBe(1);
+    const pair = result.pairs[0];
+    expect(pair.aFeatureId).toBe(extrude1.id);
+    expect(pair.aName).toBe("BodyA");
+    expect(pair.bFeatureId).toBe(extrude2.id);
+    expect(pair.bName).toBe("BodyB");
+    // 重なり領域: x:[0,10](幅10) x y:[-10,10](幅20) x z:[0,10](高さ10)。
+    expect(pair.volume).toBeCloseTo(10 * 20 * 10, 3);
+    pair.shape.delete();
+  });
+
+  it("② 離れた2箱は0ペア", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const rect1 = createRectangleEntity({ width: 20, height: 20 });
+    const { doc: doc1, feature: sketch1 } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect1],
+    });
+    const { doc: doc2 } = addExtrudeFeature(doc1, {
+      name: "BodyA",
+      sketchId: sketch1.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    // BodyBはBodyAから遠く離れた位置(中心x=100)に置く。
+    const rect2 = createRectangleEntity({ center: [100, 0], width: 20, height: 20 });
+    const { doc: doc3, feature: sketch2 } = addSketchFeature(doc2, {
+      name: "Sketch2",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect2],
+    });
+    const { doc } = addExtrudeFeature(doc3, {
+      name: "BodyB",
+      sketchId: sketch2.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = checkInterference(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.pairs.length).toBe(0);
+  });
+
+  it("③ 部品配置(簡易アセンブリ)との干渉を検出する", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    // 本体: 20x20x20(中心(0,0)) -> x:[-10,10] y:[-10,10] z:[0,20]。
+    const mainDoc = boxDoc(20, 20, 20);
+    // 部品: 10x10x10(中心(0,0)) -> position[5,0,0]で x:[0,10] y:[-5,5] z:[0,10] に配置される。
+    const partDoc = boxDoc(10, 10, 10);
+
+    const { doc: mainDocWithBody, feature: mainExtrude } = (() => {
+      // boxDoc()自体はExtrudeFeatureを直接返さないため、featureIdはdoc.featuresから取り出す
+      // (boxDoc()はPartExtrude1という名前の単一newBodyフィーチャーを作る、本ファイル冒頭の定義参照)。
+      const extrudeFeature = mainDoc.features.find((f) => f.type === "extrude");
+      if (!extrudeFeature) throw new Error("テストセットアップ失敗: 本体のextrudeフィーチャーが見つかりません");
+      return { doc: mainDoc, feature: extrudeFeature };
+    })();
+
+    const { doc } = addPartInstanceFeature(mainDocWithBody, {
+      name: "Part1",
+      part: partDoc,
+      position: [5, 0, 0],
+      rotation: [0, 0, 0],
+    });
+
+    const result = checkInterference(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.pairs.length).toBe(1);
+    const pair = result.pairs[0];
+    expect(pair.aFeatureId).toBe(mainExtrude.id);
+    expect(pair.bName).toBe("Part1");
+    // 重なり領域: x:[0,10](幅10) x y:[-5,5](幅10) x z:[0,10](高さ10)。
+    expect(pair.volume).toBeCloseTo(10 * 10 * 10, 3);
+    pair.shape.delete();
+  });
+
+  it("ボディが1個以下(単一ボディ・ボディなし)なら空結果になる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const single = boxDoc(10, 10, 10);
+    const singleResult = checkInterference(single);
+    expect(singleResult.ok).toBe(true);
+    if (singleResult.ok) expect(singleResult.pairs.length).toBe(0);
+
+    const emptyResult = checkInterference(createEmptyDocument());
+    expect(emptyResult.ok).toBe(true);
+    if (emptyResult.ok) expect(emptyResult.pairs.length).toBe(0);
   });
 });

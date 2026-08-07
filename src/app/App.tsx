@@ -127,6 +127,11 @@ export default function App() {
   const showSketches = useCadStore((s) => s.showSketches);
   const exporting = useCadStore((s) => s.exporting);
   const exportError = useCadStore((s) => s.exportError);
+  const interferenceResult = useCadStore((s) => s.interferenceResult);
+  const interferenceChecking = useCadStore((s) => s.interferenceChecking);
+  const interferenceError = useCadStore((s) => s.interferenceError);
+  const checkInterference = useCadStore((s) => s.checkInterference);
+  const clearInterference = useCadStore((s) => s.clearInterference);
   const initialize = useCadStore((s) => s.initialize);
   const selectFeature = useCadStore((s) => s.selectFeature);
   const setRollbackIndex = useCadStore((s) => s.setRollbackIndex);
@@ -299,6 +304,18 @@ export default function App() {
     viewerRef.current?.setPartInstanceFeatureIds(ids);
   }, [doc]);
 
+  // 干渉チェック結果(Phase 28b)が変わるたびにビューアへ反映する。干渉ペアがある間は交差領域を
+  // 赤半透明でオーバーレイし、無い(未実行・クリア済み・ペア0件)場合は消去する
+  // (store側がドキュメント変更のたびにinterferenceResultをnullへ自動クリアするため、
+  // 「クリア」ボタン・自動クリアのいずれもこの1本のuseEffectで反映される)。
+  useEffect(() => {
+    if (interferenceResult && interferenceResult.pairs.length > 0) {
+      viewerRef.current?.setInterferenceMeshes(interferenceResult.meshes);
+    } else {
+      viewerRef.current?.clearInterferenceMeshes();
+    }
+  }, [interferenceResult]);
+
   // ドキュメントに1つもフィーチャーが無い(=空ドキュメント、ボディなし)間だけ基準平面3枚を表示する。
   // 基準平面クリック等で最初のスケッチが作られた時点(features.length>0)で非表示になる(Phase 13)。
   useEffect(() => {
@@ -448,6 +465,11 @@ export default function App() {
       : undefined;
   // 3Dフィレット/面取りツールのボタン有効化条件(押し出しフィーチャーによりボディが存在するか)。
   const hasBody = mesh !== null && mesh.positions.length > 0;
+  // 干渉チェックボタンの有効化条件(Phase 28b): bodiesマップのキー(newBody操作のextrude/revolve、
+  // またはpartInstance)を数える。src/worker/evaluator.tsのbodiesマップ構築ロジックと対応させる。
+  const bodyCount = doc.features.filter(
+    (f) => f.type === "partInstance" || ((f.type === "extrude" || f.type === "revolve") && f.operation === "newBody"),
+  ).length;
 
   const busy = status === "initializing" || status === "evaluating";
   // WASM初期化は"evaluate"リクエストの中で行われる(initialize()参照)ため、
@@ -951,6 +973,27 @@ export default function App() {
     if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool) return true;
     if (partDragTool) return false;
     return !doc.features.some((f) => f.type === "partInstance");
+  }
+
+  /**
+   * 干渉チェックの実行(Phase 28b)。他のツールと違いモードを持たず、クリック1回で即座に
+   * Workerへリクエストを送り、結果をストアのinterferenceResultへ反映する(実行中インジケータは
+   * interferenceChecking、UIへのビューア反映は上のuseEffectが担う)。
+   * 干渉が0件だった場合のみ、既存の一時トースト機構(showTransientMessage、拘束矛盾時と共通)で
+   * 「干渉はありません」を表示する(干渉ありの場合はサイドパネルの一覧+赤ハイライトで十分明示的なため
+   * トーストは出さない)。
+   */
+  async function handleCheckInterference() {
+    const result = await checkInterference();
+    if (result && result.pairs.length === 0) {
+      showTransientMessage("干渉はありません");
+    }
+  }
+
+  /** 干渉チェックボタンをdisabledにすべきか(他のツール実行中、またはボディが2個未満)。 */
+  function isInterferenceCheckDisabled(): boolean {
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || partDragTool || threadTool) return true;
+    return bodyCount < 2;
   }
 
   /**
@@ -1830,6 +1873,25 @@ export default function App() {
             >
               {partDragTool ? "部品移動キャンセル(Esc)" : "部品移動"}
             </button>
+            <button
+              type="button"
+              data-testid="btn-check-interference"
+              onClick={handleCheckInterference}
+              disabled={isInterferenceCheckDisabled() || interferenceChecking}
+              title="全ボディ(部品配置を含む)をペアごとに交差判定し、干渉(重なり)があれば一覧と赤ハイライトで表示します"
+            >
+              {interferenceChecking ? "干渉チェック中…" : "干渉チェック"}
+            </button>
+            {interferenceResult && (
+              <button
+                type="button"
+                data-testid="btn-clear-interference"
+                onClick={clearInterference}
+                title="干渉チェックの結果(赤ハイライト・一覧)を消去します"
+              >
+                クリア
+              </button>
+            )}
           </div>
 
           <div className="toolbar-group" style={{ marginLeft: "auto" }}>
@@ -1975,6 +2037,38 @@ export default function App() {
                 </span>
               )}
             </div>
+          )}
+
+          {interferenceResult && interferenceResult.pairs.length > 0 && (
+            <div
+              data-testid="interference-panel"
+              style={{
+                borderTop: "1px solid #444",
+                paddingTop: 12,
+                fontSize: 12,
+                display: "flex",
+                flexDirection: "column",
+                gap: 4,
+              }}
+            >
+              <strong style={{ color: "#ff6b6b" }}>干渉あり({interferenceResult.pairs.length}件)</strong>
+              <ul style={{ margin: 0, paddingLeft: 16, display: "flex", flexDirection: "column", gap: 2 }}>
+                {interferenceResult.pairs.map((pair, i) => (
+                  <li key={`${pair.aFeatureId}-${pair.bFeatureId}-${i}`} data-testid="interference-pair">
+                    {pair.aName} ↔ {pair.bName}: {pair.volume.toFixed(1)}mm³
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {interferenceError && (
+            <p
+              data-testid="interference-error"
+              role="alert"
+              style={{ color: "#ff6b6b", fontSize: 12, whiteSpace: "pre-wrap", margin: 0 }}
+            >
+              干渉チェックエラー: {interferenceError}
+            </p>
           )}
 
           {errorMessage && (

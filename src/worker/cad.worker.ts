@@ -8,8 +8,17 @@ import { setOC, type Shape3D } from "replicad";
 import type { OpenCascadeInstance } from "replicad-opencascadejs/src/replicad_single.js";
 
 import type { CadDocument, FeatureId } from "../model/types";
-import type { EdgeInfo, FaceGroup, FaceInfo, MeshData, MeshQuality, UiRequest, WorkerResponse } from "../protocol/messages";
-import { evaluateDocument } from "./evaluator";
+import type {
+  EdgeInfo,
+  FaceGroup,
+  FaceInfo,
+  InterferencePairInfo,
+  MeshData,
+  MeshQuality,
+  UiRequest,
+  WorkerResponse,
+} from "../protocol/messages";
+import { checkInterference, evaluateDocument } from "./evaluator";
 
 // replicad-opencascadejsのd.tsは引数なしの署名しか宣言していないが、実装(emscripten生成の
 // モジュールファクトリ)は `{ locateFile }` などのModuleオーバーライドを受け取れる。
@@ -226,6 +235,47 @@ function exportStepAndRespond(requestId: string, doc: CadDocument) {
   }
 }
 
+/**
+ * 干渉チェック(Phase 28b)。checkInterference()が返す各ペアの交差ソリッドをtoMeshData()で
+ * メッシュ化し(既存のmesh変換をそのまま流用)、メッシュ化が終わったソリッドは直ちにdelete()する
+ * (メモリ解放。checkInterference()はshapeの解放を呼び出し側の責務としている)。
+ * ボディが1個以下・干渉ペアが0件の場合もエラーではなく空配列で正常応答する。
+ */
+function checkInterferenceAndRespond(requestId: string, doc: CadDocument, quality: MeshQuality) {
+  const result = checkInterference(doc);
+  if (!result.ok) {
+    postResponse({
+      kind: "error",
+      requestId,
+      featureId: result.featureId as FeatureId | undefined,
+      message: result.message,
+    });
+    return;
+  }
+
+  const pairs: InterferencePairInfo[] = [];
+  const meshes: MeshData[] = [];
+  const transfer: Transferable[] = [];
+  for (const pair of result.pairs) {
+    try {
+      const mesh = toMeshData(pair.shape, quality);
+      meshes.push(mesh);
+      transfer.push(mesh.positions.buffer, mesh.normals.buffer, mesh.indices.buffer, mesh.edges.buffer);
+      pairs.push({
+        aFeatureId: pair.aFeatureId,
+        aName: pair.aName,
+        bFeatureId: pair.bFeatureId,
+        bName: pair.bName,
+        volume: pair.volume,
+      });
+    } finally {
+      pair.shape.delete();
+    }
+  }
+
+  postResponse({ kind: "interference", requestId, interference: { pairs, meshes } }, transfer);
+}
+
 self.addEventListener("message", (event: MessageEvent<UiRequest>) => {
   const request = event.data;
 
@@ -250,6 +300,11 @@ self.addEventListener("message", (event: MessageEvent<UiRequest>) => {
         case "exportStep": {
           await ensureOC();
           exportStepAndRespond(request.requestId, request.doc);
+          break;
+        }
+        case "checkInterference": {
+          await ensureOC();
+          checkInterferenceAndRespond(request.requestId, request.doc, request.quality ?? DEFAULT_QUALITY);
           break;
         }
       }

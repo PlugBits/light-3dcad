@@ -27,10 +27,16 @@
 // 複数ボディ管理(Phase 27a): 単一の `body` 変数の代わりに `bodies: Map<FeatureId, Shape3D>`
 // (キー=そのボディを作ったnewBodyフィーチャーのid)を評価ループ全体で保持する。各フィーチャー評価後の
 // スナップショット・最終結果はいずれも「全ボディのcompound」(buildBodiesCompound())にする。
+//
+// 干渉チェック(checkInterference()、Phase 28b): doc.featuresを評価してbodiesマップを組み立てる
+// コア処理はevaluateFeatures()に切り出してあり、evaluateDocument()(最終compound化)と
+// checkInterference()(ボディをペアごとにintersect()して交差体積>1e-6mm³のペアを報告)の両方から
+// 使う。オンデマンド実行専用(Worker/UI側は明示的な要求時のみ呼ぶ)。
 import {
   loft,
   makeCompound,
   makeCylinder,
+  measureVolume,
   Plane,
   draw,
   drawCircle,
@@ -1280,11 +1286,30 @@ function applyBodyOperation(
 }
 
 /**
- * ドキュメントを評価してひとつのAnyShapeを返す。
- * 失敗時は featureId(特定できれば) 付きのエラーを返す。
- * 成功時に返るshapeの解放は呼び出し側の責務。失敗時は内部で生成した中間形状をすべて解放する。
+ * evaluateFeatures()の成功時の戻り値(Phase 28b切り出し)。bodiesマップは生きたまま返す
+ * (呼び出し側がdelete()する責務を持つ。evaluateDocument()は最終compound化後に、
+ * checkInterference()はペア間の交差計算に使ってから、それぞれ個別にdelete()する)。
+ * sketches/resolvedFacePlanes/referenceEdgesByIdはevaluateDocument()がsketchPlanes/referenceEdges
+ * 応答を組み立てるために必要な中間結果で、checkInterference()側では使わない。
  */
-export function evaluateDocument(doc: CadDocument): EvaluationResult {
+interface FeatureEvalSuccess {
+  ok: true;
+  bodies: Map<FeatureId, Shape3D>;
+  sketches: Map<FeatureId, SketchFeature>;
+  resolvedFacePlanes: Map<FeatureId, { center: Tuple3; normal: Tuple3 }>;
+  referenceEdgesById: Map<FeatureId, ReferenceEdgeLine[]>;
+}
+
+type FeatureEvalResult = FeatureEvalSuccess | EvaluationFailure;
+
+/**
+ * doc.featuresを先頭から逐次評価し、bodiesマップ(+付随する中間結果)を組み立てるコア処理
+ * (Phase 28b、evaluateDocument()とcheckInterference()の共通部分として切り出した)。
+ * 失敗時は featureId(特定できれば) 付きのエラーを返す。
+ * 成功時に返るbodiesマップの各Shape3Dの解放は呼び出し側の責務。失敗時は内部で生成した
+ * 中間形状(bodies・snapshots)をすべてこの関数内で解放する。
+ */
+function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
   const sketches = new Map<FeatureId, SketchFeature>();
   // face参照スケッチの解決済み平面情報(sketchId -> center/normal)。sketch評価時に確定する。
   const resolvedFacePlanes = new Map<FeatureId, { center: Tuple3; normal: Tuple3 }>();
@@ -1409,10 +1434,22 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
 
   for (const snap of snapshots.values()) snap.delete();
 
-  // bodies.size===0(newBodyフィーチャーが1つも無い)は、空ドキュメント/スケッチのみの
-  // ドキュメントとして正常なケースである(Phase 13)。エラーにはしない。
-  // ここに到達した時点でループは最後まで例外なく完走しているため、
-  // sketchesに登録された全スケッチ(world/faceいずれも)の平面基底が解決済みである。
+  // ここに到達した時点でループは最後まで例外なく完走しているため、sketchesに登録された
+  // 全スケッチ(world/faceいずれも)の平面基底が解決済みである。bodies(bodies.size===0は
+  // newBodyフィーチャーが1つも無い、空ドキュメント/スケッチのみの正常なケース。Phase 13)は
+  // 生きたまま返す(delete()は呼び出し側の責務)。
+  return { ok: true, bodies, sketches, resolvedFacePlanes, referenceEdgesById };
+}
+
+/**
+ * ドキュメントを評価してひとつのAnyShapeを返す。
+ * 失敗時は featureId(特定できれば) 付きのエラーを返す。
+ * 成功時に返るshapeの解放は呼び出し側の責務。失敗時は内部で生成した中間形状をすべて解放する。
+ */
+export function evaluateDocument(doc: CadDocument): EvaluationResult {
+  const result = evaluateFeatures(doc);
+  if (!result.ok) return result;
+  const { bodies, sketches, resolvedFacePlanes, referenceEdgesById } = result;
 
   // 各ボディの面ID集合(Phase 28a)を、compound化してbodiesをdelete()する前に集めておく。
   const bodyGroups: BodyGroup[] = [];
@@ -1445,4 +1482,83 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
   }
 
   return { ok: true, shape, sketchPlanes, referenceEdges, bodyGroups };
+}
+
+/**
+ * 干渉チェック(Phase 28b)で、交差体積がこの値(mm³)を超えるペアのみ「干渉あり」として報告する。
+ * 浮動小数点誤差・ちょうど接する(タンジェント)ボディ同士の名目上ほぼゼロの交差を誤検出しないための閾値。
+ */
+const INTERFERENCE_VOLUME_THRESHOLD = 1e-6;
+
+/** 干渉ペア1件(交差ソリッドつき、Phase 28b)。shapeはメッシュ化後、呼び出し側(Worker)がdelete()する責務を持つ。 */
+export interface InterferencePairShape {
+  aFeatureId: FeatureId;
+  aName: string;
+  bFeatureId: FeatureId;
+  bName: string;
+  volume: number;
+  shape: Shape3D;
+}
+
+export interface InterferenceCheckSuccess {
+  ok: true;
+  pairs: InterferencePairShape[];
+}
+
+export type InterferenceCheckResult = InterferenceCheckSuccess | EvaluationFailure;
+
+/**
+ * 全ボディ(部品配置[partInstance]による追加ボディも含む)をペアごとに交差(replicadの
+ * Shape3D#intersect()、BRepAlgoAPI_Common)し、交差体積がINTERFERENCE_VOLUME_THRESHOLDを超える
+ * ペアを干渉として報告する(Phase 28b)。ボディが1個以下の場合は空配列を返す(エラーではない)。
+ * オンデマンド実行専用(呼び出し側のUIが明示的に要求したときのみ呼ぶ想定。ドキュメント評価の
+ * たびに自動実行すると重くなるため)。
+ *
+ * ボディの名前は、そのボディを作ったフィーチャー(newBody操作のextrude/revolve、または
+ * partInstance)のnameフィールドをdoc.featuresから引く(bodiesマップのキー=そのフィーチャーのid、
+ * evaluateFeatures()冒頭のコメント参照)。
+ *
+ * 交差(intersect())が何らかの理由で失敗した場合(OCCTが空/縮退した交差からShape3Dを構築できない
+ * 等)は、そのペアは「干渉なし」として扱う(評価全体を失敗させない。ボディが完全に離れている場合は
+ * 通常は空のCompoundが返るため到達しないはずだが、念のため防御的に扱う)。
+ *
+ * 戻り値の各ペアのshapeは呼び出し側(Worker)がメッシュ化後にdelete()する責務を持つ。
+ */
+export function checkInterference(doc: CadDocument): InterferenceCheckResult {
+  const result = evaluateFeatures(doc);
+  if (!result.ok) return result;
+  const { bodies } = result;
+
+  if (bodies.size < 2) {
+    for (const b of bodies.values()) b.delete();
+    return { ok: true, pairs: [] };
+  }
+
+  const nameOf = (id: FeatureId): string => doc.features.find((f) => f.id === id)?.name ?? id;
+  const ids = Array.from(bodies.keys());
+  const pairs: InterferencePairShape[] = [];
+  for (let i = 0; i < ids.length; i += 1) {
+    for (let j = i + 1; j < ids.length; j += 1) {
+      const aId = ids[i];
+      const bId = ids[j];
+      const a = bodies.get(aId) as Shape3D;
+      const b = bodies.get(bId) as Shape3D;
+      let intersection: Shape3D | null = null;
+      try {
+        intersection = a.intersect(b);
+      } catch {
+        intersection = null;
+      }
+      if (!intersection) continue;
+      const volume = measureVolume(intersection);
+      if (volume > INTERFERENCE_VOLUME_THRESHOLD) {
+        pairs.push({ aFeatureId: aId, aName: nameOf(aId), bFeatureId: bId, bName: nameOf(bId), volume, shape: intersection });
+      } else {
+        intersection.delete();
+      }
+    }
+  }
+
+  for (const b of bodies.values()) b.delete();
+  return { ok: true, pairs };
 }

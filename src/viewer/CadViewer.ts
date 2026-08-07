@@ -63,6 +63,10 @@ const PART_DRAG_THROTTLE_MS = 150;
 /** 部品移動ツールのグリッドスナップ間隔(mm、既存の1mmスナップと同じ粒度)。 */
 const PART_DRAG_GRID_SPACING = 1;
 
+/** 干渉チェック(Phase 28b)の交差領域ハイライト色(赤)・不透明度。半透明にしてボディ本体を隠さない。 */
+const INTERFERENCE_COLOR = 0xff1744;
+const INTERFERENCE_OPACITY = 0.55;
+
 /** 基準平面(Phase 13)の一辺(mm)。ボディが存在しない空ドキュメント状態で表示する。 */
 const REFERENCE_PLANE_SIZE = 60;
 /** 基準平面の通常時/ホバー時の不透明度。 */
@@ -788,6 +792,17 @@ export class CadViewer {
   }[] = [];
   /** ホバー中の基準平面(未ホバーはnull)。 */
   private hoveredReferencePlane: "XY" | "XZ" | "YZ" | null = null;
+
+  /**
+   * 干渉チェック(Phase 28b)の交差領域ハイライトを乗せるグループ。既存のソリッド本体メッシュ
+   * (this.mesh、setMesh()が再評価のたびに破棄・再構築する)とは独立したライフサイクルで管理する
+   * (干渉チェックはオンデマンド実行のため、ソリッド本体の再構築とは別タイミングで表示/消去される)。
+   * depthTestは有効のままにする(ソリッド内部に隠れた交差領域が透けて見えないようにし、
+   * 実際の空間的な重なりを正しく示すため。ゲート要件どおり)。
+   */
+  private interferenceGroup: THREE.Group;
+  private interferenceGeometries: THREE.BufferGeometry[] = [];
+  private interferenceMaterials: THREE.MeshBasicMaterial[] = [];
   /** 現在のメッシュのバウンディングボックスから求めた半径目安(mm)。グリッド範囲の基準に使う。 */
   private meshHalfExtent = 50;
   /** 初回メッシュ受信時にfitToView()を自動実行するためのフラグ(2回目以降は視点を維持する)。 */
@@ -1103,6 +1118,9 @@ export class CadViewer {
     this.referencePlaneEntries = this.buildReferencePlanes();
     this.referencePlaneEntries.forEach((entry) => this.referencePlaneGroup.add(entry.mesh));
     this.scene.add(this.referencePlaneGroup);
+
+    this.interferenceGroup = new THREE.Group();
+    this.scene.add(this.interferenceGroup);
 
     // コンテナを絶対配置の基準にする(座標オーバーレイをcanvas上にpxで重ねるため)。
     // containerは既存レイアウト上は幅・高さ100%のプレーンなdivであり、position指定を持たない
@@ -1719,6 +1737,49 @@ export class CadViewer {
       this.hasReceivedMesh = true;
       this.fitToView();
     }
+  }
+
+  /**
+   * 干渉チェック(Phase 28b)の交差領域メッシュを半透明赤でオーバーレイ表示する。既存のソリッド本体
+   * メッシュ機構(setMesh())とは独立した専用グループ(this.interferenceGroup)に乗せるため、
+   * 通常の再評価(setMesh()の呼び出し)では消えない(App側がドキュメント変更を検知して
+   * clearInterferenceMeshes()を呼ぶまで残る、干渉チェックはオンデマンド実行のため)。
+   * 呼ぶたびに既存のハイライトを破棄してから作り直す(結果が置き換わる場合に前回分が残らないように)。
+   */
+  setInterferenceMeshes(meshes: MeshData[]) {
+    this.clearInterferenceMeshes();
+    for (const data of meshes) {
+      if (data.positions.length === 0) continue;
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(data.positions, 3));
+      geometry.setAttribute("normal", new THREE.BufferAttribute(data.normals, 3));
+      geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
+      // MeshBasicMaterial(陰影計算なし)にして常に鮮やかな赤で視認しやすくする。depthTestは
+      // 有効のまま(ゲート要件): ソリッド本体の裏側に隠れた交差領域は透けて見えない
+      // (=実際の空間的な重なりが正しく示される)。depthWrite:falseで半透明の重なり順の
+      // アーティファクトを避ける(通常の半透明マテリアルの定石)。
+      const material = new THREE.MeshBasicMaterial({
+        color: INTERFERENCE_COLOR,
+        transparent: true,
+        opacity: INTERFERENCE_OPACITY,
+        side: THREE.DoubleSide,
+        depthTest: true,
+        depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(geometry, material);
+      this.interferenceGeometries.push(geometry);
+      this.interferenceMaterials.push(material);
+      this.interferenceGroup.add(mesh);
+    }
+  }
+
+  /** 干渉チェックのハイライトを消去する(「クリア」ボタン、ドキュメント編集時の自動クリア、Phase 28b)。 */
+  clearInterferenceMeshes() {
+    this.interferenceGroup.clear();
+    this.interferenceGeometries.forEach((g) => g.dispose());
+    this.interferenceMaterials.forEach((m) => m.dispose());
+    this.interferenceGeometries = [];
+    this.interferenceMaterials = [];
   }
 
   /**
@@ -4615,6 +4676,7 @@ export class CadViewer {
     this.clearDimensionOverlay();
     this.clearDrawingPreview();
     this.clearDimensionSelectHighlight();
+    this.clearInterferenceMeshes();
     this.referenceEdgeGeometries.forEach((g) => g.dispose());
     this.referenceEdgeMaterials.forEach((m) => m.dispose());
     this.referencePlaneEntries.forEach((entry) => {

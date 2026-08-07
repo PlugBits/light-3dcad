@@ -29,7 +29,17 @@ import type {
   ThreadPreset,
   WorldPlaneName,
 } from "../model/types";
-import type { BodyGroup, EdgeInfo, FaceInfo, MeshData, MeshQuality, ReferenceEdgeSet, SketchPlaneInfo, WorkerResponse } from "../protocol/messages";
+import type {
+  BodyGroup,
+  EdgeInfo,
+  FaceInfo,
+  InterferenceResult,
+  MeshData,
+  MeshQuality,
+  ReferenceEdgeSet,
+  SketchPlaneInfo,
+  WorkerResponse,
+} from "../protocol/messages";
 import { deserializeProject, serializeProject } from "../project/serialization";
 import { updateReferenceEdgeSnapshots } from "../sketch/referenceEdgeMatch";
 import { solveDocumentSketches } from "../sketch/solver";
@@ -119,7 +129,11 @@ function ensureWorker(): Worker {
   return w;
 }
 
-function postRequest(request: { kind: "evaluate" | "exportStl" | "exportStep"; doc: CadDocument; quality?: MeshQuality }) {
+function postRequest(request: {
+  kind: "evaluate" | "exportStl" | "exportStep" | "checkInterference";
+  doc: CadDocument;
+  quality?: MeshQuality;
+}) {
   const w = ensureWorker();
   const requestId = nextRequestId();
   return {
@@ -208,6 +222,17 @@ interface CadStoreState {
   exportError: string | null;
 
   /**
+   * 干渉チェック(Phase 28b)の直近の結果。オンデマンド実行のみ(自動実行はしない)。
+   * 未実行・クリア後はnull。ドキュメントが変更されると(doc参照が変わるたびに)結果が古くなるため
+   * 自動的にnullへクリアされる(本ファイル末尾のuseCadStore.subscribe参照)。
+   */
+  interferenceResult: InterferenceResult | null;
+  /** 干渉チェックのWorker往復中かどうか(ツールバーの実行中インジケータに使う)。 */
+  interferenceChecking: boolean;
+  /** 干渉チェックがエラーになった場合のメッセージ(未発生・クリア後はnull)。 */
+  interferenceError: string | null;
+
+  /**
    * 簡易アンドゥ/リドゥ履歴(Phase 14)。updateDocument()で変更する度に変更前のドキュメントの
    * スナップショット(JSON構造のコピー)がpastへ積まれる(上限50件)。選択状態は履歴に含めない
    * (アンドゥ/リドゥ時は選択解除するのみ)。
@@ -293,6 +318,16 @@ interface CadStoreState {
   }) => void;
 
   /**
+   * 干渉チェック(Phase 28b)を実行する。全ボディ(部品配置による追加ボディも含む)をペアごとに
+   * 交差判定し、結果をinterferenceResultに反映する(オンデマンド実行のみ、ドキュメント評価の
+   * たびに自動実行はしない)。呼び出し側(UI)は戻り値のpairs件数で「干渉なし」トースト表示等を
+   * 判断できる(エラー時はnullを返し、interferenceErrorに詳細が入る)。
+   */
+  checkInterference: () => Promise<InterferenceResult | null>;
+  /** 干渉チェック結果(赤ハイライト・一覧)をクリアする(「クリア」ボタン、ドキュメント編集時の自動クリア)。 */
+  clearInterference: () => void;
+
+  /**
    * ドキュメントを丸ごと差し替える(プロジェクトを開く/新規作成、Phase 26)。undo()/redo()と異なり
    * アンドゥ履歴は保持しない(空にリセットする)。選択状態(フィーチャー・面)もクリアし、直ちに再評価する。
    */
@@ -365,6 +400,10 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
 
   exporting: false,
   exportError: null,
+
+  interferenceResult: null,
+  interferenceChecking: false,
+  interferenceError: null,
 
   history: createHistoryState<CadDocument>(),
 
@@ -667,6 +706,27 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
     }
   },
 
+  checkInterference: async () => {
+    set({ interferenceChecking: true, interferenceError: null });
+    try {
+      const { promise } = postRequest({ kind: "checkInterference", doc: resolveEvaluationDocument(get().doc) });
+      const response = await promise;
+      if (response.kind === "interference") {
+        set({ interferenceChecking: false, interferenceResult: response.interference, interferenceError: null });
+        return response.interference;
+      }
+      const message = response.kind === "error" ? response.message : `予期しない応答: ${response.kind}`;
+      set({ interferenceChecking: false, interferenceResult: null, interferenceError: message });
+      return null;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      set({ interferenceChecking: false, interferenceResult: null, interferenceError: message });
+      return null;
+    }
+  },
+
+  clearInterference: () => set({ interferenceResult: null, interferenceError: null }),
+
   loadDocument: (doc) => {
     const { requestId, promise } = postRequest({ kind: "evaluate", doc: resolveEvaluationDocument(doc) });
     // undo()/redo()と違い、履歴は空にリセットする(プロジェクトの切り替えは別の編集セッションとして扱う)。
@@ -691,8 +751,14 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
 
 // ドキュメントが変わるたびに(500msデバウンスで)自動保存する(Phase 26)。undo/redo/loadDocument等、
 // updateDocument()を経由しない変更も含めてstate.docの同一性(===)比較で検知する。
+// 干渉チェック結果(Phase 28b)もここで自動クリアする: checkInterference()自体はdocを変更しない
+// (Worker往復のみ)ため、この購読はundo/redo/updateDocument/loadDocument等の「実際のドキュメント
+// 変更」でのみ発火し、干渉チェックを実行しただけでは結果は消えない。
 useCadStore.subscribe((state, prevState) => {
   if (state.doc !== prevState.doc) {
     scheduleAutosave(state.doc);
+    if (state.interferenceResult !== null || state.interferenceError !== null) {
+      useCadStore.setState({ interferenceResult: null, interferenceError: null });
+    }
   }
 });

@@ -15,7 +15,12 @@ export type UiRequest =
   | { kind: "evaluate"; requestId: string; doc: CadDocument; quality?: MeshQuality }
   | { kind: "exportStl"; requestId: string; doc: CadDocument; quality?: MeshQuality }
   /** STEPエクスポート(Phase 26)。replicadのblobSTEP()はメッシュ許容誤差を取らないためqualityは無い。 */
-  | { kind: "exportStep"; requestId: string; doc: CadDocument };
+  | { kind: "exportStep"; requestId: string; doc: CadDocument }
+  /**
+   * 干渉チェック(Phase 28b)。全ボディ(部品配置による追加ボディも含む)をペアごとに交差判定する。
+   * オンデマンド実行のみ(自動実行はしない、重くなるため)。qualityは交差領域のメッシュ化に使う。
+   */
+  | { kind: "checkInterference"; requestId: string; doc: CadDocument; quality?: MeshQuality };
 
 /**
  * 三角形メッシュ(Transferable化のためTypedArray化済み)。
@@ -122,6 +127,29 @@ export interface ReferenceEdgeSet {
   edges: ReferenceEdgeLine[];
 }
 
+/**
+ * 干渉ペア1件の情報(Phase 28b)。a/bはボディを作ったフィーチャー(newBody操作のextrude/revolve、
+ * またはpartInstance)のid・名前。volumeは交差体積(mm³、1e-6mm³超のペアのみ報告される。
+ * src/worker/evaluator.tsのINTERFERENCE_VOLUME_THRESHOLD参照)。
+ */
+export interface InterferencePairInfo {
+  aFeatureId: FeatureId;
+  aName: string;
+  bFeatureId: FeatureId;
+  bName: string;
+  volume: number;
+}
+
+/**
+ * 干渉チェック(Phase 28b)の応答本体。pairsとmeshesは同じ順序・長さで対応する
+ * (meshes[i]がpairs[i]の交差領域のメッシュ、ハイライト表示用)。ボディが1個以下、または
+ * 干渉ペアが1つも無い場合はいずれも空配列。
+ */
+export interface InterferenceResult {
+  pairs: InterferencePairInfo[];
+  meshes: MeshData[];
+}
+
 /** Worker -> UI のレスポンス */
 export type WorkerResponse =
   | { kind: "ready"; requestId: string }
@@ -140,5 +168,7 @@ export type WorkerResponse =
   | { kind: "stl"; requestId: string; blob: Blob }
   /** STEPエクスポート応答(Phase 26)。 */
   | { kind: "step"; requestId: string; blob: Blob }
+  /** 干渉チェック応答(Phase 28b)。 */
+  | { kind: "interference"; requestId: string; interference: InterferenceResult }
   | { kind: "error"; requestId: string; featureId?: FeatureId; message: string }
   | { kind: "progress"; requestId: string; message: string };
