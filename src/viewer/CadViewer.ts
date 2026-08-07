@@ -549,6 +549,13 @@ declare global {
        * 実際にカメラ距離を動かしたことを検証するために使う。
        */
       cameraDistance: () => number;
+      /**
+       * 寸法ツール中のヒット判定対象セグメント(dimensionToolSegments)の現在の座標スナップショット
+       * (開発ビルド限定、E2E用、頂点ベースの寸法指定[Phase 30]の検証用)。App.tsx側が
+       * updateDimensionToolTargets()でドキュメント変更のたびに最新化するため、拘束適用後の
+       * 実際の解けた座標(ソルバの出力)を確認できる。非アクティブ時は空配列。
+       */
+      dimensionToolSegmentsSnapshot: () => { id: string; p1: [number, number]; p2: [number, number] }[];
     };
   }
 }
@@ -1283,6 +1290,7 @@ export class CadViewer {
         dimensionHoverEntityKind: () => this.dimensionHoverEntityHit?.kind ?? null,
         drawingPointsSnapshot: () => this.drawingPoints.map((p): [number, number] => [p[0], p[1]]),
         cameraDistance: () => this.camera.position.distanceTo(this.controls.target),
+        dimensionToolSegmentsSnapshot: () => this.dimensionToolSegments.map((s) => ({ id: s.id, p1: s.p1, p2: s.p2 })),
       };
     }
   }

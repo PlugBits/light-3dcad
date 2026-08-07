@@ -14,6 +14,8 @@ declare global {
       drawingPointsSnapshot: () => [number, number][];
       /** カメラ〜注視点の距離(mm、Phase 29a、自動フィット検証用)。 */
       cameraDistance: () => number;
+      /** 寸法ツール中のヒット判定対象セグメントの現在の座標スナップショット(Phase 30、頂点ベースの寸法指定検証用)。 */
+      dimensionToolSegmentsSnapshot: () => { id: string; p1: [number, number]; p2: [number, number] }[];
     };
     /**
      * Workerへ「故意にthrowする」メッセージを送り、実際のWorkerクラッシュ(Workerのerrorイベント)を
