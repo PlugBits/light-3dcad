@@ -93,12 +93,18 @@ export interface FaceInfo {
  * edgeIdはreplicadのedge.hashCode(meshEdges()のedgeGroups.edgeIdと同じ値、再評価で変わりうる
  * 一時的なID)。midpoint/p1/p2はワールド座標(mm)で、edge.pointAt(0.5)/startPoint/endPointから
  * 算出する(曲線エッジも含め常に取得できる。円弧の場合pointAt(0.5)は弧長中点に相当)。
+ * length/isClosedはedge.length/edge.isClosedから取得する(Phase 29c)。穴の縁のような閉じた円形
+ * エッジはp1===p2(始点=終点)となり方向ベクトルが定義できないため、幾何マッチングのフォールバック
+ * (src/worker/evaluator.tsのmatchFilletEdgesInBody参照)で閉エッジ専用の判定(中点距離+長さ一致)
+ * に使う。
  */
 export interface EdgeInfo {
   edgeId: number;
   midpoint: [number, number, number];
   p1: [number, number, number];
   p2: [number, number, number];
+  length: number;
+  isClosed: boolean;
 }
 
 /** MeshData.edgeGroups の1要素。B-Repエッジ1本に対応するedges配列中の頂点範囲。 */

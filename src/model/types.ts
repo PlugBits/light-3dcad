@@ -241,12 +241,16 @@ export interface ExtrudeFeature {
  * B-Rep面ID同様の一時ID(replicadのedge.hashCode)で、再評価のたびに変わりうるため
  * 第一候補としてのみ使う。midpoint/p1/p2(いずれもワールド座標、mm)は幾何マッチングの
  * フォールバック(中点距離最近傍+方向一致)に使う(src/worker/evaluator.tsのresolveFilletEdges参照)。
+ * length/isClosed(Phase 29c)は穴の縁のような閉じた円形エッジ(p1===p2で方向ベクトルが定義できない)
+ * を中点距離+長さ一致で判定するために使う(開いたエッジは従来通り方向一致を使う)。
  */
 export interface FilletEdgeRef {
   edgeId: number;
   midpoint: [number, number, number];
   p1: [number, number, number];
   p2: [number, number, number];
+  length: number;
+  isClosed: boolean;
 }
 
 /**

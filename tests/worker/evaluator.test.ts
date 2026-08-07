@@ -118,12 +118,41 @@ function topFaceEdgeSnapshots(shape: Shape3D, topZ: number): FilletEdgeRef[] {
       endVec.delete();
       midVec.delete();
       if (Math.abs(p1[2] - topZ) < 1e-6 && Math.abs(p2[2] - topZ) < 1e-6) {
-        result.push({ edgeId: edge.hashCode, p1, p2, midpoint });
+        result.push({ edgeId: edge.hashCode, p1, p2, midpoint, length: edge.length, isClosed: edge.isClosed });
       }
     }
     edge.delete();
   }
   return result;
+}
+
+/**
+ * テスト用(Phase 29c): 穴の縁(円形の閉エッジ、始点===終点で方向ベクトルが定義できない)の
+ * うち、中点のZ座標がtopZにほぼ一致するものを1本探してFilletEdgeRefとして返す
+ * (円カットで開けた穴の上面側の縁を想定)。見つからなければエラーを投げる。
+ */
+function holeRimEdgeSnapshot(shape: Shape3D, topZ: number): FilletEdgeRef {
+  const edges = shape.edges;
+  let found: FilletEdgeRef | null = null;
+  for (const edge of edges) {
+    if (!found && edge.isClosed) {
+      const startVec = edge.startPoint;
+      const endVec = edge.endPoint;
+      const midVec = edge.pointAt(0.5);
+      const p1 = startVec.toTuple();
+      const p2 = endVec.toTuple();
+      const midpoint = midVec.toTuple();
+      startVec.delete();
+      endVec.delete();
+      midVec.delete();
+      if (Math.abs(midpoint[2] - topZ) < 1e-6) {
+        found = { edgeId: edge.hashCode, p1, p2, midpoint, length: edge.length, isClosed: edge.isClosed };
+      }
+    }
+    edge.delete();
+  }
+  if (!found) throw new Error("テストセットアップ失敗: 穴の縁(閉エッジ)が見つかりません");
+  return found;
 }
 
 /**
@@ -1911,6 +1940,113 @@ describe("evaluateDocument (WASM統合): 3Dフィレット/面取り(Phase 25a)"
     if (result.ok) return;
     expect(result.featureId).toBe(feature.id);
     expect(result.message.length).toBeGreaterThan(0);
+  });
+
+  /**
+   * 60x40x20の箱の上面に円(半径10)カットで貫通穴を開けたドキュメントを作る
+   * (Phase 29c: 穴の縁=閉じた円形エッジへの3Dフィレット/面取りのテスト用)。
+   * Sketch1(矩形) -> Extrude1(newBody, distance) -> Sketch2(円r10) -> Cut1(cut, distance+10)。
+   */
+  function buildBoxWithHoleDoc(distance = 20) {
+    const empty = createEmptyDocument();
+    const rect = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: doc1, feature: rectSketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+    });
+    const { doc: doc2, feature: extrude } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: rectSketch.id,
+      distance,
+      direction: 1,
+      operation: "newBody",
+    });
+    const circle = createCircleEntity({ radius: 10 });
+    const { doc: doc3, feature: circleSketch } = addSketchFeature(doc2, {
+      name: "Sketch2",
+      plane: { kind: "world", plane: "XY" },
+      entities: [circle],
+    });
+    const { doc } = addExtrudeFeature(doc3, {
+      name: "Cut1",
+      sketchId: circleSketch.id,
+      distance: distance + 10,
+      direction: 1,
+      operation: "cut",
+    });
+    return { doc, extrude };
+  }
+
+  it("穴の縁(閉じた円形エッジ)にフィレット2を適用すると体積が減る(丸め分、末広がりの分だけ材料が余分に除去される)", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: holeDoc } = buildBoxWithHoleDoc(20);
+    const holeResult = evaluateDocument(holeDoc);
+    expect(holeResult.ok).toBe(true);
+    if (!holeResult.ok) return;
+    const holeVolume = measureVolume(holeResult.shape);
+    const rim = holeRimEdgeSnapshot(holeResult.shape, 20);
+    holeResult.shape.delete();
+
+    const { doc } = addFillet3DFeature(holeDoc, {
+      name: "フィレット1",
+      kind: "fillet",
+      size: 2,
+      edges: [rim],
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const volume = measureVolume(result.shape);
+    result.shape.delete();
+    // 穴の縁を丸めると開口部が末広がり(ベルマウス状)になり、素の円柱穴より材料が余分に
+    // 除去される(=体積は減る)。実測値でも確認済み(fillet 2 -> 41660.47 < 41716.81)。
+    expect(volume).toBeLessThan(holeVolume);
+  });
+
+  it("穴あきの箱で寸法変更(押し出し距離)後も穴縁フィレットが追従する", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: holeDoc, extrude } = buildBoxWithHoleDoc(20);
+    const holeResult = evaluateDocument(holeDoc);
+    expect(holeResult.ok).toBe(true);
+    if (!holeResult.ok) return;
+    const rim = holeRimEdgeSnapshot(holeResult.shape, 20);
+    holeResult.shape.delete();
+
+    const { doc: filletDoc } = addFillet3DFeature(holeDoc, {
+      name: "フィレット1",
+      kind: "fillet",
+      size: 2,
+      edges: [rim],
+    });
+
+    // 高さを20→25へ変更する(穴カットのdistanceは20+10=30で据え置きなので貫通は維持される。
+    // edgeIdはOCCTの再構築で変わりうるため、matchFilletEdgesInBodyのフォールバック
+    // [中点距離最近傍+閉エッジは長さ一致]で再解決される想定)。
+    const changedDoc = patchExtrudeFeature(filletDoc, extrude.id, { distance: 25 });
+    const result = evaluateDocument(changedDoc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const volume = measureVolume(result.shape);
+
+    // 参照用: 同じ寸法変更を、フィレットなしの穴あきドキュメント(holeDoc、filletDocの直前の状態)に
+    // 適用した場合の体積。holeDocとfilletDocはextrude.idを共有するfeature系列なので、
+    // 同じfeatureIdをそのまま使い回せる。
+    const changedUnfilletedDoc = patchExtrudeFeature(holeDoc, extrude.id, { distance: 25 });
+    const unfilletedResult = evaluateDocument(changedUnfilletedDoc);
+    expect(unfilletedResult.ok).toBe(true);
+    if (!unfilletedResult.ok) {
+      result.shape.delete();
+      return;
+    }
+    const unfilletedVolume = measureVolume(unfilletedResult.shape);
+    result.shape.delete();
+    unfilletedResult.shape.delete();
+
+    // フィレットが追従して適用されていれば、同じ寸法変更後の無加工(穴あきのみ)の箱より
+    // 材料が余分に除去されて体積が小さいはず(前テストと同じ理由で減る方向)。
+    expect(volume).toBeLessThan(unfilletedVolume);
   });
 });
 

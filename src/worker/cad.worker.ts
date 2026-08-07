@@ -63,11 +63,14 @@ function toMeshData(shape: Shape3D, quality: MeshQuality): MeshData {
 }
 
 /**
- * shapeの各B-Repエッジについて中点・両端点を集めた配列を作る(Phase 25a、3Dエッジ選択・
- * フィレット/面取りフィーチャーのスナップショット用)。
+ * shapeの各B-Repエッジについて中点・両端点・長さ・閉エッジ判定を集めた配列を作る(Phase 25a、
+ * 3Dエッジ選択・フィレット/面取りフィーチャーのスナップショット用)。
  * edgeId は edge.hashCode(= meshEdges()のedgeGroups.edgeIdと同じ値)。
+ * length/isClosed(Phase 29c)は、穴の縁のような閉じた円形エッジ(p1===p2で始点→終点方向が
+ * 定義できない)を評価側(src/worker/evaluator.tsのmatchFilletEdgesInBody)で中点距離+長さ一致
+ * により判定できるようにするために追加した。
  * 使用したreplicad API: Shape.edges / Edge.hashCode / Edge.startPoint / Edge.endPoint /
- * Edge.pointAt(0.5)(_1DShape.pointAt()のデフォルト値。曲線に沿った弧長中点)。
+ * Edge.pointAt(0.5)(_1DShape.pointAt()のデフォルト値。曲線に沿った弧長中点)/ Edge.length / Edge.isClosed。
  */
 function computeEdgeInfo(shape: Shape3D): EdgeInfo[] {
   const infos: EdgeInfo[] = [];
@@ -80,6 +83,8 @@ function computeEdgeInfo(shape: Shape3D): EdgeInfo[] {
       p1: startVec.toTuple(),
       p2: endVec.toTuple(),
       midpoint: midVec.toTuple(),
+      length: edge.length,
+      isClosed: edge.isClosed,
     });
     startVec.delete();
     endVec.delete();

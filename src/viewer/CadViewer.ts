@@ -4049,7 +4049,16 @@ export class CadViewer {
     const refs: FilletEdgeRef[] = [];
     for (const id of this.selectedEdgeIds) {
       const info = byId.get(id);
-      if (info) refs.push({ edgeId: info.edgeId, midpoint: info.midpoint, p1: info.p1, p2: info.p2 });
+      if (info) {
+        refs.push({
+          edgeId: info.edgeId,
+          midpoint: info.midpoint,
+          p1: info.p1,
+          p2: info.p2,
+          length: info.length,
+          isClosed: info.isClosed,
+        });
+      }
     }
     return refs;
   }

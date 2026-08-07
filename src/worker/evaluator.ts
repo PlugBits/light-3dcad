@@ -142,6 +142,13 @@ const REFERENCE_EDGE_PLANE_TOLERANCE = 1e-4;
  */
 const EDGE_DISTANCE_TOLERANCE_RATIO = 0.1;
 const EDGE_DIRECTION_COS_TOLERANCE = 0.999;
+/**
+ * 閉エッジ(円・楕円等、始点===終点で方向ベクトルが定義できない。穴の縁が典型例)の
+ * 幾何マッチング(Phase 29c)で使う長さ許容(edge.lengthに対する比率)。中点距離による
+ * 絞り込みと併用するため緩め(1%)で十分だが、極小エッジでの絶対誤差も考慮し下限を設ける。
+ */
+const EDGE_LENGTH_TOLERANCE_RATIO = 0.01;
+const EDGE_LENGTH_TOLERANCE_MIN = 1e-6;
 
 function subtract(a: Tuple3, b: Tuple3): Tuple3 {
   return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -566,9 +573,15 @@ function resolveFaceGeometryAcrossBodies(
  * 1ボディ分のfillet3dエッジマッチング(Phase 27a: 複数ボディ横断マッチング用に、resolveFilletEdges
  * 相当のロジックを「失敗時はnullを返す(エラーを投げない)」形にしたもの)。
  * 1. 第一候補: edge.hashCode(選択時点のedgeId)が完全一致する、未使用のエッジ(距離0扱い)。
- * 2. フォールバック: 中点距離が最も近く(バウンディングボックス対角長の
- *    EDGE_DISTANCE_TOLERANCE_RATIO以内)、始点→終点方向がほぼ一致(cos>EDGE_DIRECTION_COS_TOLERANCE、
- *    符号は無視)する、未使用のエッジ。
+ * 2. フォールバック: 中点距離が最も近い(バウンディングボックス対角長のEDGE_DISTANCE_TOLERANCE_RATIO
+ *    以内)、未使用のエッジのうち、
+ *    - 開いたエッジ(isClosed===false): 始点→終点方向がほぼ一致(cos>EDGE_DIRECTION_COS_TOLERANCE、
+ *      符号は無視)するもの。
+ *    - 閉じたエッジ(isClosed===true。円・楕円等。始点===終点となり方向ベクトルが定義できない。
+ *      穴の縁が典型例。Phase 29c): 長さがほぼ一致(edge.lengthの比率でEDGE_LENGTH_TOLERANCE_RATIO
+ *      以内)するもの。方向cos判定は使わない(ゼロベクトル同士の内積0となり常に不一致になってしまう
+ *      ため)。
+ *    候補の開閉(isClosed)がtargetと異なるものはそもそも候補から除外する。
  * 3. targetsのいずれか1つでもこのボディ内で解決できなければnullを返す(その際allEdgesは
  *    この関数内でdelete()まで済ませる。呼び出し側で二重解放しないこと)。
  *
@@ -604,25 +617,34 @@ function matchFilletEdgesInBody(
     }
 
     if (matchIndex === -1) {
-      const targetDir = normalize(subtract(target.p2, target.p1));
+      const targetIsClosed = target.isClosed ?? false;
+      const targetDir = targetIsClosed ? null : normalize(subtract(target.p2, target.p1));
+      const lengthTol = Math.max(target.length * EDGE_LENGTH_TOLERANCE_RATIO, EDGE_LENGTH_TOLERANCE_MIN);
       let bestDist = Infinity;
       for (let i = 0; i < allEdges.length; i += 1) {
         if (used.has(i)) continue;
         const edge = allEdges[i];
+        if (edge.isClosed !== targetIsClosed) continue;
         const midVec = edge.pointAt(0.5);
         const mid = midVec.toTuple();
         midVec.delete();
         const dist = distance(mid, target.midpoint);
         if (dist > maxDist || dist >= bestDist) continue;
-        const startVec = edge.startPoint;
-        const endVec = edge.endPoint;
-        const start = startVec.toTuple();
-        const end = endVec.toTuple();
-        startVec.delete();
-        endVec.delete();
-        const dir = normalize(subtract(end, start));
-        const cosAngle = Math.abs(dot(dir, targetDir));
-        if (cosAngle < EDGE_DIRECTION_COS_TOLERANCE) continue;
+        if (targetIsClosed) {
+          // 閉エッジ(円・楕円等)は始点===終点で方向ベクトルが定義できないため、
+          // 中点距離(上でフィルタ済み)に加えて長さの一致で判定する。
+          if (Math.abs(edge.length - target.length) > lengthTol) continue;
+        } else {
+          const startVec = edge.startPoint;
+          const endVec = edge.endPoint;
+          const start = startVec.toTuple();
+          const end = endVec.toTuple();
+          startVec.delete();
+          endVec.delete();
+          const dir = normalize(subtract(end, start));
+          const cosAngle = Math.abs(dot(dir, targetDir as Tuple3));
+          if (cosAngle < EDGE_DIRECTION_COS_TOLERANCE) continue;
+        }
         bestDist = dist;
         matchIndex = i;
       }
