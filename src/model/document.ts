@@ -54,7 +54,11 @@ export function addSketchFeature(
   return { doc: addFeature(doc, feature), feature };
 }
 
-/** 新しい押し出しフィーチャーを作成して末尾に追加する。IDは自動生成される。 */
+/**
+ * 新しい押し出しフィーチャーを作成して末尾に追加する。IDは自動生成される。
+ * targetBodyId(Phase 27a複数ボディ対応)は省略可(省略時は評価時に「最後に作られたボディ」が
+ * 自動的に対象になる。operation:"newBody"のときは無視される)。
+ */
 export function addExtrudeFeature(
   doc: CadDocument,
   params: {
@@ -63,6 +67,7 @@ export function addExtrudeFeature(
     distance: number;
     direction: 1 | -1;
     operation: ExtrudeFeature["operation"];
+    targetBodyId?: FeatureId;
   },
 ): { doc: CadDocument; feature: ExtrudeFeature } {
   const feature: ExtrudeFeature = {
@@ -73,6 +78,7 @@ export function addExtrudeFeature(
     distance: params.distance,
     direction: params.direction,
     operation: params.operation,
+    ...(params.targetBodyId !== undefined ? { targetBodyId: params.targetBodyId } : {}),
   };
   return { doc: addFeature(doc, feature), feature };
 }
@@ -126,7 +132,10 @@ export function patchShellFeature(
   return updateFeature<ShellFeature>(doc, featureId, (f) => ({ ...f, ...patch }));
 }
 
-/** 新しい回転体(Revolve)フィーチャーを作成して末尾に追加する。IDは自動生成される(Phase 25b)。 */
+/**
+ * 新しい回転体(Revolve)フィーチャーを作成して末尾に追加する。IDは自動生成される(Phase 25b)。
+ * targetBodyId(Phase 27a複数ボディ対応)はaddExtrudeFeature()と同じ意味(省略可)。
+ */
 export function addRevolveFeature(
   doc: CadDocument,
   params: {
@@ -135,6 +144,7 @@ export function addRevolveFeature(
     axis: "x" | "y";
     angle: number;
     operation: RevolveFeature["operation"];
+    targetBodyId?: FeatureId;
   },
 ): { doc: CadDocument; feature: RevolveFeature } {
   const feature: RevolveFeature = {
@@ -145,6 +155,7 @@ export function addRevolveFeature(
     axis: params.axis,
     angle: params.angle,
     operation: params.operation,
+    ...(params.targetBodyId !== undefined ? { targetBodyId: params.targetBodyId } : {}),
   };
   return { doc: addFeature(doc, feature), feature };
 }
@@ -153,7 +164,7 @@ export function addRevolveFeature(
 export function patchRevolveFeature(
   doc: CadDocument,
   featureId: FeatureId,
-  patch: Partial<Pick<RevolveFeature, "name" | "sketchId" | "axis" | "angle" | "operation">>,
+  patch: Partial<Pick<RevolveFeature, "name" | "sketchId" | "axis" | "angle" | "operation" | "targetBodyId">>,
 ): CadDocument {
   return updateFeature<RevolveFeature>(doc, featureId, (f) => ({ ...f, ...patch }));
 }
@@ -222,7 +233,7 @@ export function updateFeature<T extends Feature>(
 export function patchExtrudeFeature(
   doc: CadDocument,
   featureId: FeatureId,
-  patch: Partial<Pick<ExtrudeFeature, "name" | "sketchId" | "distance" | "direction" | "operation">>,
+  patch: Partial<Pick<ExtrudeFeature, "name" | "sketchId" | "distance" | "direction" | "operation" | "targetBodyId">>,
 ): CadDocument {
   return updateFeature<ExtrudeFeature>(doc, featureId, (f) => ({ ...f, ...patch }));
 }

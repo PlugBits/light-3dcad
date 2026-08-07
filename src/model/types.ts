@@ -217,7 +217,14 @@ export interface SketchFeature {
   constraints?: SketchConstraint[];
 }
 
-/** 押し出しフィーチャー(新規ボディ作成 or 既存ボディからのカット)。 */
+/**
+ * 押し出しフィーチャー(新規ボディ作成 or 既存ボディへのカット/追加、Phase 27a複数ボディ対応)。
+ * targetBodyId は operation:"cut"|"add" のときのみ意味を持つ(newBodyは常に新しいボディを
+ * 作るため無視される)。対象ボディを作った newBody フィーチャー(このExtrudeFeature自身、または
+ * RevolveFeature)のidを指す。省略時はevaluator.tsが「最後に作られたボディ」(bodiesマップの
+ * 挿入順で最後のキー)に自動的に適用する。指定した場合、参照先が存在しない/newBodyでない場合は
+ * 評価時にfeatureId付きエラーになる(src/worker/evaluator.tsのapplyBodyOperation参照)。
+ */
 export interface ExtrudeFeature {
   type: "extrude";
   id: FeatureId;
@@ -226,6 +233,7 @@ export interface ExtrudeFeature {
   distance: number;
   direction: 1 | -1;
   operation: "newBody" | "cut" | "add";
+  targetBodyId?: FeatureId;
 }
 
 /**
@@ -293,6 +301,8 @@ export interface ShellFeature {
  * 回転軸としてangle度だけ回転させる。angleの既定値は360(v1ではUIのデフォルト値として扱う。
  * このフィールド自体は必須)。operationは押し出しと同じ newBody/add/cut の3種で、
  * evaluator側の分岐(ボディへのfuse/cut)も押し出しと共通のロジックを使う。
+ * targetBodyId は ExtrudeFeature と同じ意味(Phase 27a複数ボディ対応。operation:"cut"|"add"時のみ
+ * 有効、省略時は最後に作られたボディが対象になる)。
  */
 export interface RevolveFeature {
   type: "revolve";
@@ -302,6 +312,7 @@ export interface RevolveFeature {
   axis: "x" | "y";
   angle: number;
   operation: "newBody" | "add" | "cut";
+  targetBodyId?: FeatureId;
 }
 
 /** ねじフィーチャー(Phase 25c)のISO並目ねじプリセット名。呼び径・ピッチはsrc/model/threadPresets.ts参照。 */

@@ -330,7 +330,7 @@ describe("evaluateDocument (WASM統合)", () => {
     expect(result.message).toContain("追加対象");
   });
 
-  it("2回目のnewBodyはエラーになる(単一ボディのみ対応)", (ctx) => {
+  it("2回目のnewBodyは新しい独立したボディとして成功する(単一ボディ制限は撤廃、Phase 27a)", (ctx) => {
     ctx.skip(!wasmLoaded, SKIP_NOTE);
     const empty = createEmptyDocument();
     const rect = createRectangleEntity({ width: 20, height: 20 });
@@ -346,12 +346,13 @@ describe("evaluateDocument (WASM統合)", () => {
       direction: 1,
       operation: "newBody",
     });
+    // 離れた位置(center=[50,0])に置くことで、体積が単純な和になる(重なり合わない)ようにする。
     const { doc: doc3, feature: sketch2 } = addSketchFeature(doc2, {
       name: "Sketch2",
       plane: { kind: "world", plane: "XY" },
-      entities: [createRectangleEntity({ width: 5, height: 5 })],
+      entities: [createRectangleEntity({ center: [50, 0], width: 5, height: 5 })],
     });
-    const { doc, feature: extrude2 } = addExtrudeFeature(doc3, {
+    const { doc } = addExtrudeFeature(doc3, {
       name: "Extrude2",
       sketchId: sketch2.id,
       distance: 10,
@@ -360,10 +361,14 @@ describe("evaluateDocument (WASM統合)", () => {
     });
 
     const result = evaluateDocument(doc);
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.featureId).toBe(extrude2.id);
-    expect(result.message).toContain("単一ボディ");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.shape).not.toBeNull();
+    const shape = result.shape as Shape3D;
+    // 2つの独立したソリッド(直方体6面x2=12面)を持つcompoundになる。
+    expect(countFaces(shape)).toBe(12);
+    expect(measureVolume(shape)).toBeCloseTo(20 * 20 * 10 + 5 * 5 * 10, 3);
+    shape.delete();
   });
 
   it("図形が無いスケッチを押し出そうとするとエラーになる", (ctx) => {
@@ -2186,6 +2191,368 @@ describe("evaluateDocument (WASM統合): STEPエクスポート(Phase 26)", () =
       expect(text.startsWith("ISO-10303-21;")).toBe(true);
     } finally {
       result.shape.delete();
+    }
+  });
+});
+
+describe("evaluateDocument (WASM統合): 複数ボディ(Phase 27a)", () => {
+  /** 平面(法線がほぼ+Z)かつ中心XがxCloseToに最も近い面を探す(2ボディ環境で目的の面を一意に特定するため)。 */
+  function findTopFaceNear(
+    shape: Shape3D,
+    xCloseTo: number,
+  ): { faceId: number; center: [number, number, number]; normal: [number, number, number] } {
+    const faces = shape.faces;
+    let found: { faceId: number; center: [number, number, number]; normal: [number, number, number] } | null = null;
+    let bestDist = Infinity;
+    for (const face of faces) {
+      if (face.geomType === "PLANE") {
+        const centerVec = face.center;
+        const normalVec = face.normalAt();
+        const center = centerVec.toTuple();
+        const normal = normalVec.toTuple();
+        centerVec.delete();
+        normalVec.delete();
+        const isUpward = Math.abs(normal[2] - 1) < 1e-6 && Math.abs(normal[0]) < 1e-6 && Math.abs(normal[1]) < 1e-6;
+        const dist = Math.abs(center[0] - xCloseTo);
+        if (isUpward && dist < bestDist) {
+          found = { faceId: face.hashCode, center, normal };
+          bestDist = dist;
+        }
+      }
+      face.delete();
+    }
+    if (!found) throw new Error("テストセットアップ失敗: 上面が見つかりません");
+    return found;
+  }
+
+  it("① 離れた位置にnewBodyを2回適用すると、compoundの体積が両ボディの体積の和になる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const rect1 = createRectangleEntity({ width: 20, height: 20 });
+    const { doc: doc1, feature: sketch1 } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect1],
+    });
+    const { doc: doc2 } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch1.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const rect2 = createRectangleEntity({ center: [100, 0], width: 30, height: 15 });
+    const { doc: doc3, feature: sketch2 } = addSketchFeature(doc2, {
+      name: "Sketch2",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect2],
+    });
+    const { doc } = addExtrudeFeature(doc3, {
+      name: "Extrude2",
+      sketchId: sketch2.id,
+      distance: 5,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.shape).not.toBeNull();
+    const shape = result.shape as Shape3D;
+    expect(countFaces(shape)).toBe(12);
+    const volume = measureVolume(shape);
+    const expected = 20 * 20 * 10 + 30 * 15 * 5;
+    expect(volume).toBeCloseTo(expected, 3);
+    shape.delete();
+  });
+
+  it("② targetBodyIdを指定するとそのボディのみにcutが適用され、他方のボディは不変", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const rect1 = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: doc1, feature: sketch1 } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect1],
+    });
+    const { doc: doc2, feature: extrude1 } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch1.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const rect2 = createRectangleEntity({ center: [100, 0], width: 30, height: 15 });
+    const { doc: doc3, feature: sketch2 } = addSketchFeature(doc2, {
+      name: "Sketch2",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect2],
+    });
+    const { doc: doc4 } = addExtrudeFeature(doc3, {
+      name: "Extrude2",
+      sketchId: sketch2.id,
+      distance: 5,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    // カット用の円(半径5)はbody1の位置(原点)のみに重なる。
+    const holeCircle = createCircleEntity({ radius: 5 });
+    const { doc: doc5, feature: holeSketch } = addSketchFeature(doc4, {
+      name: "Sketch3",
+      plane: { kind: "world", plane: "XY" },
+      entities: [holeCircle],
+    });
+    const { doc } = addExtrudeFeature(doc5, {
+      name: "Cut1",
+      sketchId: holeSketch.id,
+      distance: 30,
+      direction: 1,
+      operation: "cut",
+      targetBodyId: extrude1.id,
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const volume = measureVolume(result.shape as Shape3D);
+    const expectedBody1 = (60 * 40 - Math.PI * 5 * 5) * 20;
+    const expectedBody2 = 30 * 15 * 5;
+    expect(volume).toBeCloseTo(expectedBody1 + expectedBody2, 0);
+    (result.shape as Shape3D).delete();
+  });
+
+  it("③ targetBodyId省略時は最後に作られたボディにaddが適用される", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const rect1 = createRectangleEntity({ width: 20, height: 20 });
+    const { doc: doc1, feature: sketch1 } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect1],
+    });
+    const { doc: doc2 } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch1.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const rect2 = createRectangleEntity({ center: [100, 0], width: 20, height: 20 });
+    const { doc: doc3, feature: sketch2 } = addSketchFeature(doc2, {
+      name: "Sketch2",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect2],
+    });
+    const { doc: doc4 } = addExtrudeFeature(doc3, {
+      name: "Extrude2",
+      sketchId: sketch2.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    // 追加用の矩形(center=[100,0]、body2の位置のみに重なる)をtargetBodyId省略でaddする。
+    const addRect = createRectangleEntity({ center: [100, 0], width: 10, height: 10 });
+    const { doc: doc5, feature: addSketchFeature2 } = addSketchFeature(doc4, {
+      name: "Sketch3",
+      plane: { kind: "world", plane: "XY" },
+      entities: [addRect],
+    });
+    const { doc } = addExtrudeFeature(doc5, {
+      name: "Add1",
+      sketchId: addSketchFeature2.id,
+      distance: 30,
+      direction: 1,
+      operation: "add",
+      // targetBodyIdは指定しない: 最後に作られたボディ(Extrude2/body2)が対象になるはず。
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const volume = measureVolume(result.shape as Shape3D);
+    const body1Volume = 20 * 20 * 10;
+    const body2Volume = 20 * 20 * 10;
+    // body2(z:[0,10])と追加ボス(z:[0,30])は10x10footprintで重なるため、重複しない範囲(z:[10,30])のみ加算する。
+    const addedBossVolume = 10 * 10 * (30 - 10);
+    expect(volume).toBeCloseTo(body1Volume + body2Volume + addedBossVolume, 0);
+    (result.shape as Shape3D).delete();
+  });
+
+  it("④ 2ボディ環境でface参照スケッチが正しい方のボディの面に解決される", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const rect1 = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: doc1, feature: sketch1 } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect1],
+    });
+    const { doc: doc2 } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch1.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const rect2 = createRectangleEntity({ center: [100, 0], width: 30, height: 15 });
+    const { doc: doc3, feature: sketch2 } = addSketchFeature(doc2, {
+      name: "Sketch2",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect2],
+    });
+    const { doc: doc4, feature: extrude2 } = addExtrudeFeature(doc3, {
+      name: "Extrude2",
+      sketchId: sketch2.id,
+      distance: 5,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const boxesResult = evaluateDocument(doc4);
+    expect(boxesResult.ok).toBe(true);
+    if (!boxesResult.ok) return;
+    const top2 = findTopFaceNear(boxesResult.shape as Shape3D, 100);
+    (boxesResult.shape as Shape3D).delete();
+    // body2(高さ5、x=100中心)の上面であることを確認(body1は高さ20、x=0中心なので混同していない)。
+    expect(top2.center[2]).toBeCloseTo(5, 6);
+    expect(top2.center[0]).toBeCloseTo(100, 6);
+
+    const circle = createCircleEntity({ radius: 3 });
+    const { doc: doc5, feature: faceSketch } = addSketchFeature(doc4, {
+      name: "FaceSketch1",
+      plane: { kind: "face", featureId: extrude2.id, faceId: top2.faceId, center: top2.center, normal: top2.normal },
+      entities: [circle],
+    });
+    const { doc } = addExtrudeFeature(doc5, {
+      name: "Cut1",
+      sketchId: faceSketch.id,
+      distance: 10,
+      direction: -1,
+      operation: "cut",
+      targetBodyId: extrude2.id,
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const volume = measureVolume(result.shape as Shape3D);
+    const body1Volume = 60 * 40 * 20;
+    const body2VolumeWithHole = 30 * 15 * 5 - Math.PI * 3 * 3 * 5;
+    expect(volume).toBeCloseTo(body1Volume + body2VolumeWithHole, 0);
+    (result.shape as Shape3D).delete();
+  });
+
+  it("⑤ 2ボディ環境でfillet3dが幾何マッチングにより正しい方のボディに適用される", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const rect1 = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: doc1, feature: sketch1 } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect1],
+    });
+    const { doc: doc2 } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch1.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const rect2 = createRectangleEntity({ center: [100, 0], width: 20, height: 20 });
+    const { doc: doc3, feature: sketch2 } = addSketchFeature(doc2, {
+      name: "Sketch2",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect2],
+    });
+    const { doc: boxesDoc } = addExtrudeFeature(doc3, {
+      name: "Extrude2",
+      sketchId: sketch2.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const boxesResult = evaluateDocument(boxesDoc);
+    expect(boxesResult.ok).toBe(true);
+    if (!boxesResult.ok) return;
+    const boxesVolume = measureVolume(boxesResult.shape as Shape3D);
+    // body1は高さ20(上面z=20)、body2は高さ10(上面z=10)なので、z=10で絞ればbody2の上面4辺のみ取れる。
+    const body2TopEdges = topFaceEdgeSnapshots(boxesResult.shape as Shape3D, 10);
+    (boxesResult.shape as Shape3D).delete();
+    expect(body2TopEdges.length).toBe(4);
+
+    const { doc } = addFillet3DFeature(boxesDoc, {
+      name: "フィレット1",
+      kind: "fillet",
+      size: 3,
+      edges: [body2TopEdges[0]],
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const volume = measureVolume(result.shape as Shape3D);
+    (result.shape as Shape3D).delete();
+    expect(volume).toBeLessThan(boxesVolume);
+    // body1(60x40x20)は不変のはずなので、減少分はbody2由来の1エッジ(上面の辺、長さ20mm)分の
+    // 概算除去体積のみ(断面積r^2(1-π/4)の四半円柱をエッジの長さ[20mm、rect2の一辺]だけ除去する)。
+    const removedApprox = 3 * 3 * (1 - Math.PI / 4) * 20;
+    expect(boxesVolume - volume).toBeCloseTo(removedApprox, 0);
+  });
+
+  it("⑥ STL/STEPエクスポート(blobSTL/blobSTEP)が2ボディ分の形状を含む", async (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const rect1 = createRectangleEntity({ width: 20, height: 20 });
+    const { doc: doc1, feature: sketch1 } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect1],
+    });
+    const { doc: doc2 } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch1.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const rect2 = createRectangleEntity({ center: [100, 0], width: 20, height: 20 });
+    const { doc: doc3, feature: sketch2 } = addSketchFeature(doc2, {
+      name: "Sketch2",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect2],
+    });
+    const { doc } = addExtrudeFeature(doc3, {
+      name: "Extrude2",
+      sketchId: sketch2.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const shape = result.shape as Shape3D;
+    try {
+      expect(countFaces(shape)).toBe(12);
+      const stlBlob = shape.blobSTL();
+      expect(stlBlob.size).toBeGreaterThan(0);
+      const stepBlob = shape.blobSTEP();
+      expect(stepBlob.size).toBeGreaterThan(0);
+      const stepText = await stepBlob.text();
+      expect(stepText.startsWith("ISO-10303-21;")).toBe(true);
+    } finally {
+      shape.delete();
     }
   });
 });

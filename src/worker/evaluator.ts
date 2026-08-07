@@ -3,7 +3,9 @@
 //
 // サポート範囲:
 //   - sketch: plane は world XY/XZ/YZ(基準平面) / 面参照(face)の両方
-//     - face参照は、参照先フィーチャー評価直後のボディ・スナップショットから面を再解決する。
+//     - face参照は、参照先フィーチャー評価直後の「全ボディのcompound」スナップショットから
+//       面を再解決する(Phase 27a複数ボディ対応。スナップショット自体はcompoundなので単一ボディ時と
+//       同じ面/エッジ列挙ロジックがそのまま使える)。
 //       1. 第一候補: face.hashCode(選択時点のfaceId)が一致する面
 //       2. フォールバック: 平面(isPlanar)かつ法線がほぼ一致(cos>0.999)し、
 //          中心距離が最も近い(バウンディングボックス対角長の50%以内)面
@@ -12,10 +14,17 @@
 //     replicadのDrawingPen#customCorner()/#closeWithCustomCorner()を使う。頂点0(始点)を
 //     含む全頂点でコーナー処理可能。OCCT構築前に隣接辺に対して明らかに大きすぎるサイズを
 //     弾く粗い事前バリデーションを行う)
-//   - extrude: operation "newBody"(最初の1回のみ) / "cut"(既存ボディが必要) / "add"(既存ボディが必要。fuseで結合)
+//   - extrude/revolve: operation "newBody"(常に新しい独立ボディを作る。複数回可、Phase 27a) /
+//     "cut"・"add"(targetBodyId省略時は最後に作られたボディが対象。指定時はそのボディのみに適用)
+//   - fillet3d/shell/thread: エッジ/面の幾何マッチングを全ボディ横断で行い、最良マッチのボディに適用する
 //   - direction: -1 は逆向き押し出し(面参照の場合は面法線の逆方向)
+//
+// 複数ボディ管理(Phase 27a): 単一の `body` 変数の代わりに `bodies: Map<FeatureId, Shape3D>`
+// (キー=そのボディを作ったnewBodyフィーチャーのid)を評価ループ全体で保持する。各フィーチャー評価後の
+// スナップショット・最終結果はいずれも「全ボディのcompound」(buildBodiesCompound())にする。
 import {
   loft,
+  makeCompound,
   makeCylinder,
   Plane,
   draw,
@@ -54,9 +63,11 @@ import type { ReferenceEdgeLine, ReferenceEdgeSet, SketchPlaneInfo } from "../pr
 export interface EvaluationSuccess {
   ok: true;
   /**
-   * 押し出しフィーチャーが1つも無い(=ボディが存在しない)場合はnull。
+   * newBodyフィーチャーが1つも無い(=ボディが存在しない)場合はnull。
    * これはエラーではなく正常なドキュメント状態(空ドキュメント/スケッチのみ)として扱う(Phase 13)。
    * 呼び出し側(Worker)はnullのとき空メッシュを返す。
+   * 複数ボディ(Phase 27a)がある場合は、全ボディをまとめたcompound(replicadのmakeCompound()。
+   * mesh/faces/edges/boundingBox/blobSTL/blobSTEP等は単一ボディ同様に使える)になる。
    */
   shape: Shape3D | null;
   /**
@@ -453,23 +464,87 @@ function resolveFaceGeometry(
 }
 
 /**
- * bodyの現在のエッジ群から、fillet3dフィーチャーが選択時に記録したエッジスナップショット
- * (targets)を再解決する(Phase 25a)。
- * 1. 第一候補: edge.hashCode(選択時点のedgeId)が完全一致する、未使用のエッジ。
+ * resolveFaceGeometry()の1ボディ分の判定ロジックを、失敗時にエラーを投げず null を返す形に
+ * したもの(Phase 27a、複数ボディ横断マッチング用)。一致すればdist(hashCode一致は0、
+ * フォールバックは中心距離)付きで返す。
+ */
+function matchFaceInBody(
+  body: Shape3D,
+  faceId: number,
+  savedCenter: Tuple3,
+  savedNormal: Tuple3,
+): { center: Tuple3; normal: Tuple3; dist: number } | null {
+  const faces = body.faces;
+  try {
+    const byId = faces.find((f) => f.hashCode === faceId);
+    if (byId) {
+      const info = faceCenterNormal(byId);
+      return { center: info.center, normal: info.normal, dist: 0 };
+    }
+
+    const bbox = body.boundingBox;
+    const diag = Math.sqrt(bbox.width ** 2 + bbox.height ** 2 + bbox.depth ** 2);
+    bbox.delete();
+    const maxDist = diag * FACE_DISTANCE_TOLERANCE_RATIO;
+
+    let best: { center: Tuple3; normal: Tuple3; dist: number } | null = null;
+    for (const face of faces) {
+      if (face.geomType !== "PLANE") continue;
+      const info = faceCenterNormal(face);
+      if (dot(info.normal, savedNormal) < FACE_NORMAL_COS_TOLERANCE) continue;
+      const dist = distance(info.center, savedCenter);
+      if (dist > maxDist) continue;
+      if (!best || dist < best.dist) best = { center: info.center, normal: info.normal, dist };
+    }
+    return best;
+  } finally {
+    faces.forEach((f) => f.delete());
+  }
+}
+
+/**
+ * bodies(複数ボディ、Phase 27a)を横断して、選択時点のfaceId/center/normalに最もよく一致する
+ * 面を持つボディを特定する(ねじの配置面用。matchFaceInBody()を各ボディに適用し、一致した中で
+ * distが最小[hashCode一致は0扱い]のボディを採用する)。どのボディでも一致しなければエラーを投げる。
+ */
+function resolveFaceGeometryAcrossBodies(
+  bodies: Map<FeatureId, Shape3D>,
+  faceId: number,
+  savedCenter: Tuple3,
+  savedNormal: Tuple3,
+): { bodyId: FeatureId; center: Tuple3; normal: Tuple3 } {
+  let best: { bodyId: FeatureId; center: Tuple3; normal: Tuple3; dist: number } | null = null;
+  for (const [bodyId, body] of bodies) {
+    const matched = matchFaceInBody(body, faceId, savedCenter, savedNormal);
+    if (!matched) continue;
+    if (!best || matched.dist < best.dist) {
+      best = { bodyId, center: matched.center, normal: matched.normal, dist: matched.dist };
+    }
+  }
+  if (!best) {
+    throw new Error("面を特定できませんでした。面を選択し直してください");
+  }
+  return best;
+}
+
+/**
+ * 1ボディ分のfillet3dエッジマッチング(Phase 27a: 複数ボディ横断マッチング用に、resolveFilletEdges
+ * 相当のロジックを「失敗時はnullを返す(エラーを投げない)」形にしたもの)。
+ * 1. 第一候補: edge.hashCode(選択時点のedgeId)が完全一致する、未使用のエッジ(距離0扱い)。
  * 2. フォールバック: 中点距離が最も近く(バウンディングボックス対角長の
  *    EDGE_DISTANCE_TOLERANCE_RATIO以内)、始点→終点方向がほぼ一致(cos>EDGE_DIRECTION_COS_TOLERANCE、
  *    符号は無視)する、未使用のエッジ。
- * 3. どちらも失敗した場合はエラーを投げる(呼び出し側でallEdgesを解放してから投げる)。
+ * 3. targetsのいずれか1つでもこのボディ内で解決できなければnullを返す(その際allEdgesは
+ *    この関数内でdelete()まで済ませる。呼び出し側で二重解放しないこと)。
  *
- * 戻り値のmatched(targetsと同じ順序・長さ)とallEdges(bodyの全エッジ、delete()の責務は
- * 呼び出し側)は同じEdgeインスタンスを共有する(matchedはallEdgesの部分集合の参照)。
- * 使用replicad API: Shape.edges / Edge.hashCode / Edge.startPoint / Edge.endPoint /
- * Edge.pointAt(0.5) / Shape.boundingBox。
+ * 戻り値のmatched(targetsと同じ順序・長さ)とallEdges(bodyの全エッジ)は同じEdgeインスタンスを
+ * 共有する(matchedはallEdgesの部分集合の参照)。成功時、allEdgesのdelete()責務は呼び出し側。
+ * totalDistはマッチ全体の距離合計(hashCode一致は0)で、複数ボディ間の「最良マッチ」判定に使う。
  */
-function resolveFilletEdges(
+function matchFilletEdgesInBody(
   body: Shape3D,
   targets: FilletEdgeRef[],
-): { matched: Edge[]; allEdges: Edge[] } {
+): { matched: Edge[]; allEdges: Edge[]; totalDist: number } | null {
   const allEdges = body.edges;
   const used = new Set<number>();
 
@@ -479,13 +554,16 @@ function resolveFilletEdges(
   const maxDist = diag * EDGE_DISTANCE_TOLERANCE_RATIO;
 
   const matched: Edge[] = [];
+  let totalDist = 0;
   for (const target of targets) {
     let matchIndex = -1;
+    let matchDist = 0;
 
     for (let i = 0; i < allEdges.length; i += 1) {
       if (used.has(i)) continue;
       if (allEdges[i].hashCode === target.edgeId) {
         matchIndex = i;
+        matchDist = 0;
         break;
       }
     }
@@ -513,58 +591,88 @@ function resolveFilletEdges(
         bestDist = dist;
         matchIndex = i;
       }
+      matchDist = bestDist;
     }
 
     if (matchIndex === -1) {
       allEdges.forEach((e) => e.delete());
-      throw new Error("フィレット/面取りの対象エッジを特定できませんでした。フィーチャーを作り直してください");
+      return null;
     }
     used.add(matchIndex);
     matched.push(allEdges[matchIndex]);
+    totalDist += matchDist;
   }
 
-  return { matched, allEdges };
+  return { matched, allEdges, totalDist };
 }
 
 /**
- * fillet3dフィーチャーを現在のボディに適用し、新しいボディを返す(古いボディはこの関数内でdelete()する)。
+ * bodies(複数ボディ、Phase 27a)を横断してfillet3dの対象エッジを解決し、最良マッチ(全targetsが
+ * 解決でき、totalDistが最小)のボディを特定する。どのボディでも全targetsが解決できなければ
+ * エラーを投げる(既存のfeatureId付きエラー経路に乗る)。
+ */
+function resolveFilletEdgesAcrossBodies(
+  bodies: Map<FeatureId, Shape3D>,
+  targets: FilletEdgeRef[],
+): { bodyId: FeatureId; matched: Edge[]; allEdges: Edge[] } {
+  let best: { bodyId: FeatureId; matched: Edge[]; allEdges: Edge[]; totalDist: number } | null = null;
+  for (const [bodyId, body] of bodies) {
+    const result = matchFilletEdgesInBody(body, targets);
+    if (!result) continue;
+    if (!best || result.totalDist < best.totalDist) {
+      if (best) best.allEdges.forEach((e) => e.delete());
+      best = { bodyId, matched: result.matched, allEdges: result.allEdges, totalDist: result.totalDist };
+    } else {
+      result.allEdges.forEach((e) => e.delete());
+    }
+  }
+  if (!best) {
+    throw new Error("フィレット/面取りの対象エッジを特定できませんでした。フィーチャーを作り直してください");
+  }
+  return best;
+}
+
+/**
+ * fillet3dフィーチャーを、全ボディ横断のエッジマッチング(resolveFilletEdgesAcrossBodies())で
+ * 特定した最良マッチのボディに適用する(Phase 27a。bodiesマップを直接書き換える)。
  * replicadの Shape3D#fillet()/#chamfer() は第2引数に「EdgeFinderを受け取り、絞り込んだ
  * EdgeFinderを返す関数」を渡すことで対象エッジを絞り込める。ここでは EdgeFinder#inList()
- * (「渡したEdge配列とisSame()なエッジのみを残す」フィルタ)にresolveFilletEdges()で
- * 幾何マッチングしたエッジをそのまま渡す(カスタム述語が要るケースではないため、汎用の
- * EdgeFinder#when()は使わずinList()で十分)。半径過大等でOCCTが構築に失敗した場合はfillet()/
- * chamfer()がそのままErrorをthrowし、呼び出し元のevaluateDocument()のtry/catchで
- * featureId付きエラーに変換される。
+ * (「渡したEdge配列とisSame()なエッジのみを残す」フィルタ)に幾何マッチングしたエッジを
+ * そのまま渡す。半径過大等でOCCTが構築に失敗した場合はfillet()/chamfer()がそのままErrorをthrowし、
+ * 呼び出し元のevaluateDocument()のtry/catchでfeatureId付きエラーに変換される。
  */
-function applyFillet3D(body: Shape3D, feature: Fillet3DFeature): Shape3D {
-  const { matched, allEdges } = resolveFilletEdges(body, feature.edges);
+function applyFillet3DToBodies(bodies: Map<FeatureId, Shape3D>, feature: Fillet3DFeature): void {
+  const { bodyId, matched, allEdges } = resolveFilletEdgesAcrossBodies(bodies, feature.edges);
+  const body = bodies.get(bodyId) as Shape3D;
   try {
     const newBody =
       feature.kind === "fillet"
         ? body.fillet(feature.size, (finder) => finder.inList(matched))
         : body.chamfer(feature.size, (finder) => finder.inList(matched));
     body.delete();
-    return newBody;
+    bodies.set(bodyId, newBody);
   } finally {
     allEdges.forEach((e) => e.delete());
   }
 }
 
 /**
- * bodyの現在の面群から、shellフィーチャーが選択時に記録した面スナップショット(targets)を
- * 再解決する(Phase 25b)。resolveFilletEdges()と同じ2段階マッチング方針(resolveFaceGeometry()の
- * 「面ID一致優先→平面かつ法線一致+中心最近傍」判定を、複数面かつ同一面の重複マッチ不可という
- * 条件に拡張したもの)。
- * 1. 第一候補: face.hashCode(選択時点のfaceId)が完全一致する、未使用の面。
+ * 1ボディ分のshell対象面マッチング(Phase 27a: 複数ボディ横断マッチング用に、matchFilletEdgesInBody()と
+ * 同じ方針[resolveFaceGeometry()の「面ID一致優先→平面かつ法線一致+中心最近傍」判定を、複数面かつ
+ * 同一面の重複マッチ不可という条件に拡張]で、失敗時はnullを返す形にしたもの)。
+ * 1. 第一候補: face.hashCode(選択時点のfaceId)が完全一致する、未使用の面(距離0扱い)。
  * 2. フォールバック: 平面(isPlanar)かつ法線がほぼ一致(cos>FACE_NORMAL_COS_TOLERANCE)し、
  *    中心距離が最も近い(バウンディングボックス対角長のFACE_DISTANCE_TOLERANCE_RATIO以内)、未使用の面。
- * 3. どちらも失敗した場合はエラーを投げる(呼び出し側でallFacesを解放してから投げる)。
+ * 3. targetsのいずれか1つでもこのボディ内で解決できなければnullを返す(allFacesはこの関数内で
+ *    delete()まで済ませる)。
  *
- * 戻り値のmatched(targetsと同じ順序・長さ)とallFaces(bodyの全面、delete()の責務は呼び出し側)は
- * 同じFaceインスタンスを共有する。使用replicad API: Shape.faces / Face.hashCode / Face.geomType /
- * Face.center / Face.normalAt() / Shape.boundingBox。
+ * 戻り値のmatched(targetsと同じ順序・長さ)とallFaces(bodyの全面)は同じFaceインスタンスを共有する。
+ * 成功時、allFacesのdelete()責務は呼び出し側。totalDistは複数ボディ間の「最良マッチ」判定に使う。
  */
-function resolveShellFaces(body: Shape3D, targets: ShellFaceRef[]): { matched: Face[]; allFaces: Face[] } {
+function matchShellFacesInBody(
+  body: Shape3D,
+  targets: ShellFaceRef[],
+): { matched: Face[]; allFaces: Face[]; totalDist: number } | null {
   const allFaces = body.faces;
   const used = new Set<number>();
 
@@ -574,13 +682,16 @@ function resolveShellFaces(body: Shape3D, targets: ShellFaceRef[]): { matched: F
   const maxDist = diag * FACE_DISTANCE_TOLERANCE_RATIO;
 
   const matched: Face[] = [];
+  let totalDist = 0;
   for (const target of targets) {
     let matchIndex = -1;
+    let matchDist = 0;
 
     for (let i = 0; i < allFaces.length; i += 1) {
       if (used.has(i)) continue;
       if (allFaces[i].hashCode === target.faceId) {
         matchIndex = i;
+        matchDist = 0;
         break;
       }
     }
@@ -598,36 +709,65 @@ function resolveShellFaces(body: Shape3D, targets: ShellFaceRef[]): { matched: F
         bestDist = dist;
         matchIndex = i;
       }
+      matchDist = bestDist;
     }
 
     if (matchIndex === -1) {
       allFaces.forEach((f) => f.delete());
-      throw new Error("シェルの対象面を特定できませんでした。フィーチャーを作り直してください");
+      return null;
     }
     used.add(matchIndex);
     matched.push(allFaces[matchIndex]);
+    totalDist += matchDist;
   }
 
-  return { matched, allFaces };
+  return { matched, allFaces, totalDist };
 }
 
 /**
- * shellフィーチャーを現在のボディに適用し、新しいボディを返す(古いボディはこの関数内でdelete()する)。
+ * bodies(複数ボディ、Phase 27a)を横断してshellの対象面を解決し、最良マッチ(全targetsが解決でき、
+ * totalDistが最小)のボディを特定する。どのボディでも全targetsが解決できなければエラーを投げる。
+ */
+function resolveShellFacesAcrossBodies(
+  bodies: Map<FeatureId, Shape3D>,
+  targets: ShellFaceRef[],
+): { bodyId: FeatureId; matched: Face[]; allFaces: Face[] } {
+  let best: { bodyId: FeatureId; matched: Face[]; allFaces: Face[]; totalDist: number } | null = null;
+  for (const [bodyId, body] of bodies) {
+    const result = matchShellFacesInBody(body, targets);
+    if (!result) continue;
+    if (!best || result.totalDist < best.totalDist) {
+      if (best) best.allFaces.forEach((f) => f.delete());
+      best = { bodyId, matched: result.matched, allFaces: result.allFaces, totalDist: result.totalDist };
+    } else {
+      result.allFaces.forEach((f) => f.delete());
+    }
+  }
+  if (!best) {
+    throw new Error("シェルの対象面を特定できませんでした。フィーチャーを作り直してください");
+  }
+  return best;
+}
+
+/**
+ * shellフィーチャーを、全ボディ横断の面マッチング(resolveShellFacesAcrossBodies())で特定した
+ * 最良マッチのボディに適用する(Phase 27a。bodiesマップを直接書き換える)。
  * replicadの Shape3D#shell(thickness, finderFcn) は第2引数に「FaceFinderを受け取り、絞り込んだ
  * FaceFinderを返す関数」を渡すことで開口する面を絞り込める。ここではFaceFinder#inList()
- * (「渡したFace配列とisSame()な面のみを残す」フィルタ)にresolveShellFaces()で幾何マッチングした
- * 面をそのまま渡す。thicknessは正の値で、node_modules/replicad/dist/replicad.jsのshell()実装が
- * 内部で-thicknessをBRepOffsetAPI_MakeThickSolidへ渡すため、選択面を取り除いた残りの面から
- * 内側へthickness(mm)の肉厚を残す(ボディの外形寸法は変わらない)規約になっている。
- * 過大な厚み等でOCCTが構築に失敗した場合はshell()がそのままErrorをthrowし、呼び出し元の
- * evaluateDocument()のtry/catchでfeatureId付きエラーに変換される。
+ * (「渡したFace配列とisSame()な面のみを残す」フィルタ)に幾何マッチングした面をそのまま渡す。
+ * thicknessは正の値で、node_modules/replicad/dist/replicad.jsのshell()実装が内部で-thicknessを
+ * BRepOffsetAPI_MakeThickSolidへ渡すため、選択面を取り除いた残りの面から内側へthickness(mm)の
+ * 肉厚を残す(ボディの外形寸法は変わらない)規約になっている。過大な厚み等でOCCTが構築に失敗した
+ * 場合はshell()がそのままErrorをthrowし、呼び出し元のevaluateDocument()のtry/catchでfeatureId付き
+ * エラーに変換される。
  */
-function applyShell3D(body: Shape3D, feature: ShellFeature): Shape3D {
-  const { matched, allFaces } = resolveShellFaces(body, feature.faces);
+function applyShell3DToBodies(bodies: Map<FeatureId, Shape3D>, feature: ShellFeature): void {
+  const { bodyId, matched, allFaces } = resolveShellFacesAcrossBodies(bodies, feature.faces);
+  const body = bodies.get(bodyId) as Shape3D;
   try {
     const newBody = body.shell(feature.thickness, (finder) => finder.inList(matched));
     body.delete();
-    return newBody;
+    bodies.set(bodyId, newBody);
   } finally {
     allFaces.forEach((f) => f.delete());
   }
@@ -738,15 +878,16 @@ function orientLocalSolidToWorld(shape: Shape3D, position: Tuple3, axisDir: Tupl
 }
 
 /**
- * ねじフィーチャーを現在のボディに適用し、新しいボディを返す(古いボディはこの関数内でdelete()する、
- * Phase 25c)。配置面はShellFeatureと同様resolveFaceGeometry()で現在のボディから幾何マッチングして
- * 再解決する(featureId参照ではなく、直前までの「現在ボディ」に対して解決する)。
+ * ねじフィーチャーを、全ボディ横断の面マッチング(resolveFaceGeometryAcrossBodies())で特定した
+ * 最良マッチのボディに適用する(Phase 25c、Phase 27aで複数ボディ対応に変更。bodiesマップを
+ * 直接書き換える)。配置面はShellFeatureと同様、featureId参照ではなく直前までの各ボディに対して
+ * 幾何マッチングして解決する。
  * 雄(hand:"male")は呼び径の谷径円柱+実ねじ山リブ(buildMaleThreadSolidLocal)をfuseで追加する。
  * 雌(hand:"female")は規格の下穴径(呼び径−ピッチ)の円柱をcutする簡易表現にとどめる(v1では
  * 雌ねじの実ねじ山cutは評価時間が実用的でなくなることがスパイクで判明したため、下穴のみ)。
  */
-function applyThread(body: Shape3D, feature: ThreadFeature): Shape3D {
-  const resolved = resolveFaceGeometry(body, feature.face.faceId, feature.face.center, feature.face.normal);
+function applyThreadToBodies(bodies: Map<FeatureId, Shape3D>, feature: ThreadFeature): void {
+  const resolved = resolveFaceGeometryAcrossBodies(bodies, feature.face.faceId, feature.face.center, feature.face.normal);
   const basis = computeFacePlaneBasis(resolved.center, resolved.normal);
   const [u, v] = feature.position;
   const position: Tuple3 = [
@@ -759,6 +900,7 @@ function applyThread(body: Shape3D, feature: ThreadFeature): Shape3D {
     resolved.normal[1] * feature.direction,
     resolved.normal[2] * feature.direction,
   ];
+  const body = bodies.get(resolved.bodyId) as Shape3D;
 
   if (feature.hand === "male") {
     if (feature.length > MALE_THREAD_MAX_LENGTH) {
@@ -769,10 +911,11 @@ function applyThread(body: Shape3D, feature: ThreadFeature): Shape3D {
     try {
       const newBody = body.fuse(worldSolid);
       body.delete();
-      return newBody;
+      bodies.set(resolved.bodyId, newBody);
     } finally {
       worldSolid.delete();
     }
+    return;
   }
 
   // hand === "female": 下穴径の円柱をcutする簡易表現(実ねじ山は作らない)。
@@ -782,7 +925,7 @@ function applyThread(body: Shape3D, feature: ThreadFeature): Shape3D {
   try {
     const newBody = body.cut(worldHole);
     body.delete();
-    return newBody;
+    bodies.set(resolved.bodyId, newBody);
   } finally {
     worldHole.delete();
   }
@@ -982,49 +1125,68 @@ function revolveSketchFeature(
 }
 
 /**
- * extrude/revolve共通の「ボディへの適用(newBody/cut/add)」分岐(Phase 25b)。buildToolは
+ * bodiesマップの全ボディを1つのcompoundにまとめる(Phase 27a)。各ボディをclone()してから
+ * replicadのmakeCompound()に渡す(makeCompound()は渡した配列の各要素をdelete()して消費するため、
+ * bodiesマップ自体が保持する生存中のシェイプはこの関数呼び出し後も無傷のまま)。戻り値のdelete()の
+ * 責務は呼び出し側。単一ボディのみでも常にcompoundにラップする(呼び出し側の分岐を単純にするため。
+ * Compoundは他のShape3D同様mesh/faces/edges/boundingBox/blobSTL/blobSTEP等をサポートするため実害は無い)。
+ */
+function buildBodiesCompound(bodies: Map<FeatureId, Shape3D>): Shape3D {
+  const clones = Array.from(bodies.values(), (b) => b.clone());
+  return makeCompound(clones) as Shape3D;
+}
+
+/**
+ * bodiesマップの中で最後に作られたボディ(newBodyフィーチャーの評価順で最後)のfeatureIdを返す
+ * (Phase 27a、targetBodyId省略時の既定対象)。JSのMapはキーの挿入順を保持し、既存キーへの
+ * set()は順序を変えない(新しいキーのみ末尾に追加される)ため、bodies.keys()の最後の要素が
+ * 「最後に作られたボディ」と一致する(その後cut/add/fillet等で中身が更新されていても、キー自体は
+ * 動かないため常に正しい)。bodiesが空ならundefined。
+ */
+function lastBodyId(bodies: Map<FeatureId, Shape3D>): FeatureId | undefined {
+  let last: FeatureId | undefined;
+  for (const id of bodies.keys()) last = id;
+  return last;
+}
+
+/**
+ * extrude/revolve共通の「ボディへの適用(newBody/cut/add)」分岐(Phase 25b、Phase 27aで複数ボディ
+ * 対応に変更)。bodiesマップを直接書き換える: newBodyはfeatureIdをキーに新しいボディを追加する
+ * (既存ボディがあってもエラーにしない=単一ボディ制限は撤廃)。cut/addはtargetBodyId
+ * (省略時はlastBodyId()=最後に作られたボディ)が指すボディのみを書き換える。buildToolは
  * 実際にDrawingから立体を組み立てるクロージャ(extrudeSketchFeature()/revolveSketchFeature()を渡す)で、
- * newBody以外の場合にのみ呼ばれる(newBodyはbuildTool()の結果がそのまま新しいボディになる)。
- * 戻り値は新しいボディ(古いbody/toolはこの関数内でdelete()される)。
+ * newBody以外の場合にのみ呼ばれる。
  */
 function applyBodyOperation(
-  body: Shape3D | null,
+  bodies: Map<FeatureId, Shape3D>,
+  featureId: FeatureId,
   operation: "newBody" | "cut" | "add",
+  targetBodyId: FeatureId | undefined,
   buildTool: () => Shape3D,
-): Shape3D {
+): void {
   if (operation === "newBody") {
-    if (body) {
-      throw new Error("単一ボディのみ対応です(既にボディが存在します)");
-    }
-    return buildTool();
+    bodies.set(featureId, buildTool());
+    return;
   }
-  if (operation === "cut") {
-    if (!body) {
-      throw new Error("カット対象のボディがありません");
-    }
-    const tool = buildTool();
-    let cutResult: Shape3D;
-    try {
-      cutResult = body.cut(tool);
-    } finally {
-      tool.delete();
-    }
-    body.delete();
-    return cutResult;
+
+  const resolvedTargetId = targetBodyId ?? lastBodyId(bodies);
+  if (resolvedTargetId === undefined) {
+    throw new Error(operation === "cut" ? "カット対象のボディがありません" : "追加対象のボディがありません");
   }
-  // operation === "add"
-  if (!body) {
-    throw new Error("追加対象のボディがありません");
+  const target = bodies.get(resolvedTargetId);
+  if (!target) {
+    throw new Error(`対象ボディ(${resolvedTargetId})が見つかりません`);
   }
+
   const tool = buildTool();
-  let fuseResult: Shape3D;
+  let result: Shape3D;
   try {
-    fuseResult = body.fuse(tool);
+    result = operation === "cut" ? target.cut(tool) : target.fuse(tool);
   } finally {
     tool.delete();
   }
-  body.delete();
-  return fuseResult;
+  target.delete();
+  bodies.set(resolvedTargetId, result);
 }
 
 /**
@@ -1039,15 +1201,18 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
   // 各スケッチの解決済みワールド基底(sketchId -> basis、Phase 25b)。回転体フィーチャーが
   // 回転軸(スケッチローカルX/Y)のワールド方向・原点を求めるために使う。
   const sketchBasisById = new Map<FeatureId, PlaneBasis>();
-  // 各extrudeフィーチャー評価直後のボディのスナップショット(featureId -> クローン)。
-  // 後続のface参照スケッチが面を再解決するために使う。Shape.clone()はOCCTの参照カウント
-  // ベースの軽量コピーであり、live側のbodyを delete() してもスナップショット側は無効化されない
-  // (逆も同様)。評価終了時(成功/失敗いずれでも)にすべて delete() する。
+  // 各フィーチャー(ボディを作る/変更するもの)評価直後の「全ボディのcompound」スナップショット
+  // (featureId -> クローンベースのcompound、Phase 27a)。後続のface参照スケッチが面を再解決する
+  // ために使う。buildBodiesCompound()はbodiesマップの各シェイプをclone()してから合成するため、
+  // live側のbodiesを delete() してもスナップショット側は無効化されない(逆も同様)。
+  // 評価終了時(成功/失敗いずれでも)にすべて delete() する。
   const snapshots = new Map<FeatureId, Shape3D>();
-  // 各スケッチが評価された時点の「現在ボディ」から抽出したスケッチ平面上の直線エッジ(Phase 22)。
-  // その時点でボディが存在しない(押し出しがまだ無い)スケッチはエントリを作らない。
+  // 各スケッチが評価された時点の「現在の全ボディ」から抽出したスケッチ平面上の直線エッジ(Phase 22)。
+  // その時点でボディが1つも存在しない(押し出し/回転体がまだ無い)スケッチはエントリを作らない。
   const referenceEdgesById = new Map<FeatureId, ReferenceEdgeLine[]>();
-  let body: Shape3D | null = null;
+  // 複数ボディ管理(Phase 27a): キー=そのボディを作ったnewBodyフィーチャーのid。
+  // 単一の`body`変数を廃止し、常にこのMap経由でボディを読み書きする。
+  const bodies = new Map<FeatureId, Shape3D>();
   let currentFeatureId: FeatureId | undefined;
 
   try {
@@ -1074,8 +1239,13 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
           basis = facePlaneBasis(resolved.center, resolved.normal);
         }
         sketchBasisById.set(feature.id, basis);
-        if (body) {
-          referenceEdgesById.set(feature.id, extractReferenceEdges(body, basis));
+        if (bodies.size > 0) {
+          const combined = buildBodiesCompound(bodies);
+          try {
+            referenceEdgesById.set(feature.id, extractReferenceEdges(combined, basis));
+          } finally {
+            combined.delete();
+          }
         }
         validateSketchPolygonCorners(feature);
         sketches.set(feature.id, feature);
@@ -1083,29 +1253,29 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
       }
 
       if (feature.type === "fillet3d") {
-        if (!body) {
+        if (bodies.size === 0) {
           throw new Error("フィレット/面取りの対象となるボディがありません");
         }
-        body = applyFillet3D(body, feature);
-        snapshots.set(feature.id, body.clone());
+        applyFillet3DToBodies(bodies, feature);
+        snapshots.set(feature.id, buildBodiesCompound(bodies));
         continue;
       }
 
       if (feature.type === "shell") {
-        if (!body) {
+        if (bodies.size === 0) {
           throw new Error("シェルの対象となるボディがありません");
         }
-        body = applyShell3D(body, feature);
-        snapshots.set(feature.id, body.clone());
+        applyShell3DToBodies(bodies, feature);
+        snapshots.set(feature.id, buildBodiesCompound(bodies));
         continue;
       }
 
       if (feature.type === "thread") {
-        if (!body) {
+        if (bodies.size === 0) {
           throw new Error("ねじの対象となるボディがありません");
         }
-        body = applyThread(body, feature);
-        snapshots.set(feature.id, body.clone());
+        applyThreadToBodies(bodies, feature);
+        snapshots.set(feature.id, buildBodiesCompound(bodies));
         continue;
       }
 
@@ -1114,10 +1284,10 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
         if (!sketch) {
           throw new Error(`参照先のスケッチ(${feature.sketchId})が見つかりません`);
         }
-        body = applyBodyOperation(body, feature.operation, () =>
+        applyBodyOperation(bodies, feature.id, feature.operation, feature.targetBodyId, () =>
           revolveSketchFeature(sketch, feature.axis, feature.angle, resolvedFacePlanes, sketchBasisById),
         );
-        snapshots.set(feature.id, body.clone());
+        snapshots.set(feature.id, buildBodiesCompound(bodies));
         continue;
       }
 
@@ -1126,13 +1296,13 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
       if (!sketch) {
         throw new Error(`参照先のスケッチ(${feature.sketchId})が見つかりません`);
       }
-      body = applyBodyOperation(body, feature.operation, () =>
+      applyBodyOperation(bodies, feature.id, feature.operation, feature.targetBodyId, () =>
         extrudeSketchFeature(sketch, feature.distance, feature.direction, resolvedFacePlanes),
       );
-      snapshots.set(feature.id, body.clone());
+      snapshots.set(feature.id, buildBodiesCompound(bodies));
     }
   } catch (err) {
-    if (body) body.delete();
+    for (const b of bodies.values()) b.delete();
     for (const snap of snapshots.values()) snap.delete();
     return {
       ok: false,
@@ -1143,10 +1313,15 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
 
   for (const snap of snapshots.values()) snap.delete();
 
-  // body===null(押し出しフィーチャーが1つも無い)は、空ドキュメント/スケッチのみの
+  // bodies.size===0(newBodyフィーチャーが1つも無い)は、空ドキュメント/スケッチのみの
   // ドキュメントとして正常なケースである(Phase 13)。エラーにはしない。
   // ここに到達した時点でループは最後まで例外なく完走しているため、
   // sketchesに登録された全スケッチ(world/faceいずれも)の平面基底が解決済みである。
+  // 最終結果は全ボディのcompound(単一ボディでも常にcompoundにラップする、Phase 27a)。
+  // buildBodiesCompound()はクローンを合成するため、その後にbodies自体は個別にdelete()する。
+  const shape = bodies.size > 0 ? buildBodiesCompound(bodies) : null;
+  for (const b of bodies.values()) b.delete();
+
   const sketchPlanes: SketchPlaneInfo[] = [];
   for (const [sketchId, sketch] of sketches) {
     if (sketch.plane.kind === "world") {
@@ -1164,5 +1339,5 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
     referenceEdges.push({ sketchId, edges });
   }
 
-  return { ok: true, shape: body, sketchPlanes, referenceEdges };
+  return { ok: true, shape, sketchPlanes, referenceEdges };
 }

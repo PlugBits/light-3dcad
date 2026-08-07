@@ -411,6 +411,31 @@ describe("patchExtrudeFeature", () => {
     expect(found.distance).toBe(50);
     expect(found.direction).toBe(-1);
   });
+
+  it("targetBodyId(Phase 27a複数ボディ対応)を設定・解除できる", () => {
+    const { doc, sketch } = makeRectSketchDoc();
+    const { doc: doc2, feature: extrude1 } = addExtrudeFeature(doc, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+    const { doc: doc3, feature: extrude2 } = addExtrudeFeature(doc2, {
+      name: "Extrude2",
+      sketchId: sketch.id,
+      distance: 5,
+      direction: 1,
+      operation: "cut",
+    });
+    expect((findFeature(doc3, extrude2.id) as ExtrudeFeature).targetBodyId).toBeUndefined();
+
+    const withTarget = patchExtrudeFeature(doc3, extrude2.id, { targetBodyId: extrude1.id });
+    expect((findFeature(withTarget, extrude2.id) as ExtrudeFeature).targetBodyId).toBe(extrude1.id);
+
+    const cleared = patchExtrudeFeature(withTarget, extrude2.id, { targetBodyId: undefined });
+    expect((findFeature(cleared, extrude2.id) as ExtrudeFeature).targetBodyId).toBeUndefined();
+  });
 });
 
 describe("validateFeature / validateDocument", () => {
@@ -708,6 +733,89 @@ describe("validateFeature / validateDocument", () => {
       [],
     );
     expect(errors.some((e) => e.message.includes("存在しません"))).toBe(true);
+  });
+
+  describe("targetBodyId(Phase 27a複数ボディ対応)", () => {
+    const sketchFeature: SketchFeature = { type: "sketch", id: "s1", name: "S", plane: { kind: "world", plane: "XY" }, entities: [] };
+    const newBodyExtrude: ExtrudeFeature = {
+      type: "extrude",
+      id: "e1",
+      name: "Extrude1",
+      sketchId: "s1",
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    };
+
+    it("targetBodyIdが先行するnewBodyフィーチャーを指せばエラーなし", () => {
+      const cutExtrude: ExtrudeFeature = {
+        type: "extrude",
+        id: "e2",
+        name: "Cut1",
+        sketchId: "s1",
+        distance: 5,
+        direction: 1,
+        operation: "cut",
+        targetBodyId: "e1",
+      };
+      const errors = validateFeature(cutExtrude, [sketchFeature, newBodyExtrude, cutExtrude]);
+      expect(errors).toEqual([]);
+    });
+
+    it("targetBodyIdが存在しないフィーチャーを指すとエラー", () => {
+      const cutExtrude: ExtrudeFeature = {
+        type: "extrude",
+        id: "e2",
+        name: "Cut1",
+        sketchId: "s1",
+        distance: 5,
+        direction: 1,
+        operation: "cut",
+        targetBodyId: "does-not-exist",
+      };
+      const errors = validateFeature(cutExtrude, [sketchFeature, newBodyExtrude, cutExtrude]);
+      expect(errors.some((e) => e.message.includes("対象ボディ"))).toBe(true);
+    });
+
+    it("targetBodyIdがnewBody以外の操作のフィーチャーを指すとエラー", () => {
+      const addExtrude: ExtrudeFeature = {
+        type: "extrude",
+        id: "e2",
+        name: "Add1",
+        sketchId: "s1",
+        distance: 5,
+        direction: 1,
+        operation: "add",
+        targetBodyId: "e1",
+      };
+      const cutExtrude: ExtrudeFeature = {
+        type: "extrude",
+        id: "e3",
+        name: "Cut1",
+        sketchId: "s1",
+        distance: 5,
+        direction: 1,
+        operation: "cut",
+        targetBodyId: "e2", // e2はnewBodyではなくadd
+      };
+      const errors = validateFeature(cutExtrude, [sketchFeature, newBodyExtrude, addExtrude, cutExtrude]);
+      expect(errors.some((e) => e.message.includes("対象ボディ"))).toBe(true);
+    });
+
+    it("targetBodyIdが自分より後ろのフィーチャーを指すとエラー", () => {
+      const cutExtrude: ExtrudeFeature = {
+        type: "extrude",
+        id: "e0",
+        name: "Cut1",
+        sketchId: "s1",
+        distance: 5,
+        direction: 1,
+        operation: "cut",
+        targetBodyId: "e1", // e1はcutExtrudeより後ろに登場する
+      };
+      const errors = validateFeature(cutExtrude, [sketchFeature, cutExtrude, newBodyExtrude]);
+      expect(errors.some((e) => e.message.includes("先行する"))).toBe(true);
+    });
   });
 
   it("operationが\"add\"でもエラーにならない", () => {

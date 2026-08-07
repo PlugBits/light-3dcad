@@ -1,6 +1,6 @@
 // 押し出しフィーチャー選択時の編集パネル。対象スケッチ・距離・方向・操作を編集する。
 import { patchExtrudeFeature } from "../model/document";
-import type { CadDocument, ExtrudeFeature, SketchFeature } from "../model/types";
+import type { CadDocument, ExtrudeFeature, RevolveFeature, SketchFeature } from "../model/types";
 import { useCadStore } from "../state/store";
 
 export function ExtrudeEditor({ extrude, doc }: { extrude: ExtrudeFeature; doc: CadDocument }) {
@@ -8,7 +8,21 @@ export function ExtrudeEditor({ extrude, doc }: { extrude: ExtrudeFeature; doc: 
 
   const sketches = doc.features.filter((f): f is SketchFeature => f.type === "sketch");
 
-  function patch(p: Partial<Pick<ExtrudeFeature, "name" | "sketchId" | "distance" | "direction" | "operation">>) {
+  // 対象ボディ選択(Phase 27a複数ボディ対応)。このフィーチャーより前に存在するnewBodyフィーチャー
+  // (extrude/revolve)のみを候補にする(targetBodyIdは先行するボディのみ参照できるため)。
+  const featureIndex = doc.features.findIndex((f) => f.id === extrude.id);
+  const precedingFeatures = featureIndex === -1 ? doc.features : doc.features.slice(0, featureIndex);
+  const bodyFeatures = precedingFeatures.filter(
+    (f): f is ExtrudeFeature | RevolveFeature =>
+      (f.type === "extrude" || f.type === "revolve") && f.operation === "newBody",
+  );
+  // 削除等でtargetBodyIdが候補から外れていても選択操作で復帰できるよう、その場合も選択欄を出す。
+  const showTargetBodySelect =
+    extrude.operation !== "newBody" && (bodyFeatures.length >= 2 || extrude.targetBodyId !== undefined);
+
+  function patch(
+    p: Partial<Pick<ExtrudeFeature, "name" | "sketchId" | "distance" | "direction" | "operation" | "targetBodyId">>,
+  ) {
     updateDocument((d) => patchExtrudeFeature(d, extrude.id, p));
   }
 
@@ -80,6 +94,24 @@ export function ExtrudeEditor({ extrude, doc }: { extrude: ExtrudeFeature; doc: 
           <option value="add">Add</option>
         </select>
       </label>
+
+      {showTargetBodySelect && (
+        <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
+          対象ボディ
+          <select
+            value={extrude.targetBodyId ?? ""}
+            data-testid="extrude-target-body-select"
+            onChange={(e) => patch({ targetBodyId: e.target.value === "" ? undefined : e.target.value })}
+          >
+            <option value="">(最新のボディ)</option>
+            {bodyFeatures.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
     </div>
   );
 }

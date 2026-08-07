@@ -169,6 +169,40 @@ function findSegmentById(segments: readonly SketchSegment[], id: string): Sketch
   return segments.find((s) => s.id === id);
 }
 
+/**
+ * extrude/revolveのtargetBodyId(Phase 27a複数ボディ対応)を検証する。指定されていなければ
+ * (undefined)何もしない(省略時は「最後に作られたボディ」を自動的に対象にするため、評価時に
+ * 常に有効)。指定されている場合は、参照先が「先行する(=このフィーチャーより前に登場する)
+ * newBody操作のextrude/revolveフィーチャー」であることを要求する。実際のボディ解決・
+ * エラー化はsrc/worker/evaluator.tsのapplyBodyOperation()が評価時に行うため、ここでの
+ * バリデーションは主にプロジェクトファイルの整合性チェック(validateDocument経由)向け
+ * (patchExtrudeFeature等によるライブ編集のエラー表示はevaluator.tsの実行時エラーで賄う)。
+ */
+function validateTargetBodyId(
+  featureId: FeatureId,
+  targetBodyId: FeatureId | undefined,
+  allFeatures: readonly Feature[],
+): ValidationError[] {
+  if (targetBodyId === undefined) return [];
+  const idx = allFeatures.findIndex((f) => f.id === featureId);
+  const targetIdx = allFeatures.findIndex((f) => f.id === targetBodyId);
+  const target = targetIdx >= 0 ? allFeatures[targetIdx] : undefined;
+  const isNewBodyFeature =
+    !!target && (target.type === "extrude" || target.type === "revolve") && target.operation === "newBody";
+  if (!isNewBodyFeature) {
+    return [
+      {
+        featureId,
+        message: `対象ボディ(${targetBodyId})が見つかりません(New Bodyフィーチャーではありません)`,
+      },
+    ];
+  }
+  if (idx >= 0 && targetIdx >= idx) {
+    return [{ featureId, message: `対象ボディ(${targetBodyId})は先行するフィーチャーである必要があります` }];
+  }
+  return [];
+}
+
 /** 拘束が指す点参照(PointRef)のsegmentIdが存在するかを検証する。 */
 function validatePointRef(
   ref: PointRef,
@@ -376,6 +410,7 @@ export function validateFeature(feature: Feature, allFeatures: readonly Feature[
     } else if (referenced.type !== "sketch") {
       errors.push({ featureId: feature.id, message: `参照先(${feature.sketchId})はスケッチではありません` });
     }
+    errors.push(...validateTargetBodyId(feature.id, feature.targetBodyId, allFeatures));
   } else if (feature.type === "fillet3d") {
     if (!isPositiveFiniteNumber(feature.size)) {
       errors.push({ featureId: feature.id, message: "フィレット/面取りのサイズは正の数である必要があります" });
@@ -406,6 +441,7 @@ export function validateFeature(feature: Feature, allFeatures: readonly Feature[
     } else if (referenced.type !== "sketch") {
       errors.push({ featureId: feature.id, message: `参照先(${feature.sketchId})はスケッチではありません` });
     }
+    errors.push(...validateTargetBodyId(feature.id, feature.targetBodyId, allFeatures));
   } else if (feature.type === "thread") {
     if (!isPositiveFiniteNumber(feature.length)) {
       errors.push({ featureId: feature.id, message: "ねじの長さは正の数である必要があります" });

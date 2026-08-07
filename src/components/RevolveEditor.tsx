@@ -1,6 +1,6 @@
 // 回転体(Revolve)フィーチャー選択時の編集パネル。ExtrudeEditorを踏襲する(Phase 25b)。
 import { patchRevolveFeature } from "../model/document";
-import type { CadDocument, RevolveFeature, SketchFeature } from "../model/types";
+import type { CadDocument, ExtrudeFeature, RevolveFeature, SketchFeature } from "../model/types";
 import { useCadStore } from "../state/store";
 
 export function RevolveEditor({ revolve, doc }: { revolve: RevolveFeature; doc: CadDocument }) {
@@ -8,7 +8,20 @@ export function RevolveEditor({ revolve, doc }: { revolve: RevolveFeature; doc: 
 
   const sketches = doc.features.filter((f): f is SketchFeature => f.type === "sketch");
 
-  function patch(p: Partial<Pick<RevolveFeature, "name" | "sketchId" | "axis" | "angle" | "operation">>) {
+  // 対象ボディ選択(Phase 27a複数ボディ対応)。ExtrudeEditorと同じ方針(このフィーチャーより前の
+  // newBodyフィーチャーのみを候補にし、削除等で候補から外れた既存targetBodyIdがあれば選択欄を残す)。
+  const featureIndex = doc.features.findIndex((f) => f.id === revolve.id);
+  const precedingFeatures = featureIndex === -1 ? doc.features : doc.features.slice(0, featureIndex);
+  const bodyFeatures = precedingFeatures.filter(
+    (f): f is ExtrudeFeature | RevolveFeature =>
+      (f.type === "extrude" || f.type === "revolve") && f.operation === "newBody",
+  );
+  const showTargetBodySelect =
+    revolve.operation !== "newBody" && (bodyFeatures.length >= 2 || revolve.targetBodyId !== undefined);
+
+  function patch(
+    p: Partial<Pick<RevolveFeature, "name" | "sketchId" | "axis" | "angle" | "operation" | "targetBodyId">>,
+  ) {
     updateDocument((d) => patchRevolveFeature(d, revolve.id, p));
   }
 
@@ -83,6 +96,24 @@ export function RevolveEditor({ revolve, doc }: { revolve: RevolveFeature; doc: 
           <option value="add">Add</option>
         </select>
       </label>
+
+      {showTargetBodySelect && (
+        <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
+          対象ボディ
+          <select
+            value={revolve.targetBodyId ?? ""}
+            data-testid="revolve-target-body-select"
+            onChange={(e) => patch({ targetBodyId: e.target.value === "" ? undefined : e.target.value })}
+          >
+            <option value="">(最新のボディ)</option>
+            {bodyFeatures.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
     </div>
   );
 }
