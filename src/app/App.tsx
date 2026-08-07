@@ -19,6 +19,7 @@ import {
   addSketchSegments,
   applySegmentCornerToSketch,
   convertRectangleToPolygon,
+  extendSketchSegmentAtPoint,
   findFeature,
   getDependentFeatureIds,
   patchPartInstanceFeature,
@@ -151,6 +152,7 @@ export default function App() {
   const autosaveRestoreSkipped = useCadStore((s) => s.autosaveRestoreSkipped);
   const retryAutosaveRestore = useCadStore((s) => s.retryAutosaveRestore);
   const selectedFeatureId = useCadStore((s) => s.selectedFeatureId);
+  const selectedEntityId = useCadStore((s) => s.selectedEntityId);
   const selectedFace = useCadStore((s) => s.selectedFace);
   const showSketches = useCadStore((s) => s.showSketches);
   const exporting = useCadStore((s) => s.exporting);
@@ -261,6 +263,9 @@ export default function App() {
   const anyReselectActive = !!(edgeReselectTargetId || shellReselectTargetId || threadReselectTargetId || mateReselectTargetId);
   // トリムツール(未選択はfalse、Phase 19b)。
   const [trimTool, setTrimTool] = useState(false);
+  // 延長ツール(未選択はfalse、Phase 31b)。トリムの逆: 直線セグメントの近い側の端点を、最初に交わる
+  // 相手(他のsegments・entities輪郭・参照エッジ)まで伸ばす。
+  const [extendTool, setExtendTool] = useState(false);
   // 寸法ツール(未選択はfalse、Phase 20b)。segmentをクリックしてlength/radius/distance拘束を作成する。
   const [dimensionTool, setDimensionTool] = useState(false);
   // 寸法ツールがヒット対象を確定した後に表示する値入力ポップアップ(未表示はnull、Phase 20b)。
@@ -335,6 +340,11 @@ export default function App() {
         // 基準平面クリック(Phase 13): その平面で新規スケッチを作り、選択状態にする。
         useCadStore.getState().addSketch(plane);
       },
+      (sketchId, targetId) => {
+        // ツール未使用時のスケッチ線直接クリック(Phase 31b): そのスケッチを選択し、
+        // クリックしたentity/segmentを強調+SketchEditorパネルへ自動スクロールする。
+        useCadStore.getState().selectSketchEntity(sketchId, targetId);
+      },
     );
     viewerRef.current = viewer;
     return () => {
@@ -400,10 +410,10 @@ export default function App() {
     return overlays;
   }, [doc, sketchPlanes]);
 
-  // オーバーレイ入力・選択スケッチ・表示トグルが変わるたびにビューアへ反映する。
+  // オーバーレイ入力・選択スケッチ・表示トグル・選択中エンティティが変わるたびにビューアへ反映する。
   useEffect(() => {
-    viewerRef.current?.setSketchOverlay(sketchOverlays, selectedFeatureId, showSketches);
-  }, [sketchOverlays, selectedFeatureId, showSketches]);
+    viewerRef.current?.setSketchOverlay(sketchOverlays, selectedFeatureId, showSketches, selectedEntityId);
+  }, [sketchOverlays, selectedFeatureId, showSketches, selectedEntityId]);
 
   // 選択中の面が再評価後のfaceInfoに存在しなくなった場合(トポロジカルネーミングのずれ等)は
   // 選択状態をクリアする。
@@ -427,13 +437,16 @@ export default function App() {
     if (trimTool && selectedFeatureId !== drawingSketchId) {
       viewerRef.current?.cancelTrimTool();
     }
+    if (extendTool && selectedFeatureId !== drawingSketchId) {
+      viewerRef.current?.cancelExtendTool();
+    }
     if (dimensionTool && selectedFeatureId !== drawingSketchId) {
       viewerRef.current?.cancelDimensionTool();
     }
     if (constraintTool && selectedFeatureId !== drawingSketchId) {
       viewerRef.current?.cancelConstraintTool();
     }
-  }, [activeTool, cornerTool, trimTool, dimensionTool, constraintTool, selectedFeatureId, drawingSketchId]);
+  }, [activeTool, cornerTool, trimTool, extendTool, dimensionTool, constraintTool, selectedFeatureId, drawingSketchId]);
 
   // 参照切れ再選択UI(Phase 29b): 再選択モード中にフィーチャーツリーの選択が他のフィーチャーへ
   // 移った場合は、対応するビューアツールをキャンセルする(元の参照のまま、Escキャンセルと同じ経路)。
@@ -471,6 +484,17 @@ export default function App() {
       viewerRef.current?.updateTrimSegments(feature.segments ?? [], feature.entities ?? []);
     }
   }, [trimTool, doc, selectedFeatureId]);
+
+  // 延長ツール中、対象スケッチのsegments/entities/参照エッジが変わった場合(延長適用・アンドゥ等)は
+  // ヒット判定対象を最新化する(Phase 31b)。
+  useEffect(() => {
+    if (!extendTool) return;
+    const feature = selectedFeatureId ? findFeature(doc, selectedFeatureId) : undefined;
+    if (feature?.type === "sketch") {
+      const edges = referenceEdges.find((r) => r.sketchId === feature.id)?.edges ?? [];
+      viewerRef.current?.updateExtendSegments(feature.segments ?? [], feature.entities ?? [], edges);
+    }
+  }, [extendTool, doc, selectedFeatureId, referenceEdges]);
 
   // 寸法ツール中、対象スケッチのsegments/entitiesが変わった場合(拘束適用・entity直接更新・アンドゥ等)は
   // ヒット判定対象を最新化する(Phase 20b、Phase 21でentitiesも対象に追加)。
@@ -843,7 +867,7 @@ export default function App() {
 
   /** 指定ツールのボタンをdisabledにすべきか(他のツールが実行中、または対象スケッチ平面が未確定)。 */
   function isToolDisabled(tool: Exclude<DrawingTool, null>): boolean {
-    if (cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
+    if (cornerTool || trimTool || extendTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
     if (activeTool) return activeTool !== tool;
     return !selectedSketchPlane;
   }
@@ -898,7 +922,7 @@ export default function App() {
 
   /** フィレット/面取りボタンをdisabledにすべきか(他の作図ツール実行中、または対象スケッチ平面が未確定)。 */
   function isCornerToolDisabled(kind: "fillet" | "chamfer"): boolean {
-    if (activeTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
+    if (activeTool || trimTool || extendTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
     if (cornerTool) return cornerTool !== kind;
     return !selectedSketchPlane;
   }
@@ -1028,7 +1052,7 @@ export default function App() {
 
   /** シェルボタンをdisabledにすべきか(他のツール実行中、またはボディが存在しない)。 */
   function isShellToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
+    if (activeTool || cornerTool || trimTool || extendTool || dimensionTool || constraintTool || edgeTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
     if (shellTool) return false;
     return !hasBody;
   }
@@ -1096,7 +1120,7 @@ export default function App() {
 
   /** ねじボタンをdisabledにすべきか(他のツール実行中、またはボディが存在しない)。 */
   function isThreadToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || partDragTool || mateTool || anyReselectActive) return true;
+    if (activeTool || cornerTool || trimTool || extendTool || dimensionTool || constraintTool || edgeTool || shellTool || partDragTool || mateTool || anyReselectActive) return true;
     if (threadTool) return false;
     return !hasBody;
   }
@@ -1146,7 +1170,7 @@ export default function App() {
 
   /** 部品移動ボタンをdisabledにすべきか(他のツール実行中、または部品[partInstance]が1つも無い)。 */
   function isPartDragToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || mateTool || anyReselectActive) return true;
+    if (activeTool || cornerTool || trimTool || extendTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || mateTool || anyReselectActive) return true;
     if (partDragTool) return false;
     return !doc.features.some((f) => f.type === "partInstance");
   }
@@ -1229,7 +1253,7 @@ export default function App() {
 
   /** 合致ボタンをdisabledにすべきか(他のツール実行中、または部品[partInstance]と他ボディの組み合わせが無い)。 */
   function isMateToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || anyReselectActive) {
+    if (activeTool || cornerTool || trimTool || extendTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || anyReselectActive) {
       return true;
     }
     if (mateTool) return false;
@@ -1316,7 +1340,7 @@ export default function App() {
 
   /** 干渉チェックボタンをdisabledにすべきか(他のツール実行中、またはボディが2個未満)。 */
   function isInterferenceCheckDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || partDragTool || threadTool || mateTool || anyReselectActive) return true;
+    if (activeTool || cornerTool || trimTool || extendTool || dimensionTool || constraintTool || edgeTool || shellTool || partDragTool || threadTool || mateTool || anyReselectActive) return true;
     return bodyCount < 2;
   }
 
@@ -1368,8 +1392,61 @@ export default function App() {
 
   /** トリムボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isTrimToolDisabled(): boolean {
-    if (activeTool || cornerTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
+    if (activeTool || cornerTool || extendTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
     if (trimTool) return false;
+    return !selectedSketchPlane;
+  }
+
+  /**
+   * 延長ツール(Phase 31b、トリムの逆)を開始する。ビューア上で直線セグメントの近い側の端点付近を
+   * クリックすると、その端点を最初に交わる相手(他のsegments・entities輪郭・参照エッジ)まで伸ばす
+   * (実際のextendSegmentAtPoint()適用はここで行う。onExtendClickはstartExtendTool呼び出し時に
+   * 一度だけ渡すコールバックのため、最新のドキュメントはgetState()から読む)。延長で動く端点に
+   * 一致拘束が付いている場合は矛盾しうるため、その拘束を削除してから延長し、トースト通知する
+   * (src/model/document.tsのextendSketchSegmentAtPoint()参照)。
+   */
+  function handleStartExtendTool() {
+    if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
+    const sketchId = selectedFeature.id;
+    const initialReferenceEdges = referenceEdges.find((r) => r.sketchId === sketchId)?.edges ?? [];
+    viewerRef.current.startExtendTool(
+      selectedSketchPlane,
+      selectedFeature.segments ?? [],
+      {
+        onExtendClick: (targetId, clickPoint) => {
+          const currentReferenceEdges = useCadStore.getState().referenceEdges.find((r) => r.sketchId === sketchId)?.edges ?? [];
+          let removedCoincidentConstraint = false;
+          useCadStore.getState().updateDocument((d) => {
+            const feature = findFeature(d, sketchId);
+            if (!feature || feature.type !== "sketch") return d;
+            const result = extendSketchSegmentAtPoint(d, sketchId, targetId, clickPoint, currentReferenceEdges);
+            removedCoincidentConstraint = result.removedCoincidentConstraint;
+            return result.doc;
+          });
+          if (removedCoincidentConstraint) {
+            showTransientMessage("延長した端点の一致拘束を解除しました");
+          }
+        },
+        onCancel: () => {
+          setExtendTool(false);
+          setDrawingSketchId(null);
+        },
+      },
+      selectedFeature.entities ?? [],
+      initialReferenceEdges,
+    );
+    setDrawingSketchId(sketchId);
+    setExtendTool(true);
+  }
+
+  function handleCancelExtendTool() {
+    viewerRef.current?.cancelExtendTool();
+  }
+
+  /** 延長ボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
+  function isExtendToolDisabled(): boolean {
+    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
+    if (extendTool) return false;
     return !selectedSketchPlane;
   }
 
@@ -1546,7 +1623,7 @@ export default function App() {
 
   /** 寸法ツールボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isDimensionToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
+    if (activeTool || cornerTool || trimTool || extendTool || constraintTool || edgeTool || shellTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
     if (dimensionTool) return false;
     return !selectedSketchPlane;
   }
@@ -1720,14 +1797,14 @@ export default function App() {
 
   /** 拘束ツールボタンをdisabledにすべきか(他のツール実行中、または対象スケッチ平面が未確定)。 */
   function isConstraintToolDisabled(): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || edgeTool || shellTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
+    if (activeTool || cornerTool || trimTool || extendTool || dimensionTool || edgeTool || shellTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
     if (constraintTool) return false;
     return !selectedSketchPlane;
   }
 
   /** 3Dフィレット/面取りボタンをdisabledにすべきか(他のツール実行中、またはボディが無い)。 */
   function isEdgeToolDisabled(kind: "fillet" | "chamfer"): boolean {
-    if (activeTool || cornerTool || trimTool || dimensionTool || constraintTool || shellTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
+    if (activeTool || cornerTool || trimTool || extendTool || dimensionTool || constraintTool || shellTool || threadTool || partDragTool || mateTool || anyReselectActive) return true;
     if (edgeTool) return edgeTool !== kind;
     return !hasBody;
   }
@@ -2057,6 +2134,16 @@ export default function App() {
                 </option>
               ))}
             </select>
+            <button
+              type="button"
+              data-testid="btn-extend"
+              className={extendTool ? "toolbar-btn-active" : undefined}
+              onClick={extendTool ? handleCancelExtendTool : handleStartExtendTool}
+              disabled={isExtendToolDisabled()}
+              title="直線セグメントの近い側の端点をホバーし、最初に交わる相手まで延長します(緑色プレビューが延長区間、Escで終了)"
+            >
+              {extendTool ? "延長キャンセル(Esc)" : "延長"}
+            </button>
           </div>
 
           <div className="toolbar-group">
@@ -2375,6 +2462,11 @@ export default function App() {
               削除したい区間をクリック
             </span>
           )}
+          {extendTool && (
+            <span data-testid="extend-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
+              延長したい線分の端点付近をクリック(緑色プレビューが延長区間)
+            </span>
+          )}
           {dimensionTool && (
             <span data-testid="dimension-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
               クリックで長さ/半径/距離を指定
@@ -2658,8 +2750,8 @@ export default function App() {
               basis={selectedSketchPlane}
               viewerRef={viewerRef}
               // 寸法ツール中(dimensionTool)は既存の寸法線・ラベルを隠さない(むしろ見えているべき、
-              // UI改善対応)。線分/矩形/円等の作図ツール・フィレット/面取り・トリムの間は従来通り隠す。
-              visible={showSketches && !activeTool && !cornerTool && !trimTool && !constraintTool && !edgeTool}
+              // UI改善対応)。線分/矩形/円等の作図ツール・フィレット/面取り・トリム・延長の間は従来通り隠す。
+              visible={showSketches && !activeTool && !cornerTool && !trimTool && !extendTool && !constraintTool && !edgeTool}
               onConflictRollback={showTransientMessage}
             />
           )}

@@ -1,7 +1,7 @@
 // スケッチフィーチャー選択時の編集パネル。矩形/円/多角形エンティティの追加(多角形は描画モード)・
 // 数値編集・削除を行う。多角形は頂点ごとのフィレット/面取り(コーナー)編集も提供する(Phase 11)。
 // 各エンティティは「分解」で等価なsegments(線分・円弧)に変換できる(Phase 19b、トリム対象になる)。
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { explodeEntity } from "../sketch/explode";
 import {
@@ -74,6 +74,30 @@ function NumberField({
 
 export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
   const updateDocument = useCadStore((s) => s.updateDocument);
+  // ビューア上のスケッチ線直接クリックで選択されたentity/segmentのid(Phase 31b、未選択はnull)。
+  // 該当エンティティ欄への自動スクロール&一時ハイライトに使う(セグメントはentity一覧に個別の
+  // 欄を持たないためスクロール対象はentitiesのみ。ビューア側の3D強調はentity/segment共通)。
+  const selectedEntityId = useCadStore((s) => s.selectedEntityId);
+  const entityRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  // 一時ハイライト対象のentity id(selectedEntityIdが変わるたびに一定時間だけ強調表示する)。
+  const [highlightEntityId, setHighlightEntityId] = useState<string | null>(null);
+  const highlightTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!selectedEntityId) return;
+    const el = entityRefs.current[selectedEntityId];
+    if (!el) return; // segmentId等、entities一覧に欄を持たない対象は何もしない。
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    setHighlightEntityId(selectedEntityId);
+    if (highlightTimerRef.current !== null) window.clearTimeout(highlightTimerRef.current);
+    highlightTimerRef.current = window.setTimeout(() => setHighlightEntityId(null), 1500);
+  }, [selectedEntityId]);
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current !== null) window.clearTimeout(highlightTimerRef.current);
+    };
+  }, []);
 
   function handleRename(name: string) {
     updateDocument((doc) => patchSketchFeature(doc, sketch.id, { name }));
@@ -191,14 +215,20 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
         {sketch.entities.map((entity, index) => (
           <div
             key={entity.id}
+            id={`entity-panel-${entity.id}`}
+            ref={(el) => {
+              entityRefs.current[entity.id] = el;
+            }}
             data-testid={`entity-${entity.kind}-${index}`}
             style={{
-              border: "1px solid #444",
+              border: entity.id === highlightEntityId ? "2px solid #ffea00" : "1px solid #444",
               borderRadius: 4,
               padding: 8,
               display: "flex",
               flexDirection: "column",
               gap: 6,
+              background: entity.id === highlightEntityId ? "rgba(255, 234, 0, 0.12)" : undefined,
+              transition: "background-color 0.3s ease, border-color 0.3s ease",
             }}
           >
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>

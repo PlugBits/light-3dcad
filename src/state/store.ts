@@ -337,6 +337,18 @@ interface CadStoreState {
   doc: CadDocument;
   /** フィーチャーツリーで選択中のフィーチャー(編集パネルの対象)。未選択はnull。 */
   selectedFeatureId: FeatureId | null;
+  /**
+   * ビューアで選択中のスケッチエンティティ/セグメントのid(Phase 31b)。未選択はnull。
+   * ツール未使用時にビューア上のスケッチ線を直接クリックした際の強調表示・SketchEditorパネルの
+   * 該当欄への自動スクロール&一時ハイライトに使う。selectedFeatureIdが指すスケッチ内のid
+   * (entities/segmentsどちらのidも入りうる)を想定する。
+   */
+  selectedEntityId: string | null;
+  /**
+   * ビューア上のスケッチ線直接クリック(Phase 31b)による選択。対象スケッチをselectedFeatureIdに、
+   * クリックしたentity/segmentのidをselectedEntityIdに設定する。
+   */
+  selectSketchEntity: (sketchId: FeatureId, entityId: string) => void;
 
   status: EvalStatus;
   mesh: MeshData | null;
@@ -425,7 +437,7 @@ interface CadStoreState {
    * スロットル)の都合で高頻度に呼ばれることを想定する。
    */
   updateDocumentDuringDrag: (updater: (doc: CadDocument) => CadDocument) => void;
-  /** フィーチャーツリーの選択を変更する。 */
+  /** フィーチャーツリーの選択を変更する(selectedEntityId[Phase 31b]はクリアする)。 */
   selectFeature: (featureId: FeatureId | null) => void;
   /**
    * ロールバックバーの位置を移動する(SolidWorks風)。indexはfeatures配列の先頭から数えた
@@ -603,6 +615,8 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   // (resolveInitialDocument()参照。モジュール読み込み時に一度だけ計算済み)。
   doc: initialDocResolution.doc,
   selectedFeatureId: null,
+  selectedEntityId: null,
+  selectSketchEntity: (sketchId, entityId) => set({ selectedFeatureId: sketchId, selectedEntityId: entityId }),
 
   status: "initializing",
   mesh: null,
@@ -770,7 +784,7 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
     promise.then((response) => applyEvaluated(set, get, requestId, response));
   },
 
-  selectFeature: (featureId) => set({ selectedFeatureId: featureId }),
+  selectFeature: (featureId) => set({ selectedFeatureId: featureId, selectedEntityId: null }),
 
   setRollbackIndex: (index) => {
     get().updateDocument((doc) => setDocRollbackIndex(doc, index));
@@ -1004,6 +1018,7 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
       latestEvaluateRequestId: requestId,
       history: createHistoryState<CadDocument>(),
       selectedFeatureId: null,
+      selectedEntityId: null,
       selectedFace: null,
       errorMessage: null,
       errorFeatureId: null,

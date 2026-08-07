@@ -1,5 +1,6 @@
 // CadDocument に対する純粋な操作関数群。すべて非破壊(新しい CadDocument を返す)。
 import { generateId } from "./id";
+import { extendSegmentAtPoint, findExtensionTarget, type ExtendBoundary } from "../sketch/extend";
 import { applySegmentCorner, findSharedEndpoint } from "../sketch/segmentCorner";
 import { trimEntityAtPoint, trimSegmentWithConstraints, type Point2 } from "../sketch/trim";
 import type {
@@ -601,6 +602,47 @@ export function removeSketchEntity(doc: CadDocument, sketchId: FeatureId, entity
 /** sketch の自由な線分・円弧セグメント(Phase 19a)配列を丸ごと置き換える(Phase 19b)。 */
 export function setSketchSegments(doc: CadDocument, sketchId: FeatureId, segments: SketchSegment[]): CadDocument {
   return updateFeature<SketchFeature>(doc, sketchId, (sketch) => ({ ...sketch, segments }));
+}
+
+/**
+ * targetId のセグメント(直線のみ)を、clickPoint(ローカル2D、mm)に近い側の端点について、その線分を
+ * 通る無限直線上で最初に交わる境界(他のsegments・entities輪郭・任意のreferenceEdges)まで延長する
+ * (延長ツール、Phase 31b。実際の幾何計算はsrc/sketch/extend.ts)。延長対象が見つからない場合
+ * (交わる境界が無い・targetIdが見つからない・targetが円弧)はdocをそのまま返し、
+ * removedCoincidentConstraintはfalseになる。
+ * 延長で動く端点に一致(coincident)拘束が付いている場合、そのまま延長すると拘束と矛盾しうるため
+ * 拘束を削除してから延長する(removedCoincidentConstraint:trueをApp側のトースト通知に使う)。
+ */
+export function extendSketchSegmentAtPoint(
+  doc: CadDocument,
+  sketchId: FeatureId,
+  targetId: string,
+  clickPoint: Point2,
+  referenceEdges: ExtendBoundary[] = [],
+): { doc: CadDocument; removedCoincidentConstraint: boolean } {
+  const sketch = findFeature(doc, sketchId);
+  if (!sketch || sketch.type !== "sketch") return { doc, removedCoincidentConstraint: false };
+  const segments = sketch.segments ?? [];
+  const hit = findExtensionTarget(segments, sketch.entities, targetId, clickPoint, referenceEdges);
+  if (!hit) return { doc, removedCoincidentConstraint: false };
+  const nextSegments = extendSegmentAtPoint(segments, sketch.entities, targetId, clickPoint, referenceEdges);
+  if (!nextSegments) return { doc, removedCoincidentConstraint: false };
+
+  const existingConstraints = sketch.constraints ?? [];
+  const touchesMovedEndpoint = (c: SketchConstraint) =>
+    c.kind === "coincident" &&
+    ((c.a.segmentId === targetId && c.a.end === hit.end) || (c.b.segmentId === targetId && c.b.end === hit.end));
+  const removedCoincidentConstraint = existingConstraints.some(touchesMovedEndpoint);
+  const nextConstraints = removedCoincidentConstraint
+    ? existingConstraints.filter((c) => !touchesMovedEndpoint(c))
+    : existingConstraints;
+
+  const nextDoc = updateFeature<SketchFeature>(doc, sketchId, (s) => ({
+    ...s,
+    segments: nextSegments,
+    constraints: nextConstraints,
+  }));
+  return { doc: nextDoc, removedCoincidentConstraint };
 }
 
 /**

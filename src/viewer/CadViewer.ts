@@ -36,6 +36,7 @@ import {
   findClosestEntityPiece,
   findClosestSegmentPiece,
 } from "../sketch/trim";
+import { findExtensionTarget, type ExtendBoundary } from "../sketch/extend";
 import { worldOriginLocal } from "../sketch/originRef";
 import { getStandardViewOrientation, type StandardView } from "./standardViews";
 
@@ -260,6 +261,18 @@ export interface TrimToolCallbacks {
   onCancel: () => void;
 }
 
+/** 延長ツール(Phase 31b、トリムの逆)の開始/終了時に呼ばれるコールバック。直線セグメントのみ対象(v1)。 */
+export interface ExtendToolCallbacks {
+  /**
+   * ホバー中の延長プレビューの上でクリックされたときに呼ばれる(targetIdは対象セグメントの元のid、
+   * clickPointはスケッチのローカル2D座標)。実際のextendSegmentAtPoint()適用・ドキュメント更新は
+   * App側の責務とする(CadViewerはヒット判定・プレビューのみを行い、正本は持たないため)。
+   */
+  onExtendClick: (targetId: string, clickPoint: [number, number]) => void;
+  /** Escapeキーまたはcancel呼び出しで終了したときに呼ばれる。 */
+  onCancel: () => void;
+}
+
 /**
  * 3Dエッジ選択ツール(Phase 25a、フィレット/面取りフィーチャーのエッジ選択)の開始/終了時、
  * および選択エッジ集合が変わるたびに呼ばれるコールバック。スケッチ平面に依存しない
@@ -401,6 +414,16 @@ const CORNER_HIT_TOLERANCE_PX = 10;
 const TRIM_PREVIEW_COLOR = 0xff1744;
 /** トリムツールでホバー対象とみなす許容スクリーン距離(px)。 */
 const TRIM_HOVER_TOLERANCE_PX = 16;
+
+/** 延長ツール(Phase 31b)の延長区間プレビュー色(緑系、トリムの赤と対比)。 */
+const EXTEND_PREVIEW_COLOR = 0x00e676;
+/** 延長ツールでホバー対象とみなす許容スクリーン距離(px)。 */
+const EXTEND_HOVER_TOLERANCE_PX = 16;
+
+/** 未選択状態でのスケッチ線直接ピック(Phase 31b)のヒット許容スクリーン距離(px)。 */
+const SKETCH_ENTITY_PICK_TOLERANCE_PX = 8;
+/** 選択中エンティティ/セグメントのビューア強調色(黄緑系、選択中スケッチのオレンジと区別する)。 */
+const SELECTED_ENTITY_HIGHLIGHT_COLOR = 0xffea00;
 
 /**
  * 寸法ツール(Phase 20b)がヒットした対象。値の確定・拘束の作成/更新は行わず、
@@ -857,6 +880,12 @@ export class CadViewer {
   private onFaceSelect?: (face: FaceInfo | null) => void;
   /** 基準平面(XY/XZ/YZ)がクリックで選択されたときに呼ばれる(Phase 13)。 */
   private onPlaneSelect?: (plane: "XY" | "XZ" | "YZ") => void;
+  /**
+   * ツール未使用時、ビューア上のスケッチ線(オーバーレイ)が直接クリックされたときに呼ばれる
+   * (Phase 31b。sketchIdは所属スケッチ、targetIdはentity/segmentのid、isEntityはentities配列を
+   * 指しているかどうか)。面ピックより優先して呼ばれる(handleClick参照)。
+   */
+  private onSketchEntityPick?: (sketchId: FeatureId, targetId: string, isEntity: boolean) => void;
   /** 基準平面(ボディなし時に表示する半透明の3枚)を乗せるグループ。visibleで表示/非表示を切り替える。 */
   private referencePlaneGroup: THREE.Group;
   private referencePlaneEntries: {
@@ -886,6 +915,12 @@ export class CadViewer {
   private sketchOverlayGroup: THREE.Group;
   private sketchOverlayGeometries: THREE.BufferGeometry[] = [];
   private sketchOverlayMaterials: THREE.Material[] = [];
+  /**
+   * 直近のsetSketchOverlay()呼び出しの入力entries(Phase 31b)。ツール非アクティブ時の
+   * スケッチ線直接ピック(pickSketchOverlayAt())のヒット判定に使う(描画用ジオメトリとは別に
+   * ローカル2D座標のまま保持する)。
+   */
+  private sketchOverlayEntries: SketchOverlayEntry[] = [];
   /** ボディ端面参照エッジ(Phase 22)の破線オーバーレイを乗せるグループ。setReferenceEdgeOverlay()で再構築する。 */
   private referenceEdgeGroup: THREE.Group;
   private referenceEdgeGeometries: THREE.BufferGeometry[] = [];
@@ -999,6 +1034,19 @@ export class CadViewer {
   private trimHoverTargetId: string | null = null;
   /** trimHoverTargetIdがsegmentsではなくentitiesを指しているかどうか(Phase 24)。 */
   private trimHoverIsEntity = false;
+
+  /** 延長ツール(Phase 31b)がアクティブかどうか。trueの間はクリックを面選択でなく延長対象クリックとして扱う。 */
+  private extendActive = false;
+  private extendBasis: PlaneBasis | null = null;
+  /** ヒット判定対象のセグメント(対象スケッチのsegments、直線のみが延長対象になる)。 */
+  private extendSegments: SketchSegment[] = [];
+  /** 交点境界を提供するentities(それ自体は延長で変更されない)。 */
+  private extendEntities: SketchEntity[] = [];
+  /** 交点境界として扱う参照エッジ(ボディ端面参照、Phase 22の仕組みを流用)。 */
+  private extendReferenceEdges: ReferenceEdgeLine[] = [];
+  private extendCallbacks: ExtendToolCallbacks | null = null;
+  /** 直近のホバーで求めた延長対象セグメントのid(ヒット無しはnull)。クリック時にこれをonExtendClickへ渡す。 */
+  private extendHoverTargetId: string | null = null;
 
   /** 寸法ツール(Phase 20b)がアクティブかどうか。trueの間はクリックを面選択でなく寸法対象クリックとして扱う。 */
   private dimensionToolActive = false;
@@ -1162,10 +1210,12 @@ export class CadViewer {
     container: HTMLElement,
     onFaceSelect?: (face: FaceInfo | null) => void,
     onPlaneSelect?: (plane: "XY" | "XZ" | "YZ") => void,
+    onSketchEntityPick?: (sketchId: FeatureId, targetId: string, isEntity: boolean) => void,
   ) {
     this.container = container;
     this.onFaceSelect = onFaceSelect;
     this.onPlaneSelect = onPlaneSelect;
+    this.onSketchEntityPick = onSketchEntityPick;
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x222630);
@@ -1378,6 +1428,12 @@ export class CadViewer {
       }
       return;
     }
+    if (this.extendActive) {
+      if (event.key === "Escape") {
+        this.cancelExtendTool();
+      }
+      return;
+    }
     if (this.cornerToolActive) {
       if (event.key === "Escape") {
         this.cancelCornerTool();
@@ -1513,6 +1569,10 @@ export class CadViewer {
       this.handleTrimClick(event);
       return;
     }
+    if (this.extendActive) {
+      this.handleExtendClick(event);
+      return;
+    }
     if (this.cornerToolActive) {
       this.handleCornerToolClick(event);
       return;
@@ -1553,6 +1613,17 @@ export class CadViewer {
       this.handleReferencePlaneClick(event);
       return;
     }
+
+    // ツール未使用時、ビューア上のスケッチ線(全表示スケッチのオーバーレイ、Phase 31b)を
+    // スクリーン距離SKETCH_ENTITY_PICK_TOLERANCE_PX以内でクリックしたら、面ピックより優先して
+    // そのスケッチ・エンティティ/セグメントを選択する(スケッチ未選択・選択中どちらでも動作する)。
+    const clickRect = this.renderer.domElement.getBoundingClientRect();
+    const entityPick = this.pickSketchOverlayAt(event.clientX - clickRect.left, event.clientY - clickRect.top);
+    if (entityPick) {
+      this.onSketchEntityPick?.(entityPick.sketchId, entityPick.targetId, entityPick.isEntity);
+      return;
+    }
+
     if (!this.mesh) return;
 
     const rect = this.renderer.domElement.getBoundingClientRect();
@@ -2032,12 +2103,34 @@ export class CadViewer {
   /**
    * 各スケッチのエンティティ(矩形/円)を、Workerが返した平面基底で3D線として描画する。
    * 選択中スケッチ(selectedSketchId)は強調色+平面グリッドで、それ以外は控えめな色で表示する。
+   * selectedEntityId(Phase 31b、未選択はnull)が指定されている場合、id一致するentity/segmentは
+   * どのスケッチが選択中かに関わらずSELECTED_ENTITY_HIGHLIGHT_COLORで強調する(未選択状態での
+   * スケッチ線直接クリック選択の視覚フィードバック)。
    * visible=false のときは何も描画せず(既存の描画があれば消す)、grid/lineCountも0になる。
    */
-  setSketchOverlay(entries: SketchOverlayEntry[], selectedSketchId: FeatureId | null, visible: boolean) {
+  setSketchOverlay(
+    entries: SketchOverlayEntry[],
+    selectedSketchId: FeatureId | null,
+    visible: boolean,
+    selectedEntityId: string | null = null,
+  ) {
     this.clearSketchOverlay();
     this.sketchOverlayGroup.visible = visible;
+    this.sketchOverlayEntries = entries;
     if (!visible) return;
+
+    let highlightMaterial: THREE.LineBasicMaterial | null = null;
+    const getHighlightMaterial = () => {
+      if (!highlightMaterial) {
+        highlightMaterial = new THREE.LineBasicMaterial({
+          color: SELECTED_ENTITY_HIGHLIGHT_COLOR,
+          linewidth: 3,
+          depthTest: false,
+        });
+        this.sketchOverlayMaterials.push(highlightMaterial);
+      }
+      return highlightMaterial;
+    };
 
     for (const entry of entries) {
       const isSelected = entry.sketchId === selectedSketchId;
@@ -2055,6 +2148,7 @@ export class CadViewer {
       this.sketchOverlayMaterials.push(material);
 
       for (const entity of entry.entities) {
+        const isHighlighted = entity.id === selectedEntityId;
         const localPoints = entityLocalPoints(entity);
         const positions = new Float32Array(localPoints.length * 3);
         localPoints.forEach(([u, v], i) => {
@@ -2067,8 +2161,8 @@ export class CadViewer {
         geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
         this.sketchOverlayGeometries.push(geometry);
 
-        const line = new THREE.LineLoop(geometry, material);
-        if (isSelected) line.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
+        const line = new THREE.LineLoop(geometry, isHighlighted ? getHighlightMaterial() : material);
+        if (isSelected || isHighlighted) line.renderOrder = SELECTED_SKETCH_RENDER_ORDER + (isHighlighted ? 1 : 0);
         this.sketchOverlayGroup.add(line);
         this.sketchLineCount += 1;
       }
@@ -2076,6 +2170,7 @@ export class CadViewer {
       // 自由な線分・円弧セグメント(Phase 19a)。entitiesと異なり閉じている保証が無いため
       // LineLoopではなく開いたLineとして描画する(トリムUIは19bで追加予定、ここでは可視化のみ)。
       for (const segment of entry.segments ?? []) {
+        const isHighlighted = segment.id === selectedEntityId;
         const localPoints = segmentLocalPoints(segment);
         const positions = new Float32Array(localPoints.length * 3);
         localPoints.forEach(([u, v], i) => {
@@ -2088,8 +2183,8 @@ export class CadViewer {
         geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
         this.sketchOverlayGeometries.push(geometry);
 
-        const line = new THREE.Line(geometry, material);
-        if (isSelected) line.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
+        const line = new THREE.Line(geometry, isHighlighted ? getHighlightMaterial() : material);
+        if (isSelected || isHighlighted) line.renderOrder = SELECTED_SKETCH_RENDER_ORDER + (isHighlighted ? 1 : 0);
         this.sketchOverlayGroup.add(line);
         this.sketchLineCount += 1;
       }
@@ -2109,6 +2204,50 @@ export class CadViewer {
         });
       }
     }
+  }
+
+  /**
+   * ツール未使用時のスケッチ線直接ピック(Phase 31b)。キャンバス内スクリーン座標(px、左上原点)から、
+   * 直近のsetSketchOverlay()で渡された全表示スケッチのentities/segmentsを対象に、スクリーン距離
+   * SKETCH_ENTITY_PICK_TOLERANCE_PX以内で最も近いものを探す(3D面ピックより先にhandleClickから
+   * 呼ばれ、優先される)。オーバーレイ非表示(sketchOverlayGroup.visible===false)の間は常にnull。
+   */
+  private pickSketchOverlayAt(px: number, py: number): { sketchId: FeatureId; targetId: string; isEntity: boolean } | null {
+    if (!this.sketchOverlayGroup.visible) return null;
+    let best: { sketchId: FeatureId; targetId: string; isEntity: boolean } | null = null;
+    let bestDist = SKETCH_ENTITY_PICK_TOLERANCE_PX;
+
+    for (const entry of this.sketchOverlayEntries) {
+      for (const entity of entry.entities) {
+        const screenPts = entityLocalPoints(entity).map(([u, v]) => this.projectPoint(toWorldPoint(entry, u, v)));
+        if (screenPts.some((p) => !p)) continue;
+        const pts = screenPts as { x: number; y: number }[];
+        for (let i = 0; i < pts.length; i += 1) {
+          const a = pts[i];
+          const b = pts[(i + 1) % pts.length];
+          const d = distPointToRawSegment([px, py], [a.x, a.y], [b.x, b.y]);
+          if (d < bestDist) {
+            bestDist = d;
+            best = { sketchId: entry.sketchId, targetId: entity.id, isEntity: true };
+          }
+        }
+      }
+      for (const segment of entry.segments ?? []) {
+        const screenPts = segmentLocalPoints(segment).map(([u, v]) => this.projectPoint(toWorldPoint(entry, u, v)));
+        if (screenPts.some((p) => !p)) continue;
+        const pts = screenPts as { x: number; y: number }[];
+        for (let i = 0; i < pts.length - 1; i += 1) {
+          const a = pts[i];
+          const b = pts[i + 1];
+          const d = distPointToRawSegment([px, py], [a.x, a.y], [b.x, b.y]);
+          if (d < bestDist) {
+            bestDist = d;
+            best = { sketchId: entry.sketchId, targetId: segment.id, isEntity: false };
+          }
+        }
+      }
+    }
+    return best;
   }
 
   private clearDimensionOverlay() {
@@ -2194,6 +2333,7 @@ export class CadViewer {
   ) {
     this.cancelPolygonDrawing();
     this.cancelTrimTool();
+    this.cancelExtendTool();
     this.cancelCornerTool();
     this.cancelDimensionTool();
     this.cancelConstraintTool();
@@ -2326,6 +2466,7 @@ export class CadViewer {
     this.cancelCornerTool();
     this.cancelPolygonDrawing();
     this.cancelTrimTool();
+    this.cancelExtendTool();
     this.cancelDimensionTool();
     this.cancelConstraintTool();
     this.cancelEdgeSelectTool();
@@ -2450,6 +2591,7 @@ export class CadViewer {
    */
   startTrimTool(basis: PlaneBasis, segments: SketchSegment[], callbacks: TrimToolCallbacks, entities: SketchEntity[] = []) {
     this.cancelTrimTool();
+    this.cancelExtendTool();
     this.cancelPolygonDrawing();
     this.cancelCornerTool();
     this.cancelDimensionTool();
@@ -2591,6 +2733,151 @@ export class CadViewer {
   }
 
   /**
+   * 延長ツール(Phase 31b、トリムの逆)を開始する。既存の線描画モード・フィレット/面取りツール・
+   * トリムツール・面選択等は中断/解除する。以後、直線セグメント付近でのマウス移動は延長プレビュー
+   * (緑色、カーソルに近い側の端点が最初に交わる相手まで伸びる区間)、クリックは
+   * `callbacks.onExtendClick`(実際のextendSegmentAtPoint()適用・segments更新はApp側の責務)。
+   */
+  startExtendTool(
+    basis: PlaneBasis,
+    segments: SketchSegment[],
+    callbacks: ExtendToolCallbacks,
+    entities: SketchEntity[] = [],
+    referenceEdges: ReferenceEdgeLine[] = [],
+  ) {
+    this.cancelExtendTool();
+    this.cancelPolygonDrawing();
+    this.cancelCornerTool();
+    this.cancelTrimTool();
+    this.cancelDimensionTool();
+    this.cancelConstraintTool();
+    this.cancelEdgeSelectTool();
+    this.cancelFaceSelectTool();
+    this.cancelThreadPlaceTool();
+    this.cancelPartDragTool();
+    this.cancelMateTool();
+    this.clearSelection();
+    this.setHoverGroup(null);
+    this.extendActive = true;
+    this.extendBasis = basis;
+    this.extendSegments = segments;
+    this.extendEntities = entities;
+    this.extendReferenceEdges = referenceEdges;
+    this.extendCallbacks = callbacks;
+    this.extendHoverTargetId = null;
+    this.renderer.domElement.style.cursor = "crosshair";
+  }
+
+  /**
+   * ヒット判定対象のsegments/entities/referenceEdges一覧を更新する(延長適用でsegmentsが変わった後、
+   * 呼び出し側の最新値を反映するために使う想定)。ツール非アクティブ時は何もしない。
+   */
+  updateExtendSegments(segments: SketchSegment[], entities: SketchEntity[] = [], referenceEdges: ReferenceEdgeLine[] = []) {
+    if (!this.extendActive) return;
+    this.extendSegments = segments;
+    this.extendEntities = entities;
+    this.extendReferenceEdges = referenceEdges;
+    this.clearDrawingPreview();
+    this.extendHoverTargetId = null;
+  }
+
+  isExtendToolActive(): boolean {
+    return this.extendActive;
+  }
+
+  /** 延長ツールを終了する(onCancelが呼ばれる)。非アクティブなら何もしない。 */
+  cancelExtendTool() {
+    if (!this.extendActive) return;
+    const callbacks = this.extendCallbacks;
+    this.extendActive = false;
+    this.extendBasis = null;
+    this.extendSegments = [];
+    this.extendEntities = [];
+    this.extendReferenceEdges = [];
+    this.extendCallbacks = null;
+    this.extendHoverTargetId = null;
+    this.renderer.domElement.style.cursor = "";
+    this.clearDrawingPreview();
+    callbacks?.onCancel();
+  }
+
+  /**
+   * 延長ツール中のマウス移動処理。カーソル位置に最も近い直線セグメント(スクリーン距離
+   * EXTEND_HOVER_TOLERANCE_PX以内、円弧はv1対象外のためヒット判定から除外)を求め、
+   * src/sketch/extend.ts の findExtensionTarget() で延長先が求まれば、元の端点から延長先までの
+   * 区間を緑色でプレビュー表示する。延長先が無い(交わる相手が無い)場合はプレビューを出さない。
+   */
+  private handleExtendMouseMove(event: MouseEvent) {
+    if (!this.extendBasis) return;
+    const basis = this.extendBasis;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+    const hit = this.raycastDrawingPlane(basis, px, py, rect);
+    if (!hit) {
+      this.clearDrawingPreview();
+      this.extendHoverTargetId = null;
+      return;
+    }
+    const local = planeWorldToLocal(basis, hit);
+    const toleranceMm = this.pxToMm(EXTEND_HOVER_TOLERANCE_PX, hit);
+
+    let nearestId: string | null = null;
+    let nearestDist = Infinity;
+    for (const segment of this.extendSegments) {
+      if (segment.kind === "arc" && segment.bulge) continue; // 円弧の延長はv1対象外
+      const d = distPointToSegmentShape(local, segment);
+      if (d < nearestDist) {
+        nearestDist = d;
+        nearestId = segment.id;
+      }
+    }
+
+    this.clearDrawingPreview();
+    if (nearestId === null || nearestDist > toleranceMm) {
+      this.extendHoverTargetId = null;
+      return;
+    }
+    const target = this.extendSegments.find((s) => s.id === nearestId);
+    const referenceEdgeBoundaries: ExtendBoundary[] = this.extendReferenceEdges.map((e) => ({ p1: e.p1, p2: e.p2 }));
+    const extensionHit = findExtensionTarget(this.extendSegments, this.extendEntities, nearestId, local, referenceEdgeBoundaries);
+    if (!target || !extensionHit) {
+      this.extendHoverTargetId = null;
+      return;
+    }
+    this.extendHoverTargetId = nearestId;
+    this.drawExtendPreview(basis, target[extensionHit.end], extensionHit.point);
+  }
+
+  /** 延長ツール中のクリック処理。直近のホバーでヒットした対象セグメントがあれば`onExtendClick`を呼ぶ。 */
+  private handleExtendClick(event: MouseEvent) {
+    if (!this.extendBasis || this.extendHoverTargetId === null) return;
+    const basis = this.extendBasis;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+    const hit = this.raycastDrawingPlane(basis, px, py, rect);
+    if (!hit) return;
+    const local = planeWorldToLocal(basis, hit);
+    this.extendCallbacks?.onExtendClick(this.extendHoverTargetId, local);
+  }
+
+  /** 延長される区間(元の端点from→延長先to)を緑色のプレビュー線として描画する(drawingGroupを流用)。 */
+  private drawExtendPreview(basis: PlaneBasis, from: [number, number], to: [number, number]) {
+    const worldPts = [from, to].map(([u, v]) => planeLocalToWorld(basis, u, v));
+    const positions = new Float32Array(worldPts.length * 3);
+    worldPts.forEach((p, i) => positions.set(p, i * 3));
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    const material = new THREE.LineBasicMaterial({ color: EXTEND_PREVIEW_COLOR, linewidth: 3, depthTest: false });
+    const line = new THREE.Line(geometry, material);
+    line.renderOrder = DRAWING_FEEDBACK_RENDER_ORDER + 2;
+    this.drawingGroup.add(line);
+    this.drawingPreviewGeometries.push(geometry);
+    this.drawingPreviewMaterials.push(material);
+  }
+
+  /**
    * 寸法ツール(Phase 20b、Phase 21でrectangle/circleエンティティにも対応)を開始する。
    * 既存の線描画モード・フィレット/面取りツール・トリムツール・面選択は中断/解除する。
    * 以後のクリックは、まず全segmentsの端点をスクリーン距離DIMENSION_ENDPOINT_TOLERANCE_PX以内で
@@ -2613,6 +2900,7 @@ export class CadViewer {
     this.cancelPolygonDrawing();
     this.cancelCornerTool();
     this.cancelTrimTool();
+    this.cancelExtendTool();
     this.cancelEdgeSelectTool();
     this.cancelFaceSelectTool();
     this.cancelThreadPlaceTool();
@@ -3686,6 +3974,10 @@ export class CadViewer {
       this.handleTrimMouseMove(event);
       return;
     }
+    if (this.extendActive) {
+      this.handleExtendMouseMove(event);
+      return;
+    }
     if (this.dimensionToolActive) {
       this.handleDimensionToolMouseMove(event);
       return;
@@ -4177,6 +4469,7 @@ export class CadViewer {
     this.cancelConstraintTool();
     this.cancelPolygonDrawing();
     this.cancelTrimTool();
+    this.cancelExtendTool();
     this.cancelCornerTool();
     this.cancelDimensionTool();
     this.cancelEdgeSelectTool();
@@ -4368,6 +4661,7 @@ export class CadViewer {
     this.cancelEdgeSelectTool();
     this.cancelPolygonDrawing();
     this.cancelTrimTool();
+    this.cancelExtendTool();
     this.cancelCornerTool();
     this.cancelDimensionTool();
     this.cancelConstraintTool();
@@ -4555,6 +4849,7 @@ export class CadViewer {
     this.cancelFaceSelectTool();
     this.cancelPolygonDrawing();
     this.cancelTrimTool();
+    this.cancelExtendTool();
     this.cancelCornerTool();
     this.cancelDimensionTool();
     this.cancelConstraintTool();
@@ -4673,6 +4968,7 @@ export class CadViewer {
     this.cancelMateTool();
     this.cancelPolygonDrawing();
     this.cancelTrimTool();
+    this.cancelExtendTool();
     this.cancelCornerTool();
     this.cancelDimensionTool();
     this.cancelConstraintTool();
@@ -4779,6 +5075,7 @@ export class CadViewer {
     this.cancelThreadPlaceTool();
     this.cancelPolygonDrawing();
     this.cancelTrimTool();
+    this.cancelExtendTool();
     this.cancelCornerTool();
     this.cancelDimensionTool();
     this.cancelConstraintTool();
@@ -4881,6 +5178,7 @@ export class CadViewer {
     this.cancelMateTool();
     this.cancelPolygonDrawing();
     this.cancelTrimTool();
+    this.cancelExtendTool();
     this.cancelCornerTool();
     this.cancelDimensionTool();
     this.cancelConstraintTool();
