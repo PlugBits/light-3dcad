@@ -13,7 +13,9 @@ export interface MeshQuality {
 export type UiRequest =
   | { kind: "init"; requestId: string }
   | { kind: "evaluate"; requestId: string; doc: CadDocument; quality?: MeshQuality }
-  | { kind: "exportStl"; requestId: string; doc: CadDocument; quality?: MeshQuality };
+  | { kind: "exportStl"; requestId: string; doc: CadDocument; quality?: MeshQuality }
+  /** STEPエクスポート(Phase 26)。replicadのblobSTEP()はメッシュ許容誤差を取らないためqualityは無い。 */
+  | { kind: "exportStep"; requestId: string; doc: CadDocument };
 
 /**
  * 三角形メッシュ(Transferable化のためTypedArray化済み)。
@@ -120,5 +122,7 @@ export type WorkerResponse =
       referenceEdges: ReferenceEdgeSet[];
     }
   | { kind: "stl"; requestId: string; blob: Blob }
+  /** STEPエクスポート応答(Phase 26)。 */
+  | { kind: "step"; requestId: string; blob: Blob }
   | { kind: "error"; requestId: string; featureId?: FeatureId; message: string }
   | { kind: "progress"; requestId: string; message: string };

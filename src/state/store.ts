@@ -29,9 +29,61 @@ import type {
   WorldPlaneName,
 } from "../model/types";
 import type { EdgeInfo, FaceInfo, MeshData, MeshQuality, ReferenceEdgeSet, SketchPlaneInfo, WorkerResponse } from "../protocol/messages";
+import { deserializeProject, serializeProject } from "../project/serialization";
 import { updateReferenceEdgeSnapshots } from "../sketch/referenceEdgeMatch";
 import { solveDocumentSketches } from "../sketch/solver";
 import { createHistoryState, pushHistory, redoHistory, undoHistory, type HistoryState } from "./history";
+
+/**
+ * 自動保存(Phase 26)のlocalStorageキー。ドキュメント変更のたびに500msデバウンスで
+ * serializeProject()した文字列を保存する(useCadStore.subscribe、本ファイル末尾参照)。
+ * typeof localStorage チェックは、Vitest(environment: "node")等ブラウザAPIが無い環境で
+ * モジュール読み込み時にReferenceErrorにならないようにするため(store.test.tsはこのファイルを
+ * importするがWorker同様、実際のlocalStorageアクセスは行われない)。
+ */
+const AUTOSAVE_KEY = "light-3dcad:autosave:v1";
+let autosaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** ドキュメント変更から500ms後にlocalStorageへ保存する(短時間の連続変更をまとめる)。 */
+function scheduleAutosave(doc: CadDocument) {
+  if (typeof localStorage === "undefined") return;
+  if (autosaveTimer !== null) clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(() => {
+    autosaveTimer = null;
+    try {
+      localStorage.setItem(AUTOSAVE_KEY, serializeProject(doc));
+    } catch {
+      // 容量超過・プライベートブラウジング等でlocalStorageが使えない場合は諦める(自動保存は補助機能のため)。
+    }
+  }, 500);
+}
+
+/** 起動時、自動保存があれば復元する。無い・壊れている場合はnull(呼び出し側が従来の初期ドキュメントにフォールバックする)。 */
+function loadAutosavedDocument(): CadDocument | null {
+  if (typeof localStorage === "undefined") return null;
+  try {
+    const text = localStorage.getItem(AUTOSAVE_KEY);
+    if (!text) return null;
+    const result = deserializeProject(text);
+    return result.ok ? result.doc : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 自動保存を消去する(「新規」ボタン用)。 */
+function clearAutosave() {
+  if (typeof localStorage === "undefined") return;
+  if (autosaveTimer !== null) {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = null;
+  }
+  try {
+    localStorage.removeItem(AUTOSAVE_KEY);
+  } catch {
+    // ignore
+  }
+}
 
 export type EvalStatus = "initializing" | "evaluating" | "ready" | "error";
 
@@ -66,7 +118,7 @@ function ensureWorker(): Worker {
   return w;
 }
 
-function postRequest(request: { kind: "evaluate" | "exportStl"; doc: CadDocument; quality?: MeshQuality }) {
+function postRequest(request: { kind: "evaluate" | "exportStl" | "exportStep"; doc: CadDocument; quality?: MeshQuality }) {
   const w = ensureWorker();
   const requestId = nextRequestId();
   return {
@@ -192,6 +244,8 @@ interface CadStoreState {
   addFaceSketch: () => void;
   /** 現在のドキュメントをSTLとしてエクスポートする(exporting/exportErrorはストアで管理)。 */
   exportStl: () => Promise<Blob>;
+  /** 現在のドキュメントをSTEPとしてエクスポートする(Phase 26。exporting/exportErrorはexportStlと共有)。 */
+  exportStep: () => Promise<Blob>;
   /**
    * 現在選択中の3Dエッジ群(ビューアのエッジ選択ツールで確定した配列)を対象に、
    * 3Dフィレット/面取りフィーチャーを追加し、選択状態にする(Phase 25a)。
@@ -210,6 +264,17 @@ interface CadStoreState {
    * 伸びる)、雌は面法線と逆方向(-1、内側へ穴が伸びる)をデフォルトにする。
    */
   addThread: (params: { preset: ThreadPreset; hand: "male" | "female"; length: number; face: ThreadFaceRef; position: [number, number] }) => void;
+
+  /**
+   * ドキュメントを丸ごと差し替える(プロジェクトを開く/新規作成、Phase 26)。undo()/redo()と異なり
+   * アンドゥ履歴は保持しない(空にリセットする)。選択状態(フィーチャー・面)もクリアし、直ちに再評価する。
+   */
+  loadDocument: (doc: CadDocument) => void;
+  /**
+   * 新規プロジェクト(Phase 26)。空ドキュメントに差し替え、自動保存も消去する
+   * (呼び出し側=UIで確認ダイアログを出してから呼ぶ想定)。
+   */
+  newProject: () => void;
 }
 
 function applyEvaluated(
@@ -249,7 +314,9 @@ function applyEvaluated(
 }
 
 export const useCadStore = create<CadStoreState>((set, get) => ({
-  doc: createInitialDocument(),
+  // 起動時、自動保存(localStorage、Phase 26)があればそれを初期ドキュメントとして復元する。
+  // 無い・壊れている場合は従来どおりの初期ドキュメント(XYスケッチ矩形->押し出し)にフォールバックする。
+  doc: loadAutosavedDocument() ?? createInitialDocument(),
   selectedFeatureId: null,
 
   status: "initializing",
@@ -509,4 +576,51 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
       throw err;
     }
   },
+
+  exportStep: async () => {
+    set({ exporting: true, exportError: null });
+    try {
+      const { promise } = postRequest({ kind: "exportStep", doc: get().doc });
+      const response = await promise;
+      if (response.kind === "step") {
+        set({ exporting: false });
+        return response.blob;
+      }
+      const message = response.kind === "error" ? response.message : `予期しない応答: ${response.kind}`;
+      throw new Error(message);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      set({ exporting: false, exportError: message });
+      throw err;
+    }
+  },
+
+  loadDocument: (doc) => {
+    const { requestId, promise } = postRequest({ kind: "evaluate", doc: resolveEvaluationDocument(doc) });
+    // undo()/redo()と違い、履歴は空にリセットする(プロジェクトの切り替えは別の編集セッションとして扱う)。
+    set({
+      doc,
+      status: "evaluating",
+      latestEvaluateRequestId: requestId,
+      history: createHistoryState<CadDocument>(),
+      selectedFeatureId: null,
+      selectedFace: null,
+      errorMessage: null,
+      errorFeatureId: null,
+    });
+    promise.then((response) => applyEvaluated(set, get, requestId, response));
+  },
+
+  newProject: () => {
+    clearAutosave();
+    get().loadDocument(createEmptyDocument());
+  },
 }));
+
+// ドキュメントが変わるたびに(500msデバウンスで)自動保存する(Phase 26)。undo/redo/loadDocument等、
+// updateDocument()を経由しない変更も含めてstate.docの同一性(===)比較で検知する。
+useCadStore.subscribe((state, prevState) => {
+  if (state.doc !== prevState.doc) {
+    scheduleAutosave(state.doc);
+  }
+});

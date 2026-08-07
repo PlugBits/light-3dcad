@@ -189,6 +189,41 @@ function exportStlAndRespond(requestId: string, doc: CadDocument, quality: MeshQ
   }
 }
 
+/**
+ * STEPエクスポート(Phase 26)。replicadのShape3D#blobSTEP()は引数を取らない
+ * (メッシュ化を伴わないためtolerance/angularToleranceは不要。node_modules/replicad/dist/replicad.js
+ * のblobSTEP()実装で確認済み。STEPControl_Writerでschema=5[AP214]として書き出す)。
+ */
+function exportStepAndRespond(requestId: string, doc: CadDocument) {
+  const result = evaluateDocument(doc);
+  if (!result.ok) {
+    postResponse({
+      kind: "error",
+      requestId,
+      featureId: result.featureId as FeatureId | undefined,
+      message: result.message,
+    });
+    return;
+  }
+
+  const { shape } = result;
+  if (!shape) {
+    // STEPエクスポートにはボディが必要(ボディなしは表示上は正常だが、出力対象が無い)。
+    postResponse({
+      kind: "error",
+      requestId,
+      message: "ドキュメントに有効なボディがありません(押し出しフィーチャーがありません)",
+    });
+    return;
+  }
+  try {
+    const blob = shape.blobSTEP();
+    postResponse({ kind: "step", requestId, blob });
+  } finally {
+    shape.delete();
+  }
+}
+
 self.addEventListener("message", (event: MessageEvent<UiRequest>) => {
   const request = event.data;
 
@@ -208,6 +243,11 @@ self.addEventListener("message", (event: MessageEvent<UiRequest>) => {
         case "exportStl": {
           await ensureOC();
           exportStlAndRespond(request.requestId, request.doc, request.quality ?? DEFAULT_QUALITY);
+          break;
+        }
+        case "exportStep": {
+          await ensureOC();
+          exportStepAndRespond(request.requestId, request.doc);
           break;
         }
       }

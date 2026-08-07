@@ -9,6 +9,7 @@ import { RevolveEditor } from "../components/RevolveEditor";
 import { ShellEditor } from "../components/ShellEditor";
 import { SketchEditor } from "../components/SketchEditor";
 import { ThreadEditor } from "../components/ThreadEditor";
+import { downloadBlob } from "../export/downloadBlob";
 import { downloadStl } from "../export/downloadStl";
 import {
   addSketchEntity,
@@ -57,6 +58,7 @@ import {
   upsertLengthConstraint,
   upsertRadiusConstraint,
 } from "../sketch/constraintDimensions";
+import { deserializeProject, serializeProject } from "../project/serialization";
 import { distanceBetweenPoints, distancePointToLine } from "../sketch/positionDimensions";
 import { rectangleFromCorners, regularPolygonVertices } from "../sketch/shapeFromPoints";
 import { trimSegmentAtPoint } from "../sketch/trim";
@@ -103,6 +105,8 @@ const MORE_STANDARD_VIEWS = STANDARD_VIEW_BUTTONS.filter((b) => !PRIMARY_STANDAR
 export default function App() {
   const viewerContainerRef = useRef<HTMLDivElement | null>(null);
   const viewerRef = useRef<CadViewer | null>(null);
+  // プロジェクトを開く(Phase 26)用の隠しfile input。
+  const openProjectInputRef = useRef<HTMLInputElement | null>(null);
 
   const doc = useCadStore((s) => s.doc);
   const status = useCadStore((s) => s.status);
@@ -131,6 +135,9 @@ export default function App() {
   const addShell3D = useCadStore((s) => s.addShell3D);
   const addThread = useCadStore((s) => s.addThread);
   const exportStl = useCadStore((s) => s.exportStl);
+  const exportStep = useCadStore((s) => s.exportStep);
+  const loadDocument = useCadStore((s) => s.loadDocument);
+  const newProject = useCadStore((s) => s.newProject);
   const setShowSketches = useCadStore((s) => s.setShowSketches);
   const updateDocument = useCadStore((s) => s.updateDocument);
   const undo = useCadStore((s) => s.undo);
@@ -145,6 +152,8 @@ export default function App() {
   const [drawingSketchId, setDrawingSketchId] = useState<string | null>(null);
   // 1mmグリッドスナップ(デフォルトON)。
   const [gridSnap, setGridSnap] = useState(true);
+  // 「開く」で選んだ.l3dcadファイルの読み込みに失敗したときのエラーメッセージ(Phase 26)。未発生はnull。
+  const [openProjectError, setOpenProjectError] = useState<string | null>(null);
   // 「スケッチ追加」ボタンで使う平面選択(Phase 13)。基準平面クリックと同等の機能をUIからも操作できるようにする。
   const [newSketchPlane, setNewSketchPlane] = useState<"XY" | "XZ" | "YZ">("XY");
   // 現在アクティブなフィレット/面取りツール(未選択はnull、Phase 18)。
@@ -461,6 +470,59 @@ export default function App() {
     } catch {
       // エラーはストアのexportErrorに反映済み。
     }
+  }
+
+  async function handleDownloadStep() {
+    try {
+      const blob = await exportStep();
+      downloadBlob(blob, "model.step");
+    } catch {
+      // エラーはストアのexportErrorに反映済み。
+    }
+  }
+
+  /** 「保存」ボタン(Phase 26): 現在のドキュメントを.l3dcad(JSON)としてダウンロードする。 */
+  function handleSaveProject() {
+    const text = serializeProject(doc);
+    const blob = new Blob([text], { type: "application/json" });
+    downloadBlob(blob, "model.l3dcad");
+  }
+
+  /** 「開く」ボタン(Phase 26): 隠しfile inputのクリックを発火する。 */
+  function handleOpenProjectClick() {
+    setOpenProjectError(null);
+    openProjectInputRef.current?.click();
+  }
+
+  /**
+   * file input のファイル選択確定時(Phase 26)。JSONとして読み、deserializeProject()で検証・復元する。
+   * 成功時はloadDocument()でドキュメントを差し替える(アンドゥ履歴クリア・選択解除・再評価はstore側で行う)。
+   * 失敗時はopenProjectErrorに表示する。同じファイルを連続で選び直せるよう、成否に関わらずinputの値をリセットする。
+   */
+  async function handleOpenProjectFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const result = deserializeProject(text);
+      if (!result.ok) {
+        setOpenProjectError(result.message);
+        return;
+      }
+      loadDocument(result.doc);
+      setOpenProjectError(null);
+    } catch (err) {
+      setOpenProjectError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /** 「新規」ボタン(Phase 26): 確認ダイアログの上、空ドキュメントに差し替え自動保存を消去する。 */
+  function handleNewProject() {
+    const ok = window.confirm("現在の作業内容を破棄して新規プロジェクトを開始しますか?(自動保存も消去されます)");
+    if (!ok) return;
+    setOpenProjectError(null);
+    newProject();
   }
 
   function handleAlignToPlane() {
@@ -1193,6 +1255,38 @@ export default function App() {
 
           <div className="toolbar-group">
             <span className="toolbar-group-label">ファイル</span>
+            <button
+              type="button"
+              data-testid="btn-new-project"
+              onClick={handleNewProject}
+              title="現在の作業内容を破棄して新規プロジェクトを開始します(自動保存も消去します)"
+            >
+              新規
+            </button>
+            <button
+              type="button"
+              data-testid="btn-save-project"
+              onClick={handleSaveProject}
+              title="現在のドキュメントを.l3dcadファイルとして保存します"
+            >
+              保存
+            </button>
+            <button
+              type="button"
+              data-testid="btn-open-project"
+              onClick={handleOpenProjectClick}
+              title=".l3dcadファイルを開いてドキュメントを差し替えます(アンドゥ履歴はクリアされます)"
+            >
+              開く
+            </button>
+            <input
+              ref={openProjectInputRef}
+              data-testid="input-open-project"
+              type="file"
+              accept=".l3dcad,application/json"
+              style={{ display: "none" }}
+              onChange={handleOpenProjectFile}
+            />
             <select
               data-testid="new-sketch-plane-select"
               value={newSketchPlane}
@@ -1241,6 +1335,15 @@ export default function App() {
               title="現在のモデルをSTLファイルとしてダウンロードします"
             >
               {exporting ? "出力中…" : "STL"}
+            </button>
+            <button
+              type="button"
+              data-testid="btn-download-step"
+              onClick={handleDownloadStep}
+              disabled={busy || exporting || !hasBody}
+              title="現在のモデルをSTEPファイルとしてダウンロードします"
+            >
+              {exporting ? "出力中…" : "STEP"}
             </button>
           </div>
 
@@ -1754,7 +1857,16 @@ export default function App() {
               role="alert"
               style={{ color: "#ff6b6b", fontSize: 12, whiteSpace: "pre-wrap", margin: 0 }}
             >
-              STL出力エラー: {exportError}
+              出力エラー: {exportError}
+            </p>
+          )}
+          {openProjectError && (
+            <p
+              data-testid="open-project-error"
+              role="alert"
+              style={{ color: "#ff6b6b", fontSize: 12, whiteSpace: "pre-wrap", margin: 0 }}
+            >
+              プロジェクトを開けませんでした: {openProjectError}
             </p>
           )}
 

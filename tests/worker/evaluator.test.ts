@@ -2154,3 +2154,38 @@ describe("evaluateDocument (WASM統合): 回転体(Revolve、Phase 25b)", () => 
     expect(result.message.length).toBeGreaterThan(0);
   });
 });
+
+describe("evaluateDocument (WASM統合): STEPエクスポート(Phase 26)", () => {
+  it("矩形スケッチを押し出したボディのSTEP出力(blobSTEP())が非空でISO-10303ヘッダを含む", async (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const rect = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: docWithSketch, feature: sketch } = addSketchFeature(createEmptyDocument(), {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+    });
+    const { doc } = addExtrudeFeature(docWithSketch, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.shape).not.toBeNull();
+    if (!result.shape) return;
+    try {
+      const blob = result.shape.blobSTEP();
+      expect(blob.size).toBeGreaterThan(0);
+      const text = await blob.text();
+      // STEP(ISO 10303-21)ファイルは "ISO-10303-21;" で始まる規格上のヘッダ行を持つ。
+      expect(text).toContain("ISO-10303");
+      expect(text.startsWith("ISO-10303-21;")).toBe(true);
+    } finally {
+      result.shape.delete();
+    }
+  });
+});
