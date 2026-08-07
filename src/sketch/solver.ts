@@ -39,8 +39,16 @@ function isMovableEntity(entity: SketchEntity): entity is MovableEntity {
 
 /** 収束判定: 全残差(拘束+正則化)のノルムがこれを下回れば打ち切る。 */
 const CONVERGE_NORM = 1e-8;
-/** LMの最大反復回数。 */
-const MAX_ITERATIONS = 50;
+/**
+ * LMの最大反復回数。50だと収束不足で誤って矛盾判定される既知の弱点があった(原点ピック常時有効化・
+ * 原点=ワールド原点定義への変更[追加項目]の実機検証で発覚: distanceEntityOrigin/distancePointOriginは
+ * 面上スケッチではoriginLocalが数十mm離れうるため、初期位置から目標円周までの移動量が大きい
+ * 1点1残差の劣拘束問題[点→固定点への距離]でlambdaの縮小が早すぎて振動し、50回では収束しきらない
+ * ケースがあった)。300に拡大しても、通常の(素早く収束する)ケースはCONVERGE_NORMで早期打ち切りされる
+ * ため体感速度への影響は無く、真に矛盾する拘束はより多く反復しても残差が下がりきらないため
+ * 矛盾判定の正しさ自体は変わらない(参考: tests/sketch/solver.test.tsの既存の矛盾検出テスト群)。
+ */
+const MAX_ITERATIONS = 300;
 /** 収束後、拘束由来の残差(正則化を除く)の絶対値最大がこれを超えていれば「矛盾(過拘束)」とみなす(mm)。 */
 const CONFLICT_TOLERANCE = 1e-4;
 /**
@@ -337,6 +345,17 @@ function centerCoincidentResiduals(aIdx: [number, number], bIdx: [number, number
 }
 
 /**
+ * 可変点(idx)と固定点(fixed、動かない相手。原点等)の座標差そのものを2残差(x,y)として返す
+ * (centerCoincidentResidualsの「片方が固定値」版。coincidentOrigin拘束、追加項目)。
+ */
+function pointToFixedCoincidentResiduals(idx: [number, number], fixed: Point2, x: number[]): ResidualEq[] {
+  return [
+    { value: x[idx[0]] - fixed[0], terms: [{ index: idx[0], coef: 1 }] },
+    { value: x[idx[1]] - fixed[1], terms: [{ index: idx[1], coef: 1 }] },
+  ];
+}
+
+/**
  * 中心差分方式の垂直微分ステップ(mm)。座標の典型スケール(mm、通常1〜数百)に対して十分小さく、
  * かつ浮動小数点の丸め誤差に埋もれない大きさ。
  */
@@ -525,7 +544,19 @@ function buildConstraintResiduals(
       case "distanceEntityOrigin": {
         const idx = entityVarIndex(entityVarIdx, c.entity);
         if (!idx) break;
-        eqs.push(pointToFixedDistanceResidual(x, idx, [0, 0], c.value));
+        eqs.push(pointToFixedDistanceResidual(x, idx, c.originLocal ?? [0, 0], c.value));
+        break;
+      }
+      case "distancePointOrigin": {
+        const idx = pointVarIndex(varIndex, c.point);
+        if (!idx) break;
+        eqs.push(pointToFixedDistanceResidual(x, idx, c.originLocal ?? [0, 0], c.value));
+        break;
+      }
+      case "coincidentOrigin": {
+        const idx = "segmentId" in c.point ? pointVarIndex(varIndex, c.point) : entityVarIndex(entityVarIdx, c.point);
+        if (!idx) break;
+        eqs.push(...pointToFixedCoincidentResiduals(idx, c.originLocal ?? [0, 0], x));
         break;
       }
       case "distanceEntityEntity": {
@@ -858,9 +889,23 @@ function entitiesFromVars(entities: readonly SketchEntity[], x: number[], entity
  * 与えられた残差ビルダーに対してLevenberg-Marquardt法を実行し、収束(または反復上限)した変数ベクトルを返す。
  * 減衰係数lambdaは各呼び出しでINITIAL_LAMBDAから開始する。
  * 各反復: 正規方程式(J^T*J + λ*diag(J^T*J))Δ = -J^T*r をガウス消去法で解き、コストが実際に下がる
- * 減衰係数が見つかるまでλを10倍ずつ増やす(見つかればλを1/10、Levenberg-Marquardtの標準的な更新則)。
+ * 減衰係数が見つかるまでλを10倍ずつ増やす(見つかればλをLAMBDA_SUCCESS_DIVISORで割る)。
  * コストを一度も下げられなかった反復で打ち切る(それ以上ここでは改善できない=収束or停滞)。
+ *
+ * LAMBDA_SUCCESS_DIVISOR(成功時のλ縮小率)は元々10だったが、原点ピック常時有効化・原点=ワールド原点
+ * 定義への変更(追加項目)の実機検証で、distanceEntityOrigin/distancePointOrigin(点↔固定点の距離、
+ * 1残差式+正則化2残差の劣拘束系)において、初期位置から目標円周までの移動量が大きい(面上スケッチの
+ * originLocalは数十mm離れうる)場合に「λ=10前後で毎反復オーバーシュート→増大→縮小、を繰り返す
+ * リミットサイクルに陥り、反復回数を増やしても収束しない」既知の弱点が見つかった(標準的な
+ * 「成功のたびにλを1/10」という更新則が、この種の緩やかにしか非線形性が効かない1残差系では
+ * 縮小し過ぎで、次反復のλ=10近辺の大きなステップが再びオーバーシュートする、という悪循環)。
+ * 経験的な探索(-3〜3mm×3方向、原点距離8〜200mmの組み合わせ363通りを網羅)で、縮小率を1/5に
+ * 緩めることでMAX_ITERATIONS=300以内に全ケースが収束することを確認した(1/10のままだと
+ * 500反復でも363件中49件が未収束のまま)。既存の(小さな移動量で素早く収束する)ケースは
+ * CONVERGE_NORMで早期打ち切りされるため、この変更による挙動の違いは事実上無い。
  */
+const LAMBDA_SUCCESS_DIVISOR = 5;
+
 function runLevenbergMarquardt(buildResiduals: (x: number[]) => ResidualEq[], x0: number[], m: number, maxIterations: number): number[] {
   let x = [...x0];
   let lambda = INITIAL_LAMBDA;
@@ -886,7 +931,7 @@ function runLevenbergMarquardt(buildResiduals: (x: number[]) => ResidualEq[], x0
       const costTry = residualCost(buildResiduals(xTry));
       if (costTry < cost) {
         x = xTry;
-        lambda = Math.max(lambda / 10, 1e-12);
+        lambda = Math.max(lambda / LAMBDA_SUCCESS_DIVISOR, 1e-12);
         improved = true;
       } else {
         lambda = Math.min(lambda * 10, MAX_LAMBDA);

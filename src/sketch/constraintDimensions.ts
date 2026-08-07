@@ -12,6 +12,11 @@ import type { EntityRef, LineRef, PointRef, SketchConstraint, SketchEntity, Sket
 import { arcGeometryFromBulge } from "./bulge";
 import { resolveLineRefPoints, sameLineRef } from "./entityEdges";
 
+/** point(PointRef)とentity(EntityRef)を判別するタイプガード(coincidentOrigin拘束のpointフィールド、追加項目)。 */
+function isPointRef(ref: PointRef | EntityRef): ref is PointRef {
+  return "segmentId" in ref;
+}
+
 export type Point2 = [number, number];
 
 /** 寸法ラベルを図形本体から離すオフセット距離(mm)。src/sketch/dimensions.tsと同じ値。 */
@@ -101,19 +106,62 @@ export function removeConstraint(constraints: readonly SketchConstraint[], const
 
 // ---- 円の位置寸法(Phase 22、circleエンティティの中心を対象にした拘束のupsert) ----
 
-/** circleエンティティの中心↔スケッチ原点のdistanceEntityOrigin拘束を追加/更新する。 */
+/**
+ * circleエンティティの中心↔原点のdistanceEntityOrigin拘束を追加/更新する。originLocal(仕様変更対応)は
+ * 拘束作成時点のスケッチ平面基底から求めたワールド原点の投影位置(呼び出し側=App.tsxがselectedSketchPlane
+ * から計算して渡す想定、省略時はローカル原点[0,0]扱い)。既存拘束を更新する場合もoriginLocalを渡せば
+ * 最新値に差し替える(渡さなければ既存のスナップショットを保つ)。
+ */
 export function upsertDistanceEntityOriginConstraint(
   constraints: readonly SketchConstraint[],
   entityId: string,
   value: number,
+  originLocal?: [number, number],
 ): SketchConstraint[] {
   const idx = constraints.findIndex((c) => c.kind === "distanceEntityOrigin" && c.entity.entityId === entityId);
   if (idx >= 0) {
     const next = constraints.slice();
-    next[idx] = { ...next[idx], value } as SketchConstraint;
+    next[idx] = { ...next[idx], value, ...(originLocal ? { originLocal } : {}) } as SketchConstraint;
     return next;
   }
-  return [...constraints, { id: generateId("constraint"), kind: "distanceEntityOrigin", entity: { entityId }, value }];
+  return [...constraints, { id: generateId("constraint"), kind: "distanceEntityOrigin", entity: { entityId }, value, originLocal }];
+}
+
+/**
+ * セグメント端点↔原点のdistancePointOrigin拘束を追加/更新する(追加項目)。
+ * upsertDistanceEntityOriginConstraintのPointRef版。originLocalの意味・扱いは同じ。
+ */
+export function upsertDistancePointOriginConstraint(
+  constraints: readonly SketchConstraint[],
+  point: PointRef,
+  value: number,
+  originLocal?: [number, number],
+): SketchConstraint[] {
+  const idx = constraints.findIndex((c) => c.kind === "distancePointOrigin" && samePointRef(c.point, point));
+  if (idx >= 0) {
+    const next = constraints.slice();
+    next[idx] = { ...next[idx], value, ...(originLocal ? { originLocal } : {}) } as SketchConstraint;
+    return next;
+  }
+  return [...constraints, { id: generateId("constraint"), kind: "distancePointOrigin", point, value, originLocal }];
+}
+
+/**
+ * セグメント端点、またはcircleエンティティの中心を原点に一致させるcoincidentOrigin拘束を追加する
+ * (追加項目、値を持たない拘束なので他のadd*系と同じく「無ければ追加、既にあれば何もしない」)。
+ */
+export function addCoincidentOriginConstraint(
+  constraints: readonly SketchConstraint[],
+  point: PointRef | EntityRef,
+  originLocal?: [number, number],
+): SketchConstraint[] {
+  const exists = constraints.some((c) => {
+    if (c.kind !== "coincidentOrigin") return false;
+    if (isPointRef(point) !== isPointRef(c.point)) return false;
+    return isPointRef(point) && isPointRef(c.point) ? samePointRef(c.point, point) : (c.point as EntityRef).entityId === (point as EntityRef).entityId;
+  });
+  if (exists) return constraints.slice();
+  return [...constraints, { id: generateId("constraint"), kind: "coincidentOrigin", point, originLocal }];
 }
 
 function sameEntityPair(constraint: SketchConstraint, a: EntityRef, b: EntityRef): constraint is Extract<SketchConstraint, { kind: "distanceEntityEntity" }> {
@@ -450,6 +498,18 @@ export interface EntityOriginDimension {
   entityId: string;
   value: number;
   anchor: Point2;
+  /** 「原点」の実座標(ワールド原点のスケッチローカル投影、仕様変更対応)。寸法線の描画に使う。 */
+  origin: Point2;
+}
+/** セグメント端点↔原点の距離ラベル(追加項目)。EntityOriginDimensionのPointRef版。 */
+export interface PointOriginDimension {
+  kind: "point-distance-origin";
+  constraintId: string;
+  point: PointRef;
+  value: number;
+  anchor: Point2;
+  /** 「原点」の実座標(ワールド原点のスケッチローカル投影、仕様変更対応)。寸法線の描画に使う。 */
+  origin: Point2;
 }
 export interface EntityEntityDimension {
   kind: "entity-distance-entity";
@@ -492,6 +552,7 @@ export type ConstraintDimension =
   | SegRadiusDimension
   | SegDistanceDimension
   | EntityOriginDimension
+  | PointOriginDimension
   | EntityEntityDimension
   | EntityLineDimension
   | SegDistanceLineLineDimension
@@ -518,8 +579,17 @@ export function computeConstraintDimensions(
     if (c.kind === "distanceEntityOrigin") {
       const center = entityCenter(c.entity.entityId);
       if (!center) continue;
-      const anchor: Point2 = [center[0] / 2, center[1] / 2];
-      dims.push({ kind: "entity-distance-origin", constraintId: c.id, entityId: c.entity.entityId, value: c.value, anchor });
+      const origin: Point2 = c.originLocal ?? [0, 0];
+      const anchor: Point2 = [(center[0] + origin[0]) / 2, (center[1] + origin[1]) / 2];
+      dims.push({ kind: "entity-distance-origin", constraintId: c.id, entityId: c.entity.entityId, value: c.value, anchor, origin });
+      continue;
+    }
+    if (c.kind === "distancePointOrigin") {
+      const p = pointFromRef(segments, c.point);
+      if (!p) continue;
+      const origin: Point2 = c.originLocal ?? [0, 0];
+      const anchor: Point2 = [(p[0] + origin[0]) / 2, (p[1] + origin[1]) / 2];
+      dims.push({ kind: "point-distance-origin", constraintId: c.id, point: c.point, value: c.value, anchor, origin });
       continue;
     }
     if (c.kind === "distanceEntityEntity") {

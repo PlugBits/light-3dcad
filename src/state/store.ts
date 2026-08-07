@@ -46,6 +46,7 @@ import type {
   WorkerResponse,
 } from "../protocol/messages";
 import { deserializeProject, serializeProject } from "../project/serialization";
+import { updateOriginSnapshots } from "../sketch/originSnapshot";
 import { updateReferenceEdgeSnapshots } from "../sketch/referenceEdgeMatch";
 import { solveDocumentSketches } from "../sketch/solver";
 import { createHistoryState, pushHistory, redoHistory, undoHistory, type HistoryState } from "./history";
@@ -562,8 +563,12 @@ function applyEvaluated(
     // スナップショットは次回のupdateDocument()呼び出しから反映される。既知の制限として
     // docs/PLAN.mdに記載)。
     const withReferenceEdges = updateReferenceEdgeSnapshots(get().doc, response.referenceEdges);
+    // 原点系拘束(distanceEntityOrigin/distancePointOrigin/coincidentOrigin)のoriginLocalスナップショットを
+    // 最新のsketchPlanesから追従させる(仕様変更対応、updateReferenceEdgeSnapshotsと同じくWorker再評価は
+    // 発行しない)。
+    const withOrigin = updateOriginSnapshots(withReferenceEdges, response.sketchPlanes);
     // 合致(メイト、Phase 28c)ソルバが解いた配置を書き戻す(履歴は積まない、上記コメント参照)。
-    const nextDoc = applyMateSolvedPlacements(withReferenceEdges, response.solvedPlacements);
+    const nextDoc = applyMateSolvedPlacements(withOrigin, response.solvedPlacements);
     // 起動クラッシュループ防止(Phase 29a): 評価が成功した時点で復元開始マーカーを解除する
     // (マーカーが立っていなければ no-op)。「初回評価が成功したら」という仕様どおり、
     // 実際には毎回の成功評価で呼ぶ(冪等なので安全、かつ通常の編集中の評価成功でも解除されて

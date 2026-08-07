@@ -143,8 +143,30 @@ export type SketchConstraint =
   | { id: string; kind: "radius"; segmentId: string; value: number }
   /** 点を(拘束追加時点の)現在位置に固定する。値はsolveSketch呼び出し時の入力座標から都度求める(拘束自体には持たない)。 */
   | { id: string; kind: "fix"; point: PointRef }
-  /** circleエンティティの中心↔スケッチ原点([0,0])の距離(mm、Phase 22)。 */
-  | { id: string; kind: "distanceEntityOrigin"; entity: EntityRef; value: number }
+  /**
+   * circleエンティティの中心↔原点の距離(mm、Phase 22)。
+   * 「原点」はワールド原点(0,0,0)をスケッチ平面へ投影した点と定義する(仕様変更: 以前はスケッチの
+   * ローカル原点[0,0]固定だったが、面上スケッチではローカル原点=面の基準点であり、ワールド原点とは
+   * 一致しない場合があるため。originLocalはその投影点のスナップショット(スケッチローカル2D、mm)で、
+   * refEdge(ボディ端面参照)と同様に評価のたびに最新のsketchPlanes基底から追従・更新される
+   * (src/sketch/originSnapshot.ts、src/state/store.tsのapplyEvaluated参照)。省略時(旧データ、または
+   * まだ一度も評価応答を受け取っていない新規拘束)はローカル原点[0,0]として扱う(worldOriginLocal()の
+   * フォールバック)。
+   */
+  | { id: string; kind: "distanceEntityOrigin"; entity: EntityRef; value: number; originLocal?: [number, number] }
+  /**
+   * セグメント端点↔原点の距離(mm、追加項目: 原点ピック常時有効化に伴う新設)。
+   * distanceEntityOriginの「対象がcircleエンティティではなく自由な線分の端点」版。原点の定義・
+   * originLocalスナップショットの扱いはdistanceEntityOriginと同一。
+   */
+  | { id: string; kind: "distancePointOrigin"; point: PointRef; value: number; originLocal?: [number, number] }
+  /**
+   * セグメント端点、またはcircleエンティティの中心を原点に一致させる(固定、追加項目)。
+   * 拘束ツール(垂直・同心・接線と同じ選択ポップアップ)から追加する。残差は対象点の座標そのもの
+   * (x,y、fix/fixEntityと似るが目標値が「作成時点の位置」ではなく常に原点である点が異なる)。
+   * 原点の定義・originLocalスナップショットの扱いはdistanceEntityOriginと同一。
+   */
+  | { id: string; kind: "coincidentOrigin"; point: PointRef | EntityRef; originLocal?: [number, number] }
   /**
    * circleエンティティの中心↔中心の距離(mm、Phase 22)。axis(UI改善対応、省略=direct・後方互換)は
    * "x"/"y"のときそれぞれ|cx_b-cx_a|/|cy_b-cy_a|のみを距離として扱う(中心間の直線距離ではなく、

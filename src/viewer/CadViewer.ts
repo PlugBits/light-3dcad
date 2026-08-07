@@ -35,6 +35,7 @@ import {
   findClosestEntityPiece,
   findClosestSegmentPiece,
 } from "../sketch/trim";
+import { worldOriginLocal } from "../sketch/originRef";
 import { getStandardViewOrientation, type StandardView } from "./standardViews";
 
 /** SolidWorks風の明るいグレー系ボディ色。 */
@@ -423,6 +424,12 @@ export type DimensionToolTarget =
   | { kind: "entity-width"; entityId: string }
   | { kind: "entity-height"; entityId: string }
   | { kind: "circle-distance-origin"; entityId: string }
+  /**
+   * セグメント端点↔原点の距離(追加項目: 原点ピック常時有効化)。circle-distance-originの
+   * PointRef版で、端点→原点、または原点→端点のどちらの順でクリックしても同じターゲットになる
+   * (端点側だけが動く。distancePointOrigin拘束を経由する)。
+   */
+  | { kind: "point-distance-origin"; point: PointRef }
   | { kind: "circle-distance-circle"; fromEntityId: string; toEntityId: string }
   /**
    * 辺(rectangle/polygonの辺、または自由な線分セグメント)への距離。edgeA/edgeBはピック時点の実座標
@@ -453,9 +460,10 @@ export type DimensionToolTarget =
  * 位置寸法(circle-distance-*)の1点目待ち状態(UI改善: ユーザー実機フィードバック対応)。
  * "circle"はcircleエンティティをクリックして2点目(原点/円/辺/端面)待ち、"point"はdistance拘束の
  * 端点1点目クリック後で2点目の端点待ち、"line"は直線セグメントのlengthポップアップ表示中で
- * 2点目の直線セグメント待ち(Phase 24、線分↔線分の寸法)。未保留はnull。
+ * 2点目の直線セグメント待ち(Phase 24、線分↔線分の寸法)。"origin"(追加項目: 原点ピック常時有効化)は
+ * 原点マーカーを1点目としてクリックした直後で2点目(circle/端点)待ち。未保留はnull。
  */
-export type DimensionPendingState = { kind: "circle" | "point" | "line" | "edge" | "refedge" } | null;
+export type DimensionPendingState = { kind: "circle" | "point" | "line" | "edge" | "refedge" | "origin" } | null;
 
 /** 寸法ツール(Phase 20b)の開始/終了時に呼ばれるコールバック。 */
 export interface DimensionToolCallbacks {
@@ -475,6 +483,12 @@ export interface DimensionToolCallbacks {
 const DIMENSION_ENDPOINT_TOLERANCE_PX = 10;
 /** 寸法ツールのセグメント本体ヒット判定の許容スクリーン距離(px、ローカルmmへ概算換算して使う)。 */
 const DIMENSION_SEGMENT_TOLERANCE_PX = 14;
+/**
+ * 原点マーカーのヒット判定の許容スクリーン距離(px、ユーザー報告対応: 原点が選択できない・
+ * 拘束ができない)。他の端点(DIMENSION_ENDPOINT_TOLERANCE_PX=10px)より広めにして選びやすくする。
+ * 寸法ツール・拘束ツールいずれの原点ピックにも共通して使う。
+ */
+const ORIGIN_HIT_TOLERANCE_PX = 15;
 
 /**
  * 拘束ツール(Phase 23、垂直・同心・接線)のピック対象。直線セグメント(kind:"line"のみ)、
@@ -482,7 +496,13 @@ const DIMENSION_SEGMENT_TOLERANCE_PX = 14;
  * (drawDimensionHoverPreview/drawDimensionSelectHighlight/clearDimensionSelectHighlight)を
  * そのまま流用する(いずれもbasis+ローカル2D点列のみに依存する汎用実装のため)。
  */
-export type ConstraintPickTarget = { kind: "segment"; segmentId: string } | { kind: "circle"; entityId: string };
+export type ConstraintPickTarget =
+  | { kind: "segment"; segmentId: string }
+  | { kind: "circle"; entityId: string }
+  /** 線分の端点(追加項目: 拘束ツールに「原点一致」を追加)。coincidentOrigin拘束のみが対象とする。 */
+  | { kind: "point"; point: PointRef }
+  /** 原点(追加項目: 拘束ツールに「原点一致」を追加)。線分端点/circleをクリック→原点をクリックの順、または逆順で選べる。 */
+  | { kind: "origin" };
 
 /** 拘束ツールの開始/終了時に呼ばれるコールバック。 */
 export interface ConstraintToolCallbacks {
@@ -561,15 +581,19 @@ function distPointToRawSegment(p: [number, number], a: [number, number], b: [num
   return Math.hypot(p[0] - cx, p[1] - cy);
 }
 
-/** 寸法ツールで原点マーカーをホバー中に強調表示する境界ポリライン(ローカル2D、原点周りの小さな四角)。 */
-function originMarkerHighlightPolyline(): [number, number][] {
+/**
+ * 寸法ツールで原点マーカーをホバー中に強調表示する境界ポリライン(ローカル2D、原点周りの小さな四角)。
+ * center(仕様変更対応、原点=ワールド原点のスケッチ平面への投影)を省略すると従来通りローカル(0,0)。
+ */
+function originMarkerHighlightPolyline(center: [number, number] = [0, 0]): [number, number][] {
   const r = ORIGIN_MARKER_RADIUS;
+  const [cx, cy] = center;
   return [
-    [-r, -r],
-    [r, -r],
-    [r, r],
-    [-r, r],
-    [-r, -r],
+    [cx - r, cy - r],
+    [cx + r, cy - r],
+    [cx + r, cy + r],
+    [cx - r, cy + r],
+    [cx - r, cy - r],
   ];
 }
 
@@ -1006,6 +1030,15 @@ export class CadViewer {
    * dimensionPendingCircleId/dimensionPendingLineId/dimensionPendingEdgeLineとは相互排他。
    */
   private dimensionPendingRefEdgeLine: { line: LineRef; edgeA: [number, number]; edgeB: [number, number] } | null = null;
+  /**
+   * 原点ピック常時有効化(追加項目、ユーザー報告対応: 原点がいつも選択できない)用: 原点マーカーを
+   * 1点目としてクリックした直後にtrueにする(未保留はfalse)。保持中に円(entity-radius)/セグメント
+   * 端点をクリックすると、円→原点/端点→原点と同じcircle-distance-origin/point-distance-originの
+   * ターゲットとしてonTargetPickedを呼ぶ(「原点は動かない」ため向きに依らず対称)。
+   * dimensionPendingCircleId/dimensionPendingPoint/dimensionPendingLineId/dimensionPendingEdgeLine/
+   * dimensionPendingRefEdgeLineとは相互排他。
+   */
+  private dimensionPendingOrigin = false;
 
   /** 拘束ツール(Phase 23)がアクティブかどうか。trueの間はクリックを面選択でなく拘束対象クリックとして扱う。 */
   private constraintToolActive = false;
@@ -1256,6 +1289,17 @@ export class CadViewer {
   /** 平面基底(basis)上のローカル2D座標(u, v)をワールド座標に変換する(オフセットなし)。 */
   localToWorld(basis: PlaneBasis, u: number, v: number): [number, number, number] {
     return planeLocalToWorld(basis, u, v);
+  }
+
+  /**
+   * 寸法/拘束ツールが「原点」としてピック・表示する点のスクリーン座標(px)を返す(仕様変更対応:
+   * 原点=ワールド原点[0,0,0]をスケッチ平面へ投影した点。world平面のスケッチでは従来通りローカル
+   * (0,0)と一致するが、面上スケッチでは面の基準点[basis.origin]とは一般に異なる)。画面外/背面等で
+   * 投影できない場合はnull。
+   */
+  private originScreenPoint(basis: PlaneBasis): { x: number; y: number } | null {
+    const [u, v] = worldOriginLocal(basis);
+    return this.projectPoint(planeLocalToWorld(basis, u, v));
   }
 
   private handleResize() {
@@ -2613,6 +2657,7 @@ export class CadViewer {
     this.setDimensionPendingLine(null);
     this.setDimensionPendingEdge(null);
     this.setDimensionPendingRefEdge(null);
+    this.setDimensionPendingOrigin(false);
     this.renderer.domElement.style.cursor = "";
     this.clearDrawingPreview();
     callbacks?.onCancel();
@@ -2638,12 +2683,14 @@ export class CadViewer {
    * radius・それ以外はlength、entityがヒットすればentity-radius/entity-width/entity-heightの
    * ターゲットとしてonTargetPickedを呼ぶ(保留中の1点目は破棄する)。
    *
-   * 位置寸法(Phase 21b): circleをクリックしてentity-radiusを確定させた直後
-   * (dimensionPendingCircleIdが保持されている間)に限り、続けて原点マーカー
-   * (スケッチのローカル原点、DIMENSION_ENDPOINT_TOLERANCE_PX以内)/別のcircle/辺(セグメント本体
-   * またはrectangleの辺)をクリックすると、通常のentity-radius/length/entity-width/entity-height
-   * ではなくcircle-distance-origin/circle-distance-circle/circle-distance-edgeターゲットとして
-   * onTargetPickedを呼ぶ(1点目のcircleが基準・2点目が移動対象、または辺は動かない)。
+   * 位置寸法(Phase 21b、追加項目で原点ピックを常時有効化): 原点マーカー(ORIGIN_HIT_TOLERANCE_PX以内、
+   * ユーザー報告対応で従来のDIMENSION_ENDPOINT_TOLERANCE_PXより拡大)は、保留状態に関わらず常に
+   * ピック対象になる(以前はcircleクリック済み[dimensionPendingCircleId]の間のみ)。
+   * circle-pending中に原点をクリックすればcircle-distance-origin、端点pending中
+   * (dimensionPendingPoint)に原点をクリックすればpoint-distance-origin、何も保留していない状態で
+   * 原点をクリックすればdimensionPendingOriginを立てて1点目として保持し、続けて円/端点をクリックした
+   * 側が2点目として動く(「原点は動かない」ため、円→原点/原点→円のどちらの順でも同じ
+   * circle-distance-originになる。端点も同様にpoint-distance-origin)。
    */
   private handleDimensionToolClick(event: MouseEvent) {
     if (!this.dimensionToolBasis) return;
@@ -2652,22 +2699,35 @@ export class CadViewer {
     const px = event.clientX - rect.left;
     const py = event.clientY - rect.top;
 
-    // 位置寸法(Phase 21b): circleクリック済みの状態でのみ、原点マーカー付近のクリックを
-    // circle-distance-originターゲットとして扱う(それ以外の状態では原点クリックは無視する)。
-    if (this.dimensionPendingCircleId) {
-      const originScreen = this.projectPoint(basis.origin);
-      if (originScreen) {
-        const dx = originScreen.x - px;
-        const dy = originScreen.y - py;
-        if (dx * dx + dy * dy <= DIMENSION_ENDPOINT_TOLERANCE_PX * DIMENSION_ENDPOINT_TOLERANCE_PX) {
-          const entityId = this.dimensionPendingCircleId;
-          this.setDimensionPendingCircle(null);
-          this.setDimensionPendingPoint(null);
-          this.clearDrawingPreview();
-          this.dimensionToolCallbacks?.onTargetPicked({ kind: "circle-distance-origin", entityId }, px, py);
-          return;
-        }
+    // 原点マーカーのヒット判定(保留状態に関わらず常に行う、追加項目)。
+    const originScreen = this.originScreenPoint(basis);
+    const originHit =
+      originScreen !== null &&
+      (originScreen.x - px) * (originScreen.x - px) + (originScreen.y - py) * (originScreen.y - py) <=
+        ORIGIN_HIT_TOLERANCE_PX * ORIGIN_HIT_TOLERANCE_PX;
+    if (originHit) {
+      if (this.dimensionPendingCircleId) {
+        const entityId = this.dimensionPendingCircleId;
+        this.setDimensionPendingCircle(null);
+        this.setDimensionPendingPoint(null);
+        this.clearDrawingPreview();
+        this.dimensionToolCallbacks?.onTargetPicked({ kind: "circle-distance-origin", entityId }, px, py);
+        return;
       }
+      if (this.dimensionPendingPoint) {
+        const point = this.dimensionPendingPoint;
+        this.setDimensionPendingPoint(null);
+        this.clearDrawingPreview();
+        this.dimensionToolCallbacks?.onTargetPicked({ kind: "point-distance-origin", point }, px, py);
+        return;
+      }
+      if (this.dimensionPendingOrigin) return; // 原点を2連続クリック: 何もしない(同一点の再クリックと同じ扱い)。
+      this.setDimensionPendingCircle(null);
+      this.setDimensionPendingLine(null);
+      this.setDimensionPendingEdge(null);
+      this.setDimensionPendingRefEdge(null);
+      this.setDimensionPendingOrigin(true, basis);
+      return;
     }
 
     type PointHit = { ref: PointRef; local: [number, number]; distSq: number };
@@ -2691,6 +2751,13 @@ export class CadViewer {
     if (bestPoint) {
       this.setDimensionPendingCircle(null);
       this.setDimensionPendingLine(null);
+      if (this.dimensionPendingOrigin) {
+        // 原点(1点目)→端点(2点目、追加項目): point-distance-originターゲットになる。
+        this.setDimensionPendingOrigin(false);
+        this.clearDrawingPreview();
+        this.dimensionToolCallbacks?.onTargetPicked({ kind: "point-distance-origin", point: bestPoint.ref }, px, py);
+        return;
+      }
       const pending = this.dimensionPendingPoint;
       if (pending && !(pending.segmentId === bestPoint.ref.segmentId && pending.end === bestPoint.ref.end)) {
         this.setDimensionPendingPoint(null);
@@ -2804,13 +2871,16 @@ export class CadViewer {
 
     // 参照エッジを1つ目としてクリック(追加項目、選択順柔軟化): 何も保留していない状態で参照エッジが
     // 最も近ければpending化して強調表示し、次のクリック(円/線分)を待つ(dimensionPendingEdgeLineと
-    // 同じ「1点目保持→2点目」パターン)。
+    // 同じ「1点目保持→2点目」パターン)。原点ピック常時有効化(追加項目)により、原点保留中
+    // (dimensionPendingOrigin)はこの分岐を素通りさせる(原点との組み合わせは円/端点のみ対応のため、
+    // 座標がたまたま参照エッジと重なっても新たな参照エッジpendingを開始せず、原点保留を維持する)。
     if (
       refEdgeIsNearest &&
       !this.dimensionPendingCircleId &&
       !this.dimensionPendingLineId &&
       !this.dimensionPendingEdgeLine &&
-      !this.dimensionPendingRefEdgeLine
+      !this.dimensionPendingRefEdgeLine &&
+      !this.dimensionPendingOrigin
     ) {
       const hit = refEdgeHit as { edge: ReferenceEdgeLine; dist: number };
       this.setDimensionPendingRefEdge(
@@ -2829,6 +2899,13 @@ export class CadViewer {
       this.setDimensionPendingPoint(null);
       this.setDimensionPendingLine(null);
       this.clearDrawingPreview();
+      if (entityHit.kind === "entity-radius" && this.dimensionPendingOrigin) {
+        // 原点(1点目)→円(2点目、追加項目): circle→原点と同じcircle-distance-originターゲットになる
+        // (「原点は動かない」ためクリック順に依らず対称)。
+        this.setDimensionPendingOrigin(false);
+        this.dimensionToolCallbacks?.onTargetPicked({ kind: "circle-distance-origin", entityId: entityHit.entityId }, px, py);
+        return;
+      }
       if (entityHit.kind === "entity-radius" && this.dimensionPendingEdgeLine) {
         // 辺(1点目)→円(2点目、選択順柔軟化、UI改善): circleが先にクリックされたときと同じ
         // circle-distance-edge/refedgeターゲットになる(distanceEntityLine拘束はentity[円]+line[辺]の
@@ -2865,6 +2942,10 @@ export class CadViewer {
         );
         return;
       }
+      // ここまでの分岐(dimensionPendingEdgeLine/dimensionPendingRefEdgeLine/dimensionPendingOriginと
+      // 円の組み合わせ)はいずれも既にreturn済み。以降はentityHitを新たな1点目として扱う、または
+      // 通常のentity系ターゲットを発行するため、原点の保留は解除する(相互排他の維持)。
+      this.setDimensionPendingOrigin(false);
       if (entityHit.kind === "entity-radius") {
         // circle単独クリック: 従来通りentity-radius(半径編集)。以降の1クリックで距離モードへ
         // 切り替えられるよう、このcircleをdimensionPendingCircleIdとして保持する。
@@ -2913,6 +2994,9 @@ export class CadViewer {
     if (nearestId === null || nearestDist > toleranceMm) return;
 
     this.setDimensionPendingPoint(null);
+    // セグメント本体のヒットはdimensionPendingOriginを消費しない(原点↔線分本体の組み合わせは
+    // 未対応、端点のみ対応)。新たな1点目/確定ターゲットに進むため保留を解除する(相互排他の維持)。
+    this.setDimensionPendingOrigin(false);
     this.clearDrawingPreview();
     const seg = this.dimensionToolSegments.find((s) => s.id === nearestId);
     if (!seg) return;
@@ -2983,8 +3067,9 @@ export class CadViewer {
    * (原点マーカーのみDIMENSION_ENDPOINT_TOLERANCE_PX、スクリーン距離)以内で求め、ヒットがあれば
    * ホバー色でハイライト表示する(「選べるものが分かる」ようにするための視覚フィードバック)。
    * distance入力の1点目待ち中(dimensionPendingPoint)はそのマーカー表示を優先し、ホバープレビュー
-   * は描かない。原点マーカー・参照エッジは、circleクリック済み(dimensionPendingCircleId)の間の
-   * みピック対象になる(handleDimensionToolClickと同じ条件)ため、ホバーもそれに合わせる。
+   * は描かない。原点マーカーは保留状態に関わらず常にホバー対象になる(ユーザー報告対応: 原点が
+   * いつも選択できない。ヒット半径はORIGIN_HIT_TOLERANCE_PXで他より広め)。参照エッジも保留状態に
+   * 関わらず常にホバー対象(以前からの挙動)。
    */
   private handleDimensionToolMouseMove(event: MouseEvent) {
     if (!this.dimensionToolBasis || this.dimensionPendingPoint) return;
@@ -2993,19 +3078,16 @@ export class CadViewer {
     const px = event.clientX - rect.left;
     const py = event.clientY - rect.top;
 
-    // 位置寸法(circle選択済み)の間は原点マーカーのホバーも判定する(handleDimensionToolClickと同じ
-    // スクリーン距離ベースの判定・優先度)。
-    if (this.dimensionPendingCircleId) {
-      const originScreen = this.projectPoint(basis.origin);
-      if (originScreen) {
-        const dx = originScreen.x - px;
-        const dy = originScreen.y - py;
-        if (dx * dx + dy * dy <= DIMENSION_ENDPOINT_TOLERANCE_PX * DIMENSION_ENDPOINT_TOLERANCE_PX) {
-          this.clearDrawingPreview();
-          this.dimensionHoverEntityHit = null;
-          this.drawDimensionHoverPreview(basis, originMarkerHighlightPolyline());
-          return;
-        }
+    // 原点マーカーのホバー判定(保留状態に関わらず常に行う、追加項目)。
+    const originScreen = this.originScreenPoint(basis);
+    if (originScreen) {
+      const dx = originScreen.x - px;
+      const dy = originScreen.y - py;
+      if (dx * dx + dy * dy <= ORIGIN_HIT_TOLERANCE_PX * ORIGIN_HIT_TOLERANCE_PX) {
+        this.clearDrawingPreview();
+        this.dimensionHoverEntityHit = null;
+        this.drawDimensionHoverPreview(basis, originMarkerHighlightPolyline(worldOriginLocal(basis)));
+        return;
       }
     }
 
@@ -3798,6 +3880,7 @@ export class CadViewer {
     else if (this.dimensionPendingLineId) callback({ kind: "line" });
     else if (this.dimensionPendingEdgeLine) callback({ kind: "edge" });
     else if (this.dimensionPendingRefEdgeLine) callback({ kind: "refedge" });
+    else if (this.dimensionPendingOrigin) callback({ kind: "origin" });
     else if (this.dimensionPendingPoint) callback({ kind: "point" });
     else callback(null);
   }
@@ -3858,6 +3941,21 @@ export class CadViewer {
     this.dimensionPendingRefEdgeLine = pending;
     if (pending && basis) {
       this.drawDimensionSelectHighlight(basis, [pending.edgeA, pending.edgeB]);
+    } else {
+      this.clearDimensionSelectHighlight();
+    }
+    this.notifyDimensionPendingState();
+  }
+
+  /**
+   * dimensionPendingOrigin(原点ピック常時有効化、追加項目)の更新+選択強調の描画/消去+
+   * ステータス通知をまとめて行う(setDimensionPendingEdgeと同じパターン)。
+   */
+  private setDimensionPendingOrigin(pending: boolean, basis?: PlaneBasis) {
+    this.dimensionPendingOrigin = pending;
+    if (pending && basis) {
+      const originLocal = worldOriginLocal(basis);
+      this.drawDimensionSelectHighlight(basis, originMarkerHighlightPolyline(originLocal));
     } else {
       this.clearDimensionSelectHighlight();
     }
@@ -3934,7 +4032,8 @@ export class CadViewer {
 
   /**
    * ローカル2D座標に最も近い拘束ピック対象(直線セグメント本体・circleエンティティ境界)を求める。
-   * 許容距離内に何も無ければnull。
+   * 許容距離内に何も無ければnull。原点一致(追加項目)のための端点・原点はスクリーン空間で別途
+   * 判定する(findConstraintPickHitScreen)ため、ここでは従来通りsegment/circleのみを対象とする。
    */
   private findConstraintPickHit(
     local: [number, number],
@@ -3955,29 +4054,76 @@ export class CadViewer {
     return best;
   }
 
-  /** 拘束ツール中のクリック処理。許容距離内の最近傍(直線セグメント/circle)を1つ目→2つ目の順で確定する。 */
+  /**
+   * スクリーン座標(px,py)から拘束ピック対象を求める(追加項目: 「原点一致」用に原点・線分端点を
+   * 追加)。原点(ORIGIN_HIT_TOLERANCE_PX)→端点(DIMENSION_ENDPOINT_TOLERANCE_PX)→
+   * segment本体/circle境界(findConstraintPickHit、ローカルmm空間)の優先順で判定する
+   * (原点・端点はスクリーン距離ベースの方が小さい図形でも安定して選べるため優先)。
+   */
+  private findConstraintPickHitScreen(
+    basis: PlaneBasis,
+    px: number,
+    py: number,
+    rect: DOMRect,
+  ): { target: ConstraintPickTarget; highlightPoints: [number, number][] } | null {
+    const originScreen = this.originScreenPoint(basis);
+    if (originScreen) {
+      const dx = originScreen.x - px;
+      const dy = originScreen.y - py;
+      if (dx * dx + dy * dy <= ORIGIN_HIT_TOLERANCE_PX * ORIGIN_HIT_TOLERANCE_PX) {
+        return { target: { kind: "origin" }, highlightPoints: originMarkerHighlightPolyline(worldOriginLocal(basis)) };
+      }
+    }
+    for (const seg of this.constraintToolSegments) {
+      for (const end of ["p1", "p2"] as const) {
+        const local = end === "p1" ? seg.p1 : seg.p2;
+        const world = planeLocalToWorld(basis, local[0], local[1]);
+        const screen = this.projectPoint(world);
+        if (!screen) continue;
+        const dx = screen.x - px;
+        const dy = screen.y - py;
+        if (dx * dx + dy * dy <= DIMENSION_ENDPOINT_TOLERANCE_PX * DIMENSION_ENDPOINT_TOLERANCE_PX) {
+          return { target: { kind: "point", point: { segmentId: seg.id, end } }, highlightPoints: originMarkerHighlightPolyline(local) };
+        }
+      }
+    }
+    const hit = this.raycastDrawingPlane(basis, px, py, rect);
+    if (!hit) return null;
+    const local = planeWorldToLocal(basis, hit);
+    const toleranceMm = this.pxToMm(DIMENSION_SEGMENT_TOLERANCE_PX, hit);
+    const pickHit = this.findConstraintPickHit(local);
+    if (!pickHit || pickHit.dist > toleranceMm) return null;
+    return { target: pickHit.target, highlightPoints: pickHit.highlightPoints };
+  }
+
+  /** 2つのConstraintPickTargetが同じ対象を指すか(原点一致[追加項目]で端点/原点の同一クリック判定にも使う)。 */
+  private isSameConstraintPickTarget(a: ConstraintPickTarget, b: ConstraintPickTarget): boolean {
+    if (a.kind === "segment" && b.kind === "segment") return a.segmentId === b.segmentId;
+    if (a.kind === "circle" && b.kind === "circle") return a.entityId === b.entityId;
+    if (a.kind === "point" && b.kind === "point") return a.point.segmentId === b.point.segmentId && a.point.end === b.point.end;
+    if (a.kind === "origin" && b.kind === "origin") return true;
+    return false;
+  }
+
+  /**
+   * 拘束ツール中のクリック処理。許容距離内の最近傍(原点/端点/直線セグメント/circle、追加項目で
+   * 原点・端点を追加)を1つ目→2つ目の順で確定する。
+   */
   private handleConstraintToolClick(event: MouseEvent) {
     if (!this.constraintToolBasis) return;
     const basis = this.constraintToolBasis;
     const rect = this.renderer.domElement.getBoundingClientRect();
     const px = event.clientX - rect.left;
     const py = event.clientY - rect.top;
-    const hit = this.raycastDrawingPlane(basis, px, py, rect);
-    if (!hit) return;
-    const local = planeWorldToLocal(basis, hit);
-    const toleranceMm = this.pxToMm(DIMENSION_SEGMENT_TOLERANCE_PX, hit);
-    const pickHit = this.findConstraintPickHit(local);
-    if (!pickHit || pickHit.dist > toleranceMm) return;
+    const pickHit = this.findConstraintPickHitScreen(basis, px, py, rect);
+    if (!pickHit) return;
 
     const pending = this.constraintPendingTarget;
     if (!pending) {
       this.setConstraintPendingTarget(pickHit.target, pickHit.highlightPoints);
       return;
     }
-    const isSameAsPending =
-      (pending.kind === "segment" && pickHit.target.kind === "segment" && pending.segmentId === pickHit.target.segmentId) ||
-      (pending.kind === "circle" && pickHit.target.kind === "circle" && pending.entityId === pickHit.target.entityId);
-    if (isSameAsPending) return;
+    if (this.isSameConstraintPickTarget(pending, pickHit.target)) return;
 
     this.setConstraintPendingTarget(null);
     this.clearDrawingPreview();
@@ -3991,15 +4137,8 @@ export class CadViewer {
     const rect = this.renderer.domElement.getBoundingClientRect();
     const px = event.clientX - rect.left;
     const py = event.clientY - rect.top;
-    const hit = this.raycastDrawingPlane(basis, px, py, rect);
-    if (!hit) {
-      this.clearDrawingPreview();
-      return;
-    }
-    const local = planeWorldToLocal(basis, hit);
-    const toleranceMm = this.pxToMm(DIMENSION_SEGMENT_TOLERANCE_PX, hit);
-    const pickHit = this.findConstraintPickHit(local);
-    if (!pickHit || pickHit.dist > toleranceMm) {
+    const pickHit = this.findConstraintPickHitScreen(basis, px, py, rect);
+    if (!pickHit) {
       this.clearDrawingPreview();
       return;
     }

@@ -153,6 +153,9 @@ const EDGE_LENGTH_TOLERANCE_MIN = 1e-6;
 function subtract(a: Tuple3, b: Tuple3): Tuple3 {
   return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 }
+function add(a: Tuple3, b: Tuple3): Tuple3 {
+  return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+}
 function dot(a: Tuple3, b: Tuple3): number {
   return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
@@ -1382,11 +1385,12 @@ function facePlaneBasis(center: Tuple3, normal: Tuple3): PlaneBasis {
 /**
  * bodyの中から、平面basis上に載っている(両端点の平面距離がREFERENCE_EDGE_PLANE_TOLERANCE未満)
  * 直線エッジ(geomType==="LINE")を抽出し、スケッチローカル2D座標(basisのxDir/yDir成分)に投影する
- * (Phase 22、ボディ端面参照寸法)。円弧・自由曲線エッジは対象外(v1)。
+ * (Phase 22、ボディ端面参照寸法)。円弧・自由曲線エッジは対象外(v1)。source:"edge"を付与する
+ * (extractReferenceEdges()がsource:"faceIntersection"の面交線と合成する)。
  * 使用replicad API: Shape.edges / Edge.geomType / Edge.startPoint / Edge.endPoint(いずれもVectorを
  * 返すため toTuple() 後に delete() する)。
  */
-function extractReferenceEdges(body: Shape3D, basis: PlaneBasis): ReferenceEdgeLine[] {
+function extractEdgeReferenceLines(body: Shape3D, basis: PlaneBasis): ReferenceEdgeLine[] {
   const result: ReferenceEdgeLine[] = [];
   const edges = body.edges;
   try {
@@ -1405,12 +1409,157 @@ function extractReferenceEdges(body: Shape3D, basis: PlaneBasis): ReferenceEdgeL
       if (Math.abs(dStart) > REFERENCE_EDGE_PLANE_TOLERANCE || Math.abs(dEnd) > REFERENCE_EDGE_PLANE_TOLERANCE) continue;
       const p1: [number, number] = [dot(relStart, basis.xDir), dot(relStart, basis.yDir)];
       const p2: [number, number] = [dot(relEnd, basis.xDir), dot(relEnd, basis.yDir)];
-      result.push({ p1, p2 });
+      result.push({ p1, p2, source: "edge" });
     }
   } finally {
     edges.forEach((e) => e.delete());
   }
   return result;
+}
+
+/** 面がスケッチ平面と垂直とみなす法線同士のdot許容(絶対値、追加項目)。0に近いほど厳密に垂直。 */
+const FACE_PERPENDICULAR_DOT_TOLERANCE = 1e-4;
+/** 参照線の重複判定(同一直線上・近接)の距離許容(mm、追加項目)。 */
+const REFERENCE_LINE_DEDUP_DIST_TOLERANCE = 1e-3;
+/** 参照線の重複判定の方向一致許容(cos値、追加項目)。0.999 ≈ 約2.6度以内。 */
+const REFERENCE_LINE_DEDUP_COS_TOLERANCE = 0.999;
+
+/**
+ * 2本の参照線(スケッチローカル2D)が「同一直線上に載り、範囲が重なる(または接する)」かどうかを判定する
+ * (追加項目: 面交線が既存のボディ端面エッジと重複するのを防ぐ重複排除)。
+ */
+function isDuplicateReferenceLine(a: ReferenceEdgeLine, b: ReferenceEdgeLine): boolean {
+  const adx = a.p2[0] - a.p1[0];
+  const ady = a.p2[1] - a.p1[1];
+  const alen = Math.hypot(adx, ady);
+  if (alen < 1e-9) return false;
+  const aux = adx / alen;
+  const auy = ady / alen;
+  const bdx = b.p2[0] - b.p1[0];
+  const bdy = b.p2[1] - b.p1[1];
+  const blen = Math.hypot(bdx, bdy);
+  if (blen < 1e-9) return false;
+  const bux = bdx / blen;
+  const buy = bdy / blen;
+  if (Math.abs(aux * bux + auy * buy) < REFERENCE_LINE_DEDUP_COS_TOLERANCE) return false; // 平行でない
+
+  // aの直線からb.p1への垂直距離(2D外積)。
+  const relx = b.p1[0] - a.p1[0];
+  const rely = b.p1[1] - a.p1[1];
+  const perp = Math.abs(relx * -auy + rely * aux);
+  if (perp > REFERENCE_LINE_DEDUP_DIST_TOLERANCE) return false; // 直線がずれている
+
+  // aの方向へ射影したbの範囲がaの範囲[0, alen]と重なるか(接するのも重複とみなす)。
+  const tb1 = (b.p1[0] - a.p1[0]) * aux + (b.p1[1] - a.p1[1]) * auy;
+  const tb2 = (b.p2[0] - a.p1[0]) * aux + (b.p2[1] - a.p1[1]) * auy;
+  const bMin = Math.min(tb1, tb2);
+  const bMax = Math.max(tb1, tb2);
+  const overlap = Math.min(alen, bMax) - Math.max(0, bMin);
+  return overlap > -REFERENCE_LINE_DEDUP_DIST_TOLERANCE;
+}
+
+/**
+ * bodyの平面フェイスのうち、スケッチ平面と垂直なもの(法線同士のdot<FACE_PERPENDICULAR_DOT_TOLERANCE)
+ * について、その面とスケッチ平面の交線をスケッチローカル2D座標の参照線として抽出する
+ * (追加項目: スケッチ外オブジェクトの側面等からの寸法指定を可能にする)。
+ * 範囲はその面の外周エッジ頂点を交線方向へ投影した範囲にクリップする(「面のバウンディング内」)。
+ * 既にexisting(edge由来の参照線)と同一直線上・近接するものは重複として除外する(結果内での
+ * 重複も同様に除外する)。
+ *
+ * 平面同士の交線の求め方(標準公式): 2平面 n1・X=c1(スケッチ平面), n2・X=c2(面) の交線の方向は
+ * dir=n1×n2(垂直条件からdirは非退化)。交線上の1点は
+ * p0 = (c1・(n2×dir) + c2・(dir×n1)) / (dir・dir)。
+ *
+ * 使用replicad API: Shape.faces / Face.geomType / Face.normalAt() / Face.center / Face.edges
+ * (面の外周を構成するエッジ、Edge.startPoint/endPoint)。
+ */
+function extractFaceIntersectionReferenceLines(
+  body: Shape3D,
+  basis: PlaneBasis,
+  existing: readonly ReferenceEdgeLine[],
+): ReferenceEdgeLine[] {
+  const result: ReferenceEdgeLine[] = [];
+  const faces = body.faces;
+  try {
+    for (const face of faces) {
+      if (face.geomType !== "PLANE") continue;
+      const normalVec = face.normalAt();
+      const faceNormal = normalize(normalVec.toTuple());
+      normalVec.delete();
+      if (Math.abs(dot(faceNormal, basis.normal)) >= FACE_PERPENDICULAR_DOT_TOLERANCE) continue; // 垂直でない
+
+      const centerVec = face.center;
+      const faceCenter = centerVec.toTuple();
+      centerVec.delete();
+
+      const dir = cross(basis.normal, faceNormal);
+      const dirLen = length(dir);
+      if (dirLen < 1e-9) continue; // 理論上到達しない(垂直条件を満たす限りdirは非退化)
+      const dirUnit = normalize(dir);
+
+      const c1 = dot(basis.normal, basis.origin);
+      const c2 = dot(faceNormal, faceCenter);
+      const term1 = scaleVec(cross(faceNormal, dir), c1);
+      const term2 = scaleVec(cross(dir, basis.normal), c2);
+      const denom = dot(dir, dir);
+      const p0: Tuple3 = scaleVec(
+        [term1[0] + term2[0], term1[1] + term2[1], term1[2] + term2[2]],
+        1 / denom,
+      );
+
+      // 面の外周エッジの頂点をdirUnit方向へ投影し、その範囲にクリップする。
+      let tMin = Infinity;
+      let tMax = -Infinity;
+      const faceEdges = face.edges;
+      try {
+        for (const edge of faceEdges) {
+          const sVec = edge.startPoint;
+          const eVec = edge.endPoint;
+          const s = sVec.toTuple();
+          const e = eVec.toTuple();
+          sVec.delete();
+          eVec.delete();
+          const ts = dot(subtract(s, p0), dirUnit);
+          const te = dot(subtract(e, p0), dirUnit);
+          if (ts < tMin) tMin = ts;
+          if (ts > tMax) tMax = ts;
+          if (te < tMin) tMin = te;
+          if (te > tMax) tMax = te;
+        }
+      } finally {
+        faceEdges.forEach((e) => e.delete());
+      }
+      if (!Number.isFinite(tMin) || !Number.isFinite(tMax) || tMax - tMin < 1e-6) continue;
+
+      const p1World = add(p0, scaleVec(dirUnit, tMin));
+      const p2World = add(p0, scaleVec(dirUnit, tMax));
+      const rel1 = subtract(p1World, basis.origin);
+      const rel2 = subtract(p2World, basis.origin);
+      const candidate: ReferenceEdgeLine = {
+        p1: [dot(rel1, basis.xDir), dot(rel1, basis.yDir)],
+        p2: [dot(rel2, basis.xDir), dot(rel2, basis.yDir)],
+        source: "faceIntersection",
+      };
+
+      if (existing.some((e) => isDuplicateReferenceLine(e, candidate))) continue;
+      if (result.some((e) => isDuplicateReferenceLine(e, candidate))) continue;
+      result.push(candidate);
+    }
+  } finally {
+    faces.forEach((f) => f.delete());
+  }
+  return result;
+}
+
+/**
+ * ボディ端面参照エッジ(Phase 22)+面交線参照(追加項目)を合成して返す。前者を優先し、後者は
+ * 重複しないものだけを追加する(重複判定はisDuplicateReferenceLine、extractFaceIntersectionReferenceLines
+ * 内で行う)。
+ */
+function extractReferenceEdges(body: Shape3D, basis: PlaneBasis): ReferenceEdgeLine[] {
+  const edgeLines = extractEdgeReferenceLines(body, basis);
+  const faceLines = extractFaceIntersectionReferenceLines(body, basis, edgeLines);
+  return [...edgeLines, ...faceLines];
 }
 
 /**

@@ -55,6 +55,7 @@ import type {
 } from "../model/types";
 import { MALE_THREAD_MAX_LENGTH, THREAD_PRESET_LIST } from "../model/threadPresets";
 import {
+  addCoincidentOriginConstraint,
   addConcentricConstraint,
   addPerpendicularConstraint,
   addTangentEntityConstraint,
@@ -74,11 +75,13 @@ import {
   upsertDistanceEntityOriginConstraint,
   upsertDistanceLineLineConstraint,
   upsertDistanceLineRefEdgeConstraint,
+  upsertDistancePointOriginConstraint,
   upsertLengthConstraint,
   upsertRadiusConstraint,
 } from "../sketch/constraintDimensions";
 import { deserializeProject, serializeProject } from "../project/serialization";
 import { distanceBetweenPoints, distancePointToLine } from "../sketch/positionDimensions";
+import { worldOriginLocal } from "../sketch/originRef";
 import { rectangleFromCorners, regularPolygonVertices } from "../sketch/shapeFromPoints";
 import { trimSegmentAtPoint } from "../sketch/trim";
 import { updateDocumentWithConflictRollback } from "../state/constraintUpdate";
@@ -1382,6 +1385,9 @@ export default function App() {
         const feature = findFeature(currentDoc, sketchId);
         const segments = feature?.type === "sketch" ? (feature.segments ?? []) : [];
         const entities = feature?.type === "sketch" ? feature.entities : [];
+        // 「原点」=ワールド原点をスケッチ平面へ投影した点(仕様変更対応)。selectedSketchPlaneは
+        // startDimensionTool呼び出し時点でnon-nullが保証済み(この関数の冒頭で早期returnしている)。
+        const originLocal = worldOriginLocal(selectedSketchPlane);
         let titleLabel = "距離 (mm)";
         let initialValue = 0;
         let hintLabel: string | undefined;
@@ -1409,7 +1415,13 @@ export default function App() {
         } else if (target.kind === "circle-distance-origin") {
           titleLabel = "中心↔原点の距離 (mm)";
           const entity = entities.find((e) => e.id === target.entityId);
-          initialValue = entity?.kind === "circle" ? distanceBetweenPoints(entity.center, [0, 0]) : 0;
+          initialValue = entity?.kind === "circle" ? distanceBetweenPoints(entity.center, originLocal) : 0;
+        } else if (target.kind === "point-distance-origin") {
+          // セグメント端点↔原点の距離(追加項目: 原点ピック常時有効化)。
+          titleLabel = "端点↔原点の距離 (mm)";
+          const seg = segments.find((s) => s.id === target.point.segmentId);
+          const p = seg ? (target.point.end === "p1" ? seg.p1 : seg.p2) : null;
+          initialValue = p ? distanceBetweenPoints(p, originLocal) : 0;
         } else if (target.kind === "circle-distance-circle") {
           titleLabel = "中心間の距離 (mm)";
           const from = entities.find((e) => e.id === target.fromEntityId);
@@ -1490,8 +1502,11 @@ export default function App() {
           // 1つ目としてクリックした状態。次は円(円↔参照エッジの距離)または線分
           // (線分↔参照エッジの距離/角度)のどちらも選べる。
           setDimensionPendingLabel("1つ目: 参照エッジ → 次: 円/線分をクリック");
+        } else if (state.kind === "origin") {
+          // 原点ピック常時有効化(追加項目、ユーザー報告対応)。
+          setDimensionPendingLabel("1つ目: 原点 → 2つ目を選択(円/端点)");
         } else {
-          setDimensionPendingLabel("1つ目: 端点 → 2つ目の端点を選択(距離)");
+          setDimensionPendingLabel("1つ目: 端点 → 2つ目の端点を選択(距離/原点)");
         }
       },
     });
@@ -1528,6 +1543,9 @@ export default function App() {
     // 距離/角度の選択(Phase 24項目3、UI改善): ポップアップのラジオで明示的に選ばれた方を使う
     // (未指定ならポップアップ表示時に決めた既定[折り畳み角<5度なら距離]にフォールバック)。
     const wantsDistance = (quantity ?? dimensionPopup.quantityOptions?.initial) !== "angle";
+    // 「原点」=ワールド原点をスケッチ平面へ投影した点(仕様変更対応)。selectedSketchPlaneが
+    // 解決できていない(面参照が壊れた等)場合はundefinedのまま渡し、upsert側の[0,0]フォールバックに任せる。
+    const originLocal = selectedSketchPlane ? worldOriginLocal(selectedSketchPlane) : undefined;
 
     if (target.kind === "entity-radius") {
       updateDocument((doc) => updateSketchEntity(doc, sketchId, target.entityId, { radius: value }));
@@ -1593,10 +1611,12 @@ export default function App() {
               : target.kind === "distance"
                 ? upsertDistanceConstraint(constraints, target.a, target.b, value)
                 : target.kind === "circle-distance-origin"
-                  ? upsertDistanceEntityOriginConstraint(constraints, target.entityId, value)
-                  : target.kind === "circle-distance-circle"
-                    ? upsertDistanceEntityEntityConstraint(constraints, target.fromEntityId, target.toEntityId, value, axis)
-                    : upsertDistanceEntityLineConstraint(constraints, target.entityId, target.line, value);
+                  ? upsertDistanceEntityOriginConstraint(constraints, target.entityId, value, originLocal)
+                  : target.kind === "point-distance-origin"
+                    ? upsertDistancePointOriginConstraint(constraints, target.point, value, originLocal)
+                    : target.kind === "circle-distance-circle"
+                      ? upsertDistanceEntityEntityConstraint(constraints, target.fromEntityId, target.toEntityId, value, axis)
+                      : upsertDistanceEntityLineConstraint(constraints, target.entityId, target.line, value);
         return setSketchConstraints(doc, sketchId, next);
       },
       showTransientMessage,
@@ -1628,8 +1648,14 @@ export default function App() {
           setConstraintPendingLabel(null);
         } else if (pending.kind === "segment") {
           setConstraintPendingLabel("1つ目: 線分 → 2つ目を選択(線分/円)");
+        } else if (pending.kind === "circle") {
+          setConstraintPendingLabel("1つ目: 円 → 2つ目を選択(円/線分/原点)");
+        } else if (pending.kind === "point") {
+          // 原点一致(追加項目): 線分端点を1つ目としてクリックした状態。
+          setConstraintPendingLabel("1つ目: 端点 → 2つ目を選択(原点)");
         } else {
-          setConstraintPendingLabel("1つ目: 円 → 2つ目を選択(円/線分)");
+          // 原点を1つ目としてクリックした状態(追加項目: 拘束ツールに「原点一致」を追加)。
+          setConstraintPendingLabel("1つ目: 原点 → 2つ目を選択(円/端点)");
         }
       },
     });
@@ -1657,9 +1683,18 @@ export default function App() {
 
   /**
    * ピックした2対象の組み合わせから適用可能な拘束の選択肢を返す(表示ラベル+kind)。
-   * 線分+線分=垂直のみ、円+円=同心/接線(外接or内接は自動判定)、円+線分=接線のみ。
+   * 線分+線分=垂直のみ、円+円=同心/接線(外接or内接は自動判定)、円+線分=接線のみ、
+   * 原点+(線分端点または円)=原点一致のみ(追加項目)。それ以外の組み合わせ(点+点等)は選択肢無し。
    */
-  function constraintOptionsFor(a: ConstraintPickTarget, b: ConstraintPickTarget): { label: string; kind: "perpendicular" | "concentric" | "tangent" }[] {
+  function constraintOptionsFor(
+    a: ConstraintPickTarget,
+    b: ConstraintPickTarget,
+  ): { label: string; kind: "perpendicular" | "concentric" | "tangent" | "coincidentOrigin" }[] {
+    if (a.kind === "origin" || b.kind === "origin") {
+      const other = a.kind === "origin" ? b : a;
+      if (other.kind === "point" || other.kind === "circle") return [{ label: "原点一致", kind: "coincidentOrigin" }];
+      return [];
+    }
     if (a.kind === "segment" && b.kind === "segment") return [{ label: "垂直", kind: "perpendicular" }];
     if (a.kind === "circle" && b.kind === "circle") {
       return [
@@ -1667,11 +1702,14 @@ export default function App() {
         { label: "接線", kind: "tangent" },
       ];
     }
-    return [{ label: "接線", kind: "tangent" }];
+    if ((a.kind === "circle" && b.kind === "segment") || (a.kind === "segment" && b.kind === "circle")) {
+      return [{ label: "接線", kind: "tangent" }];
+    }
+    return [];
   }
 
   /** 拘束選択ポップアップで種別が選ばれたときの拘束作成。矛盾したら自動的に取り消す(既存パターンに合わせる)。 */
-  function handleApplyConstraintKind(kind: "perpendicular" | "concentric" | "tangent") {
+  function handleApplyConstraintKind(kind: "perpendicular" | "concentric" | "tangent" | "coincidentOrigin") {
     if (!constraintPopup || !selectedFeature || selectedFeature.type !== "sketch") return;
     const sketchId = selectedFeature.id;
     const { a, b } = constraintPopup;
@@ -1687,6 +1725,15 @@ export default function App() {
           next = addPerpendicularConstraint(constraints, a.segmentId, b.segmentId);
         } else if (kind === "concentric" && a.kind === "circle" && b.kind === "circle") {
           next = addConcentricConstraint(constraints, a.entityId, b.entityId);
+        } else if (kind === "coincidentOrigin") {
+          // 原点一致(追加項目): a/bのどちらかがoriginで、もう片方が線分端点(point)またはcircle。
+          const target = a.kind === "origin" ? b : a;
+          const originLocal = selectedSketchPlane ? worldOriginLocal(selectedSketchPlane) : undefined;
+          if (target.kind === "point") {
+            next = addCoincidentOriginConstraint(constraints, target.point, originLocal);
+          } else if (target.kind === "circle") {
+            next = addCoincidentOriginConstraint(constraints, { entityId: target.entityId }, originLocal);
+          }
         } else if (kind === "tangent") {
           if (a.kind === "circle" && b.kind === "circle") {
             next = addTangentEntityConstraint(constraints, feature.entities, a.entityId, b.entityId);

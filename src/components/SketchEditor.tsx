@@ -419,6 +419,8 @@ const CONSTRAINT_KIND_LABELS: Record<SketchConstraint["kind"], string> = {
   radius: "半径",
   fix: "固定",
   distanceEntityOrigin: "中心↔原点距離",
+  distancePointOrigin: "端点↔原点距離",
+  coincidentOrigin: "原点一致",
   distanceEntityEntity: "中心間距離",
   distanceEntityLine: "中心↔辺距離",
   fixEntity: "円の固定",
@@ -459,6 +461,12 @@ function describeConstraint(
       return pointRefLabel(segments, constraint.point);
     case "distanceEntityOrigin":
       return `${entityLabel(entities, constraint.entity.entityId)} - 原点 = ${formatMm(constraint.value)}mm`;
+    case "distancePointOrigin":
+      return `${pointRefLabel(segments, constraint.point)} - 原点 = ${formatMm(constraint.value)}mm`;
+    case "coincidentOrigin":
+      return "segmentId" in constraint.point
+        ? `${pointRefLabel(segments, constraint.point)} = 原点`
+        : `${entityLabel(entities, constraint.point.entityId)} = 原点`;
     case "distanceEntityEntity": {
       const axisPrefix = constraint.axis === "x" ? "X:" : constraint.axis === "y" ? "Y:" : "";
       return `${entityLabel(entities, constraint.a.entityId)} - ${entityLabel(entities, constraint.b.entityId)} = ${axisPrefix}${formatMm(constraint.value)}mm`;

@@ -20,6 +20,7 @@ import {
   upsertDistanceEntityLineConstraint,
   upsertDistanceEntityOriginConstraint,
   upsertDistanceLineLineConstraint,
+  upsertDistancePointOriginConstraint,
   upsertLengthConstraint,
   upsertRadiusConstraint,
   type ConstraintDimension,
@@ -120,7 +121,12 @@ function constraintDimensionGraphics(
   if (dimension.kind === "entity-distance-origin") {
     const c = circleCenter(dimension.entityId);
     if (!c) return null;
-    return computeLinearDimensionGraphics(c, [0, 0]);
+    return computeLinearDimensionGraphics(c, dimension.origin);
+  }
+  if (dimension.kind === "point-distance-origin") {
+    const p = pointFromRef(segments, dimension.point);
+    if (!p) return null;
+    return computeLinearDimensionGraphics(p, dimension.origin);
   }
   if (dimension.kind === "entity-distance-entity") {
     const a = circleCenter(dimension.aEntityId);
@@ -218,6 +224,7 @@ const CONSTRAINT_DIMENSION_LABELS: Record<ConstraintDimension["kind"], string> =
   "seg-radius": "半径 (mm)",
   "seg-distance": "距離 (mm)",
   "entity-distance-origin": "中心↔原点の距離 (mm)",
+  "point-distance-origin": "端点↔原点の距離 (mm)",
   "entity-distance-entity": "中心間の距離 (mm)",
   "entity-distance-line": "中心↔辺の距離 (mm)",
   "seg-distance-line-line": "距離 (mm)",
@@ -357,8 +364,10 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
               : dimension.kind === "seg-distance"
                 ? upsertDistanceConstraint(constraints, dimension.a, dimension.b, value)
                 : dimension.kind === "entity-distance-origin"
-                  ? upsertDistanceEntityOriginConstraint(constraints, dimension.entityId, value)
-                  : dimension.kind === "entity-distance-entity"
+                  ? upsertDistanceEntityOriginConstraint(constraints, dimension.entityId, value, dimension.origin)
+                  : dimension.kind === "point-distance-origin"
+                    ? upsertDistancePointOriginConstraint(constraints, dimension.point, value, dimension.origin)
+                    : dimension.kind === "entity-distance-entity"
                     ? upsertDistanceEntityEntityConstraint(constraints, dimension.aEntityId, dimension.bEntityId, value, axis)
                     : dimension.kind === "entity-distance-line"
                       ? upsertDistanceEntityLineConstraint(constraints, dimension.entityId, dimension.line, value)

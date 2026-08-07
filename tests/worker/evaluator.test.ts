@@ -1074,6 +1074,143 @@ describe("evaluateDocument (WASM統合): スケッチ・オン・フェイス", 
     expect(result.referenceEdges.some((r) => r.sketchId === boxSketch.id)).toBe(false);
   });
 
+  it("箱の上面へのfaceスケッチのreferenceEdgesは、側面4面との交線が上面の4辺と重複するため重複排除され4件のまま(追加項目)", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+    const rect = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: doc1, feature: boxSketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+    });
+    const { doc: doc2, feature: boxExtrude } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: boxSketch.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const boxResult = evaluateDocument(doc2);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const top = findTopFace(boxResult.shape);
+    boxResult.shape.delete();
+
+    const circle = createCircleEntity({ radius: 10 });
+    const { doc: doc3, feature: faceSketch } = addSketchFeature(doc2, {
+      name: "FaceSketch1",
+      plane: { kind: "face", featureId: boxExtrude.id, faceId: top.faceId, center: top.center, normal: top.normal },
+      entities: [circle],
+    });
+
+    const result = evaluateDocument(doc3);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    if (result.shape) result.shape.delete();
+
+    // 箱の4側面(法線±X/±Y)はいずれも上面スケッチの法線(+Z)と垂直なので面交線抽出の対象になるが、
+    // その交線(z=20での切断線)は上面の4辺そのものと一致するため、重複排除により新規追加されない
+    // (既存のreferenceEdges[4件]が変わらないことを確認する)。
+    const refSet = result.referenceEdges.find((r) => r.sketchId === faceSketch.id);
+    expect(refSet).toBeDefined();
+    expect(refSet?.edges.length).toBe(4);
+    expect(refSet?.edges.every((e) => e.source === "edge")).toBe(true);
+  });
+
+  it("スケッチ外ボディの垂直な側面との交線がreferenceEdgesに追加される(追加項目: スケッチ外オブジェクトの平面からの寸法指定)", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const empty = createEmptyDocument();
+
+    // ボディA: 60x40の矩形(原点中心)を高さ20で押し出した背の高いボディ(x∈[-30,30], y∈[-20,20], z∈[0,20])。
+    const rectA = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: doc1, feature: sketchA } = addSketchFeature(empty, {
+      name: "SketchA",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rectA],
+    });
+    const { doc: doc2, feature: extrudeA } = addExtrudeFeature(doc1, {
+      name: "ExtrudeA",
+      sketchId: sketchA.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    // ボディB: ボディAから離れた位置(y中心=100)に置いた小さな矩形を高さ10で押し出す
+    // (x∈[-5,5], y∈[95,105], z∈[0,10])。この上面(z=10)にスケッチを置く。
+    const rectB = createRectangleEntity({ center: [0, 100], width: 10, height: 10 });
+    const { doc: doc3, feature: sketchB } = addSketchFeature(doc2, {
+      name: "SketchB",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rectB],
+    });
+    const { doc: doc4, feature: extrudeB } = addExtrudeFeature(doc3, {
+      name: "ExtrudeB",
+      sketchId: sketchB.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+
+    const preResult = evaluateDocument(doc4);
+    expect(preResult.ok).toBe(true);
+    if (!preResult.ok) return;
+    // findTopFaceは法線+Zの面を探す(ボディA・Bの両方の上面が該当しうるため、center.y>50で
+    // ボディBの上面を判別する)。
+    const faces = preResult.shape.faces;
+    let topB: { faceId: number; center: [number, number, number]; normal: [number, number, number] } | null = null;
+    for (const face of faces) {
+      if (face.geomType === "PLANE") {
+        const centerVec = face.center;
+        const normalVec = face.normalAt();
+        const center = centerVec.toTuple();
+        const normal = normalVec.toTuple();
+        centerVec.delete();
+        normalVec.delete();
+        if (Math.abs(normal[2] - 1) < 1e-6 && Math.abs(normal[0]) < 1e-6 && Math.abs(normal[1]) < 1e-6 && center[1] > 50) {
+          topB = { faceId: face.hashCode, center, normal };
+        }
+      }
+      face.delete();
+    }
+    preResult.shape.delete();
+    if (!topB) throw new Error("テストセットアップ失敗: ボディBの上面が見つかりません");
+
+    const circle = createCircleEntity({ radius: 2 });
+    const { doc: doc5, feature: faceSketch } = addSketchFeature(doc4, {
+      name: "FaceSketchB",
+      plane: { kind: "face", featureId: extrudeB.id, faceId: topB.faceId, center: topB.center, normal: topB.normal },
+      entities: [circle],
+    });
+
+    const result = evaluateDocument(doc5);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    if (result.shape) result.shape.delete();
+
+    const refSet = result.referenceEdges.find((r) => r.sketchId === faceSketch.id);
+    expect(refSet).toBeDefined();
+    const edges = refSet?.edges ?? [];
+    // ボディBの上面(スケッチ自身が乗る面)自身の4辺(source:"edge"、ローカル±5)+
+    // ボディAの4側面との交線(source:"faceIntersection")の合計8件になる。
+    expect(edges.length).toBe(8);
+    const edgeSourced = edges.filter((e) => e.source === "edge");
+    const faceIntersectionSourced = edges.filter((e) => e.source === "faceIntersection");
+    expect(edgeSourced.length).toBe(4);
+    expect(faceIntersectionSourced.length).toBe(4);
+
+    // ボディAの4側面はボディBのスケッチ平面(z=10)を、ボディBの原点(0,100,10)基準のローカル座標で
+    // x∈{-30,30}(y方向の辺)・y∈{-120,-80}(x方向の辺)の矩形として横切る(ボディAの範囲x∈[-30,30],
+    // y∈[-20,20]をy=100だけ平行移動: -20-100=-120, 20-100=-80)。
+    const corners = new Set<string>();
+    for (const edge of faceIntersectionSourced) {
+      corners.add(`${edge.p1[0].toFixed(1)},${edge.p1[1].toFixed(1)}`);
+      corners.add(`${edge.p2[0].toFixed(1)},${edge.p2[1].toFixed(1)}`);
+    }
+    expect(corners).toEqual(new Set(["30.0,-120.0", "30.0,-80.0", "-30.0,-120.0", "-30.0,-80.0"]));
+  });
+
   it("箱の上面へのfaceスケッチ+円でAdd(材料追加)するとボスが乗り、バウンディングボックスの高さが増える", (ctx) => {
     ctx.skip(!wasmLoaded, SKIP_NOTE);
     const empty = createEmptyDocument();

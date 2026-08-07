@@ -591,6 +591,83 @@ describe("solveSketch circleエンティティの位置拘束(Phase 22)", () => 
   });
 });
 
+describe("solveSketch 原点系拘束(distancePointOrigin/coincidentOrigin、追加項目)", () => {
+  function circle(id: string, center: [number, number], radius = 5): Extract<SketchEntity, { kind: "circle" }> {
+    return { kind: "circle", id, center, radius };
+  }
+
+  it("① distancePointOrigin: 線分端点↔原点の距離が指定値に解ける(originLocal省略時はローカル原点[0,0]基準)", () => {
+    const seg: SketchSegment = { id: "s1", kind: "line", p1: [10, 0], p2: [20, 0] };
+    const constraints: SketchConstraint[] = [
+      { id: "d1", kind: "distancePointOrigin", point: { segmentId: "s1", end: "p1" }, value: 25 },
+    ];
+    const result = solveSketch([seg], constraints);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.segments[0];
+    expect(dist(out.p1, [0, 0])).toBeCloseTo(25, 4);
+    // p2は端点p1の拘束から独立(正則化により元の相対位置に近い解を選ぶ)。
+  });
+
+  it("② coincidentOrigin(線分端点): 端点が原点(ローカル[0,0])に一致するよう解ける", () => {
+    const seg: SketchSegment = { id: "s1", kind: "line", p1: [10, 5], p2: [20, 5] };
+    const constraints: SketchConstraint[] = [
+      { id: "o1", kind: "coincidentOrigin", point: { segmentId: "s1", end: "p1" } },
+    ];
+    const result = solveSketch([seg], constraints);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.segments[0];
+    expect(out.p1[0]).toBeCloseTo(0, 4);
+    expect(out.p1[1]).toBeCloseTo(0, 4);
+  });
+
+  it("③ coincidentOrigin(circle)+originLocal: 面上スケッチのワールド原点投影位置(ローカル[0,0]以外)に円の中心が一致する", () => {
+    // originLocal=[5,-3]は「面上スケッチでワールド原点をスケッチ平面へ投影した点」のスナップショット
+    // (src/sketch/originSnapshot.tsが評価のたびにsketchPlanesから計算して書き込む値に相当)を模している。
+    const c = circle("c1", [10, 10]);
+    const constraints: SketchConstraint[] = [
+      { id: "o1", kind: "coincidentOrigin", point: { entityId: "c1" }, originLocal: [5, -3] },
+    ];
+    const result = solveSketch([], constraints, [c]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.entities[0];
+    if (out.kind !== "circle") throw new Error("not circle");
+    expect(out.center[0]).toBeCloseTo(5, 4);
+    expect(out.center[1]).toBeCloseTo(-3, 4);
+  });
+
+  it("④ distanceEntityOrigin+originLocal(仕様変更、既存拘束との併用): 面上スケッチでワールド原点の投影位置基準の距離に解ける", () => {
+    // 例: 箱を(30,20)中心で作った上面スケッチのように、ワールド原点の投影位置がスケッチの
+    // ローカル(0,0)と一致しないケース。originLocal=[5,5]を「原点」として距離20を指定する。
+    const c = circle("c1", [5, 0]);
+    const constraints: SketchConstraint[] = [
+      { id: "d1", kind: "distanceEntityOrigin", entity: { entityId: "c1" }, value: 20, originLocal: [5, 5] },
+    ];
+    const result = solveSketch([], constraints, [c]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.entities[0];
+    if (out.kind !== "circle") throw new Error("not circle");
+    expect(dist(out.center, [5, 5])).toBeCloseTo(20, 4);
+    // ローカル(0,0)基準では無いことの確認(誤って[0,0]を使うと26.9程度になり20にならない)。
+    expect(dist(out.center, [0, 0])).not.toBeCloseTo(20, 1);
+  });
+
+  it("⑤ coincidentOriginとfixEntityが矛盾するとconflictingになる(固定した円を原点一致させようとする)", () => {
+    const c = circle("c1", [10, 10]);
+    const constraints: SketchConstraint[] = [
+      { id: "fix1", kind: "fixEntity", entity: { entityId: "c1" } },
+      { id: "o1", kind: "coincidentOrigin", point: { entityId: "c1" } },
+    ];
+    const result = solveSketch([], constraints, [c]);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.conflicting).toBe(true);
+  });
+});
+
 describe("solveSketch 幾何拘束(perpendicular/concentric/tangent、Phase 23)", () => {
   function circle(id: string, center: [number, number], radius = 5): Extract<SketchEntity, { kind: "circle" }> {
     return { kind: "circle", id, center, radius };

@@ -130,12 +130,17 @@ export interface SketchPlaneInfo {
 }
 
 /**
- * 1本の直線エッジ(スケッチローカル2D座標、Phase 22)。
- * スケッチ平面上に載っている(両端点の平面距離<1e-4)直線エッジのみを対象とする(v1、円弧等は非対応)。
+ * 1本の直線参照線(スケッチローカル2D座標、Phase 22。追加項目でsourceを追加)。
+ * source:"edge"はスケッチ平面上に載っている(両端点の平面距離<1e-4)ボディの直線エッジそのもの(v1、
+ * 円弧等は非対応)。source:"faceIntersection"はスケッチ平面と垂直な平面フェイスとスケッチ平面との
+ * 交線(範囲はその面のバウンディング内にクリップ)で、スケッチ外オブジェクトの側面等からの寸法指定を
+ * 可能にする(追加項目)。表示・ピック挙動はいずれも同じ(破線グレー統一)なので、寸法ツール側の
+ * ハンドリングはsourceを区別しない。省略はレガシーデータ用のフォールバックとして"edge"扱い。
  */
 export interface ReferenceEdgeLine {
   p1: [number, number];
   p2: [number, number];
+  source?: "edge" | "faceIntersection";
 }
 
 /**
