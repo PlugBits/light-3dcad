@@ -125,6 +125,10 @@ export default function App() {
   const bodyGroups = useCadStore((s) => s.bodyGroups);
   const errorMessage = useCadStore((s) => s.errorMessage);
   const errorFeatureId = useCadStore((s) => s.errorFeatureId);
+  const kernelCrashed = useCadStore((s) => s.kernelCrashed);
+  const restartKernel = useCadStore((s) => s.restartKernel);
+  const autosaveRestoreSkipped = useCadStore((s) => s.autosaveRestoreSkipped);
+  const retryAutosaveRestore = useCadStore((s) => s.retryAutosaveRestore);
   const selectedFeatureId = useCadStore((s) => s.selectedFeatureId);
   const selectedFace = useCadStore((s) => s.selectedFace);
   const showSketches = useCadStore((s) => s.showSketches);
@@ -568,11 +572,22 @@ export default function App() {
         setOpenProjectError(result.message);
         return;
       }
+      // 開いたプロジェクトの初回評価完了時に自動フィットする(Phase 29a)。
+      viewerRef.current?.requestFitOnNextMesh();
       loadDocument(result.doc);
       setOpenProjectError(null);
     } catch (err) {
       setOpenProjectError(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  /**
+   * 自動保存の復元「再試行」ボタン(Phase 29a、起動クラッシュループ防止)。
+   * 「開く」と同様、読み込んだドキュメントの初回評価完了時に自動フィットする。
+   */
+  function handleRetryAutosaveRestore() {
+    viewerRef.current?.requestFitOnNextMesh();
+    retryAutosaveRestore();
   }
 
   /** 「新規」ボタン(Phase 26): 確認ダイアログの上、空ドキュメントに差し替え自動保存を消去する。 */
@@ -2129,6 +2144,56 @@ export default function App() {
         </div>
       </header>
 
+      {kernelCrashed && (
+        <div
+          data-testid="kernel-crashed-banner"
+          role="alert"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: "8px 12px",
+            background: "rgba(255,107,107,0.15)",
+            borderBottom: "1px solid #ff6b6b",
+            fontSize: 13,
+          }}
+        >
+          <strong style={{ color: "#ff6b6b" }}>CADカーネルが応答しません</strong>
+          <span style={{ opacity: 0.8 }}>
+            形状計算のバックグラウンド処理が停止しました。ドキュメントの編集(削除・アンドゥ等)は
+            引き続き行えますが、再評価にはカーネルの再起動が必要です。
+          </span>
+          <button type="button" data-testid="btn-restart-kernel" onClick={restartKernel} style={{ marginLeft: "auto" }}>
+            カーネル再起動
+          </button>
+        </div>
+      )}
+      {autosaveRestoreSkipped && (
+        <div
+          data-testid="autosave-restore-skipped-banner"
+          role="alert"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: "8px 12px",
+            background: "rgba(255,183,77,0.15)",
+            borderBottom: "1px solid #ffb74d",
+            fontSize: 13,
+          }}
+        >
+          <span>前回の自動保存の読み込みに失敗したため初期状態で起動しました(自動保存は保持されています)。</span>
+          <button
+            type="button"
+            data-testid="btn-retry-autosave-restore"
+            onClick={handleRetryAutosaveRestore}
+            style={{ marginLeft: "auto" }}
+          >
+            再試行
+          </button>
+        </div>
+      )}
+
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
         <aside
           style={{
@@ -2212,7 +2277,7 @@ export default function App() {
             </p>
           )}
 
-          {errorMessage && (
+          {errorMessage && !kernelCrashed && (
             <p
               data-testid="eval-error"
               role="alert"
@@ -2258,7 +2323,7 @@ export default function App() {
               {selectedFeature.type === "revolve" && <RevolveEditor revolve={selectedFeature} doc={doc} />}
               {selectedFeature.type === "thread" && <ThreadEditor thread={selectedFeature} />}
               {selectedFeature.type === "partInstance" && <PartInstanceEditor instance={selectedFeature} />}
-              {selectedFeature.type === "mate" && <MateEditor mate={selectedFeature} />}
+              {selectedFeature.type === "mate" && <MateEditor mate={selectedFeature} doc={doc} />}
             </div>
           )}
 

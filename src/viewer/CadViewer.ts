@@ -510,6 +510,12 @@ declare global {
        * (segmentsは確定後の座標編集UIを持たないため)。非アクティブ時は空配列。
        */
       drawingPointsSnapshot: () => [number, number][];
+      /**
+       * 現在のカメラ位置からOrbitControlsの注視点までの距離(mm、開発ビルド限定、E2E用、Phase 29a)。
+       * プロジェクトを開く/自動保存を復元した直後の自動フィット(requestFitOnNextMesh())が
+       * 実際にカメラ距離を動かしたことを検証するために使う。
+       */
+      cameraDistance: () => number;
     };
   }
 }
@@ -1221,6 +1227,7 @@ export class CadViewer {
         projectPoint: (world) => this.projectPoint(world),
         dimensionHoverEntityKind: () => this.dimensionHoverEntityHit?.kind ?? null,
         drawingPointsSnapshot: () => this.drawingPoints.map((p): [number, number] => [p[0], p[1]]),
+        cameraDistance: () => this.camera.position.distanceTo(this.controls.target),
       };
     }
   }
@@ -1865,6 +1872,16 @@ export class CadViewer {
     this.camera.position.copy(center.clone().addScaledVector(direction, distance));
     this.controls.target.copy(center);
     this.controls.update();
+  }
+
+  /**
+   * 次に受け取るメッシュ(setMesh()の次回呼び出し)でfitToView()を自動実行するよう予約する
+   * (Phase 29a、プロジェクトを開く/自動保存の復元読み込み直後の初回評価完了時に使う)。
+   * 内部的には「初回メッシュ受信」フラグを再びfalseに戻すだけで、以降の挙動は起動直後の
+   * 自動フィットと同じ(hasReceivedMeshの説明参照)。
+   */
+  requestFitOnNextMesh() {
+    this.hasReceivedMesh = false;
   }
 
   /**

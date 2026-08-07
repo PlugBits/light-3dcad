@@ -20,7 +20,16 @@ export type UiRequest =
    * 干渉チェック(Phase 28b)。全ボディ(部品配置による追加ボディも含む)をペアごとに交差判定する。
    * オンデマンド実行のみ(自動実行はしない、重くなるため)。qualityは交差領域のメッシュ化に使う。
    */
-  | { kind: "checkInterference"; requestId: string; doc: CadDocument; quality?: MeshQuality };
+  | { kind: "checkInterference"; requestId: string; doc: CadDocument; quality?: MeshQuality }
+  /**
+   * 開発ビルド限定のデバッグ用リクエスト(Phase 29a)。Workerのグローバルスコープで
+   * 捕捉されない例外を意図的に発生させ、実際のWorkerクラッシュ(Workerのerrorイベント)を
+   * 再現する(devtoolsから実際にWorkerを強制終了する操作がテスト環境では難しいため)。
+   * window.__cadDebugCrashWorker()(src/state/store.ts、import.meta.env.DEV時のみ公開)から送る。
+   * このリクエスト自体はrequestIdに対する応答を返さない(意図的に無応答のまま=呼び出し元は
+   * Worker側の"error"イベントかタイムアウト監視で気づく設計)。
+   */
+  | { kind: "debugCrash"; requestId: string };
 
 /**
  * 三角形メッシュ(Transferable化のためTypedArray化済み)。

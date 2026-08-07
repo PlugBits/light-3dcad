@@ -274,6 +274,27 @@ export function patchMateFeature(
   return updateFeature<MateFeature>(doc, featureId, (f) => ({ ...f, ...patch }));
 }
 
+/**
+ * 指定の合致(メイト)フィーチャーより後ろに、ボディを直接変更するextrude/revolve
+ * (operation:"add"|"cut")があるかどうかを判定する(Phase 29a、堅牢性強化)。
+ * 合致は全フィーチャー評価後にまとめて解く(src/worker/evaluator.tsのevaluateFeatures()参照)ため、
+ * 合致より後ろのcut/add操作は合致で解決される前の(未解決の)配置を基準に行われるという既知の制限がある
+ * (docs/PLAN.md Phase 28c節)。エラーにはせず、UI側(FeatureTree・MateEditor)が注意アイコン+
+ * ツールチップで知らせるためだけに使う純粋関数(newBodyは独立した新規ボディを作るだけで既存ボディの
+ * 配置に依存しないため対象外)。
+ */
+export function mateHasSubsequentBodyEdit(doc: CadDocument, mateFeatureId: FeatureId): boolean {
+  const index = doc.features.findIndex((f) => f.id === mateFeatureId);
+  if (index === -1) return false;
+  for (let i = index + 1; i < doc.features.length; i += 1) {
+    const f = doc.features[i];
+    if ((f.type === "extrude" || f.type === "revolve") && (f.operation === "add" || f.operation === "cut")) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** 指定IDのフィーチャーを探す。見つからなければ undefined。 */
 export function findFeature(doc: CadDocument, featureId: FeatureId): Feature | undefined {
   return doc.features.find((f) => f.id === featureId);

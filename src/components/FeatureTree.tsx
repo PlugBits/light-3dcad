@@ -4,7 +4,7 @@
 // バー以降(index >= 有効フィーチャー数)のフィーチャーはグレーアウト表示にし、選択不可にする。
 import { useState } from "react";
 import type { CadDocument, Feature, FeatureId, MateFeature } from "../model/types";
-import { effectiveFeatureCount } from "../model/document";
+import { effectiveFeatureCount, mateHasSubsequentBodyEdit } from "../model/document";
 
 const ICONS: Record<Feature["type"], string> = {
   sketch: "▢", // □
@@ -159,6 +159,15 @@ export function FeatureTree({ doc, selectedFeatureId, errorFeatureId, onSelect, 
               </span>
               {hasError && (
                 <span title="評価エラーがあります" style={{ color: "#ff6b6b" }}>
+                  ⚠
+                </span>
+              )}
+              {!hasError && feature.type === "mate" && mateHasSubsequentBodyEdit(doc, feature.id) && (
+                <span
+                  data-testid={`mate-order-warning-${feature.name}`}
+                  title="この合致より後ろに押し出し/回転体のカット・追加があります。合致は全フィーチャー評価後にまとめて解決されるため、それらの操作は合致で解決される前の配置を基準に行われます。"
+                  style={{ color: "#ffb74d" }}
+                >
                   ⚠
                 </span>
               )}

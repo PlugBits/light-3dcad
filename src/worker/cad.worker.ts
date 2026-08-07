@@ -196,7 +196,11 @@ function exportStlAndRespond(requestId: string, doc: CadDocument, quality: MeshQ
     return;
   }
   try {
-    const blob = shape.blobSTL({ tolerance: quality.tolerance, angularTolerance: quality.angularTolerance });
+    // バイナリSTL(Phase 29a)。ASCII STLはファイルサイズが大きく出力が遅いため、バイナリ形式
+    // (80バイトヘッダ+uint32三角形数+50バイト/三角形)に切り替える。replicadのblobSTL()は
+    // {binary:true}でBRepMesh_IncrementalMesh->StlAPI_Writer(ASCIIWriter=false)経由の
+    // バイナリ出力に切り替わる(node_modules/replicad/dist/replicad.jsで確認済み)。
+    const blob = shape.blobSTL({ tolerance: quality.tolerance, angularTolerance: quality.angularTolerance, binary: true });
     postResponse({ kind: "stl", requestId, blob });
   } finally {
     shape.delete();
@@ -308,6 +312,29 @@ self.addEventListener("message", (event: MessageEvent<UiRequest>) => {
         case "checkInterference": {
           await ensureOC();
           checkInterferenceAndRespond(request.requestId, request.doc, request.quality ?? DEFAULT_QUALITY);
+          break;
+        }
+        case "debugCrash": {
+          // 開発ビルド限定のデバッグフック(Phase 29a、UiRequest型定義のコメント参照)。
+          // 1) setTimeout()のコールバック内でthrowすることで、この message イベントリスナーの
+          //    try/catch(このファイル下部)には一切捕捉されない、真に未捕捉の例外にする
+          //    (Workerのグローバルスコープでの未捕捉例外は、Worker側の 'error' イベントとして
+          //    メインスレッドに伝わる。src/state/store.tsのensureWorker()参照)。
+          // 2) それだけでは(uncaught例外を投げてもWorkerの以後のメッセージ処理自体は継続してしまい、
+          //    実際のクラッシュ・ハングと違って次の評価リクエストがそのまま成功してしまう)、
+          //    UIの「カーネル再起動が必須」という復旧フローを検証できない。そこで直後に同期的な
+          //    無限ループを別タスクとしてスケジュールし、以後この(旧)Workerが一切のメッセージに
+          //    応答できない状態(実際のハング)を模す。Worker#terminate()(store.tsのrestartKernel())は
+          //    無限ループ中でも強制終了できるため、「再起動でのみ復帰できる」ことを再現できる。
+          setTimeout(() => {
+            throw new Error("[debug] window.__cadDebugCrashWorker() による意図的なWorkerクラッシュ");
+          }, 0);
+          setTimeout(() => {
+            // eslint-disable-next-line no-constant-condition
+            while (true) {
+              // 意図的な無限ループ(この後のpostMessageに一切応答できなくする)。
+            }
+          }, 0);
           break;
         }
       }

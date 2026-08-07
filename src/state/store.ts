@@ -101,6 +101,78 @@ function clearAutosave() {
   }
 }
 
+/**
+ * 起動クラッシュループ防止(Phase 29a)の「復元開始マーカー」のlocalStorageキー。
+ * 自動保存(AUTOSAVE_KEY)を復元しようとする直前に立て、その復元ドキュメントの初回評価が
+ * 成功した時点で解除する(applyEvaluated参照)。次回起動時にこのマーカーが残っていれば、
+ * 「前回、復元ドキュメントの評価中に(Workerクラッシュ・タブクラッシュ等で)アプリごと
+ * 落ちた」とみなし、自動保存の復元をスキップして初期ドキュメントで起動する
+ * (自動保存自体は消さない。ユーザーは「再試行」で明示的に読み込み直せる)。
+ */
+const RESTORE_MARKER_KEY = "light-3dcad:autosave:restoring:v1";
+
+function hasRestoreMarker(): boolean {
+  if (typeof localStorage === "undefined") return false;
+  try {
+    return localStorage.getItem(RESTORE_MARKER_KEY) !== null;
+  } catch {
+    return false;
+  }
+}
+
+function markRestoreStarted() {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(RESTORE_MARKER_KEY, "1");
+  } catch {
+    // ignore
+  }
+}
+
+function markRestoreFinished() {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.removeItem(RESTORE_MARKER_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * 自動保存を復元するかどうかの判定(Phase 29a)。Workerを一切使わない純粋関数として切り出し、
+ * 単体テストできるようにする(tests/state/store.test.ts参照)。
+ */
+export interface AutosaveRestoreDecision {
+  /** 復元に使うドキュメント。復元しない場合はnull(呼び出し側が初期ドキュメントにフォールバックする)。 */
+  doc: CadDocument | null;
+  /** 前回の復元ドキュメント評価が完了しなかった(マーカーが残っていた)ためスキップした場合true。 */
+  skippedDueToPriorFailure: boolean;
+}
+
+export function decideAutosaveRestore(markerPresent: boolean, autosavedDoc: CadDocument | null): AutosaveRestoreDecision {
+  if (autosavedDoc === null) {
+    return { doc: null, skippedDueToPriorFailure: false };
+  }
+  if (markerPresent) {
+    return { doc: null, skippedDueToPriorFailure: true };
+  }
+  return { doc: autosavedDoc, skippedDueToPriorFailure: false };
+}
+
+/**
+ * 起動時の初期ドキュメントを決定する(Phase 29a)。自動保存を復元する場合は復元開始マーカーを
+ * 立てる(このタイミングで立てないと、initialize()が呼ばれる前にアプリがクラッシュした
+ * ケースを検知できない)。
+ */
+function resolveInitialDocument(): { doc: CadDocument; autosaveRestoreSkipped: boolean } {
+  const decision = decideAutosaveRestore(hasRestoreMarker(), loadAutosavedDocument());
+  if (decision.doc) {
+    markRestoreStarted();
+    return { doc: decision.doc, autosaveRestoreSkipped: false };
+  }
+  return { doc: createInitialDocument(), autosaveRestoreSkipped: decision.skippedDueToPriorFailure };
+}
+
 export type EvalStatus = "initializing" | "evaluating" | "ready" | "error";
 
 /** ビューアで選択中の面(faceInfoの1要素相当)。 */
@@ -108,7 +180,16 @@ export type SelectedFace = FaceInfo;
 
 interface PendingEntry {
   resolve: (response: WorkerResponse) => void;
+  timeoutId: ReturnType<typeof setTimeout>;
 }
+
+/**
+ * Worker評価リクエストのタイムアウト(Phase 29a、堅牢性強化)。Workerがクラッシュせず
+ * 応答も返さない(ハング)場合の保険。通常評価は数百ms〜数秒だが、ねじ入りドキュメントの
+ * 評価は数十秒かかることがあるため、種別による使い分けはせず一律120秒にする
+ * (仕様: 「通常評価60秒、ねじ入りは重いので一律120秒でよい」)。
+ */
+const EVALUATE_TIMEOUT_MS = 120_000;
 
 let worker: Worker | null = null;
 let requestCounter = 0;
@@ -119,6 +200,28 @@ function nextRequestId(): string {
   return `req-${requestCounter}`;
 }
 
+/**
+ * 保留中の全リクエストを打ち切り、カーネルクラッシュ状態にする(Phase 29a)。
+ * Workerの'error'イベント(実クラッシュ・デバッグフック双方)、および個々のリクエストの
+ * タイムアウトの両方から呼ぶ(タイムアウトも「Workerが応答しない」という点で実質的に
+ * クラッシュと同じ扱いにする。単一Workerはリクエストを順番に処理するため、1件がハングすれば
+ * それ以降にキューされた保留中のリクエストも同様に応答が来ない)。
+ * 保留中のPromiseは{kind:"error"}応答で解決する(reject にすると呼び出し側全箇所で
+ * catch/rejectハンドリングを増やす必要があるため、既存の「Worker応答のkindで分岐する」設計に
+ * 合わせる。exportStl/exportStep/checkInterferenceは元々response.kind==="error"を処理済み)。
+ * status/errorMessage/errorFeatureIdもここで直接設定する(保留中リクエストが無い状態
+ * [アイドル中にデバッグフックでクラッシュさせた場合等]でもUIにカーネルクラッシュを反映するため、
+ * applyEvaluated経由の反映だけに頼らない)。
+ */
+function failAllPendingRequests(message: string) {
+  for (const [requestId, entry] of pending) {
+    clearTimeout(entry.timeoutId);
+    entry.resolve({ kind: "error", requestId, message });
+  }
+  pending.clear();
+  useCadStore.setState({ kernelCrashed: true, status: "error", errorMessage: message, errorFeatureId: null });
+}
+
 function ensureWorker(): Worker {
   if (worker) return worker;
   const w = new Worker(new URL("../worker/cad.worker.ts", import.meta.url), { type: "module" });
@@ -127,8 +230,16 @@ function ensureWorker(): Worker {
     const entry = pending.get(response.requestId);
     if (entry) {
       pending.delete(response.requestId);
+      clearTimeout(entry.timeoutId);
       entry.resolve(response);
     }
+  });
+  // Workerのグローバルスコープで捕捉されない例外が起きると発火する(実クラッシュ、または
+  // window.__cadDebugCrashWorker()による意図的な再現、Phase 29a)。既定の動作(コンソールへの
+  // エラー出力のみ)に加えて、保留中のリクエストを打ち切りUIにカーネル復旧手段を出す。
+  w.addEventListener("error", (event) => {
+    event.preventDefault();
+    failAllPendingRequests("CADカーネルが応答しません(内部エラーが発生しました)");
   });
   worker = w;
   return w;
@@ -144,9 +255,32 @@ function postRequest(request: {
   return {
     requestId,
     promise: new Promise<WorkerResponse>((resolve) => {
-      pending.set(requestId, { resolve });
+      const timeoutId = setTimeout(() => {
+        failAllPendingRequests("CADカーネルが応答しません(評価がタイムアウトしました)");
+      }, EVALUATE_TIMEOUT_MS);
+      pending.set(requestId, { resolve, timeoutId });
       w.postMessage({ ...request, requestId });
     }),
+  };
+}
+
+/**
+ * 開発ビルド限定のデバッグフック(Phase 29a)。Workerへ「故意にthrowする」メッセージ
+ * (kind:"debugCrash")を送るだけで、応答は待たない(cad.worker.ts側がsetTimeout()内でthrowし、
+ * Workerの'error'イベントとして非同期にensureWorker()のリスナーへ届く)。
+ * devtoolsから実際にWorkerを強制終了する操作が自動テスト環境では難しいため、E2Eからクラッシュ
+ * 復帰(カーネル再起動)を再現・検証するために用意する。
+ */
+declare global {
+  interface Window {
+    __cadDebugCrashWorker?: () => void;
+  }
+}
+
+if (typeof window !== "undefined" && import.meta.env.DEV) {
+  window.__cadDebugCrashWorker = () => {
+    const w = ensureWorker();
+    w.postMessage({ kind: "debugCrash", requestId: nextRequestId() });
   };
 }
 
@@ -168,6 +302,13 @@ function createInitialDocument(): CadDocument {
   });
   return doc;
 }
+
+/**
+ * 起動時の初期ドキュメントをモジュール読み込み時に一度だけ決定する(自動保存の復元・
+ * 復元開始マーカーの付与はこの1回のみで完結させる。store作成時のdoc初期値、および
+ * autosaveRestoreSkippedの初期値の両方でこの結果を使う)。
+ */
+const initialDocResolution = resolveInitialDocument();
 
 /**
  * undo/redo後、選択中フィーチャーが復元後のドキュメントにまだ存在するかを判定する
@@ -214,6 +355,25 @@ interface CadStoreState {
   errorFeatureId: FeatureId | null;
   /** 現在表示中のmesh/faceInfo/errorに対応する最新のevaluateリクエストID(古い応答の破棄に使う)。 */
   latestEvaluateRequestId: string | null;
+
+  /**
+   * Workerがクラッシュ・ハングした状態かどうか(Phase 29a)。trueの間、UIは通常の評価エラー表示
+   * ではなく「CADカーネルが応答しません」+「カーネル再起動」ボタンを表示する。errorMessage自体は
+   * 通常の評価エラーと同じ経路(response.kind==="error")で設定されるため、この専用フラグで
+   * 表示を出し分ける。restartKernel()の成功、または新しい評価が正常に完了すると false に戻る。
+   */
+  kernelCrashed: boolean;
+  /** カーネルを再起動する(旧Workerをterminate→新Workerを起動→最新docで再評価、Phase 29a)。 */
+  restartKernel: () => void;
+
+  /**
+   * 起動クラッシュループ防止(Phase 29a)。前回、自動保存の復元ドキュメントの評価中にアプリごと
+   * 落ちたと判断し(復元開始マーカーが残っていた)、自動保存の復元をスキップして初期ドキュメントで
+   * 起動した場合にtrue(自動保存自体は保持されている)。retryAutosaveRestore()の呼び出しでfalseに戻す。
+   */
+  autosaveRestoreSkipped: boolean;
+  /** スキップした自動保存を明示的に読み込み直す(「再試行」ボタン、Phase 29a)。 */
+  retryAutosaveRestore: () => void;
 
   /** ビューアで現在選択中の面(未選択はnull)。 */
   selectedFace: SelectedFace | null;
@@ -388,6 +548,11 @@ function applyEvaluated(
     const withReferenceEdges = updateReferenceEdgeSnapshots(get().doc, response.referenceEdges);
     // 合致(メイト、Phase 28c)ソルバが解いた配置を書き戻す(履歴は積まない、上記コメント参照)。
     const nextDoc = applyMateSolvedPlacements(withReferenceEdges, response.solvedPlacements);
+    // 起動クラッシュループ防止(Phase 29a): 評価が成功した時点で復元開始マーカーを解除する
+    // (マーカーが立っていなければ no-op)。「初回評価が成功したら」という仕様どおり、
+    // 実際には毎回の成功評価で呼ぶ(冪等なので安全、かつ通常の編集中の評価成功でも解除されて
+    // いなければならない値ではない)。
+    markRestoreFinished();
     set({
       doc: nextDoc,
       status: "ready",
@@ -399,6 +564,7 @@ function applyEvaluated(
       bodyGroups: response.bodyGroups,
       errorMessage: null,
       errorFeatureId: null,
+      kernelCrashed: false,
     });
   } else if (response.kind === "error") {
     set({
@@ -411,8 +577,10 @@ function applyEvaluated(
 
 export const useCadStore = create<CadStoreState>((set, get) => ({
   // 起動時、自動保存(localStorage、Phase 26)があればそれを初期ドキュメントとして復元する。
-  // 無い・壊れている場合は従来どおりの初期ドキュメント(XYスケッチ矩形->押し出し)にフォールバックする。
-  doc: loadAutosavedDocument() ?? createInitialDocument(),
+  // 無い・壊れている・前回その復元中に落ちた(復元開始マーカーが残っている、Phase 29a)場合は
+  // 従来どおりの初期ドキュメント(XYスケッチ矩形->押し出し)にフォールバックする
+  // (resolveInitialDocument()参照。モジュール読み込み時に一度だけ計算済み)。
+  doc: initialDocResolution.doc,
   selectedFeatureId: null,
 
   status: "initializing",
@@ -425,6 +593,45 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   errorMessage: null,
   errorFeatureId: null,
   latestEvaluateRequestId: null,
+
+  kernelCrashed: false,
+  restartKernel: () => {
+    // 旧Workerを破棄する(以後のensureWorker()は新しいWorkerを生成する)。
+    if (worker) {
+      worker.terminate();
+      worker = null;
+    }
+    // pending中のPromiseは破棄する(念のため解決だけしておく。通常はfailAllPendingRequests()で
+    // 既に解決済みのはずだが、タイムアウト前にユーザーが手動で再起動した場合等に備える)。
+    for (const [requestId, entry] of pending) {
+      clearTimeout(entry.timeoutId);
+      entry.resolve({ kind: "error", requestId, message: "カーネル再起動のため中断されました" });
+    }
+    pending.clear();
+
+    // 新Workerを生成("evaluate"は内部でensureOC()を経由するため、別途"init"往復は不要。
+    // initialize()と同じ考え方)し、最新のドキュメントで再評価する。
+    const { requestId, promise } = postRequest({ kind: "evaluate", doc: resolveEvaluationDocument(get().doc) });
+    set({
+      status: "evaluating",
+      latestEvaluateRequestId: requestId,
+      kernelCrashed: false,
+      errorMessage: null,
+      errorFeatureId: null,
+    });
+    promise.then((response) => applyEvaluated(set, get, requestId, response));
+  },
+
+  autosaveRestoreSkipped: initialDocResolution.autosaveRestoreSkipped,
+  retryAutosaveRestore: () => {
+    const autosaved = loadAutosavedDocument();
+    if (!autosaved) return;
+    // 復元を試みる直前に再度マーカーを立てる(この読み込み中にまた落ちた場合、次回起動時にも
+    // スキップされるようにする)。loadDocument()の評価が成功すればapplyEvaluated()が解除する。
+    markRestoreStarted();
+    set({ autosaveRestoreSkipped: false });
+    get().loadDocument(autosaved);
+  },
 
   selectedFace: null,
 

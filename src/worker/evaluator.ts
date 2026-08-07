@@ -17,6 +17,9 @@
 //   - extrude/revolve: operation "newBody"(常に新しい独立ボディを作る。複数回可、Phase 27a) /
 //     "cut"・"add"(targetBodyId省略時は最後に作られたボディが対象。指定時はそのボディのみに適用)
 //   - fillet3d/shell/thread: エッジ/面の幾何マッチングを全ボディ横断で行い、最良マッチのボディに適用する
+//     - thread(雄、Phase 29a): ローカル座標系のねじ山ソリッド(loft+fuseの重い部分)を
+//       "preset:length"キーでWorkerメモリにLRUキャッシュし(上限5件、部品キャッシュと同じ方式)、
+//       配置(面・位置・向き)の変換のみ毎回適用する。
 //   - direction: -1 は逆向き押し出し(面参照の場合は面法線の逆方向)
 //   - partInstance(簡易アセンブリ、Phase 27b): 埋め込まれた部品CadDocument(part)をevaluateDocument()で
 //     評価し(部品内にpartInstanceを含めることは禁止、入れ子なし=再帰は最大1段)、結果compoundを
@@ -884,6 +887,44 @@ function buildMaleThreadSolidLocal(preset: ThreadFeature["preset"], length: numb
 }
 
 /**
+ * 雄ねじソリッド生成キャッシュ(Phase 29a)の上限件数(LRU)。部品配置キャッシュ
+ * (PART_CACHE_MAX_SIZE、後述のpartShapeCache)と同じ方式・同じ上限値を使う。
+ */
+const THREAD_CACHE_MAX_SIZE = 5;
+
+/**
+ * buildMaleThreadSolidLocal()の結果(ローカル座標系、位置・向きを含まない)を、
+ * キー="preset:length"(ローカル形状を決める値のみ。配置面・位置・方向は含まない)で
+ * Workerメモリへキャッシュする(Phase 29a)。同一プリセット・同一長さの雄ねじが
+ * 複数箇所に配置される場合(またはUndo/Redo・拘束再解決等で同一ドキュメントが再評価される場合)、
+ * 最も重い処理(THREAD_SECTIONS_PER_TURN断面のloft+fuse)を毎回やり直さずに済む。
+ * partShapeCache(下記)と同じ「取り出し時にclone()して返し、原本はdelete()しない」方針・
+ * 同じ単純LRU(Map挿入順=最終アクセス順)を使う。
+ */
+const maleThreadShapeCache = new Map<string, Shape3D>();
+
+function buildMaleThreadSolidLocalCached(preset: ThreadFeature["preset"], length: number): Shape3D {
+  const key = `${preset}:${length}`;
+  const cached = maleThreadShapeCache.get(key);
+  if (cached) {
+    maleThreadShapeCache.delete(key);
+    maleThreadShapeCache.set(key, cached);
+    return cached.clone();
+  }
+
+  const shape = buildMaleThreadSolidLocal(preset, length);
+  maleThreadShapeCache.set(key, shape);
+  if (maleThreadShapeCache.size > THREAD_CACHE_MAX_SIZE) {
+    const oldestKey = maleThreadShapeCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      maleThreadShapeCache.get(oldestKey)?.delete();
+      maleThreadShapeCache.delete(oldestKey);
+    }
+  }
+  return shape.clone();
+}
+
+/**
  * ローカル座標系(原点=配置基準点、+Z=軸方向)で構築した回転体(円柱・ねじ山ソリッド等)を、
  * ワールド座標(position/axisDir)へ配置する(Phase 25c)。+Zをaxisdir(単位ベクトル)へ向ける
  * 回転(axis-angle、cross(+Z, axisDir)を回転軸に取る。ほぼ平行/反平行の場合はそれぞれ
@@ -938,7 +979,7 @@ function applyThreadToBodies(bodies: Map<FeatureId, Shape3D>, feature: ThreadFea
     if (feature.length > MALE_THREAD_MAX_LENGTH) {
       throw new Error(`雄ねじの長さは${MALE_THREAD_MAX_LENGTH}mm以下である必要があります`);
     }
-    const localSolid = buildMaleThreadSolidLocal(feature.preset, feature.length);
+    const localSolid = buildMaleThreadSolidLocalCached(feature.preset, feature.length);
     const worldSolid = orientLocalSolidToWorld(localSolid, position, axisDir);
     try {
       const newBody = body.fuse(worldSolid);

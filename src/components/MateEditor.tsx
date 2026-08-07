@@ -1,8 +1,8 @@
 // 合致(メイト)フィーチャー選択時の編集パネル(Phase 28c)。
 // v1: 種別(表示のみ)・名前・distance時のみ値を編集可能(面の再選択UIは持たない。ShellEditor等と
 // 同じ「再選択が必要な場合は削除して作り直す」方針)。
-import { patchMateFeature } from "../model/document";
-import type { MateFeature } from "../model/types";
+import { mateHasSubsequentBodyEdit, patchMateFeature } from "../model/document";
+import type { CadDocument, MateFeature } from "../model/types";
 import { useCadStore } from "../state/store";
 
 const KIND_LABEL: Record<MateFeature["kind"], string> = {
@@ -11,9 +11,10 @@ const KIND_LABEL: Record<MateFeature["kind"], string> = {
   concentric: "同軸(円筒の軸を一致させる)",
 };
 
-export function MateEditor({ mate }: { mate: MateFeature }) {
+export function MateEditor({ mate, doc }: { mate: MateFeature; doc: CadDocument }) {
   const updateDocument = useCadStore((s) => s.updateDocument);
   const removeFeature = useCadStore((s) => s.removeFeature);
+  const hasSubsequentBodyEdit = mateHasSubsequentBodyEdit(doc, mate.id);
 
   function patch(p: Partial<Pick<MateFeature, "name" | "value">>) {
     updateDocument((d) => patchMateFeature(d, mate.id, p));
@@ -52,6 +53,16 @@ export function MateEditor({ mate }: { mate: MateFeature }) {
       <p style={{ fontSize: 11, opacity: 0.6, margin: 0 }}>
         面の選び直しはできません。作り直すには削除してから合致ツールで面を選択し直してください。
       </p>
+
+      {hasSubsequentBodyEdit && (
+        <p
+          data-testid="mate-order-warning"
+          title="合致は全フィーチャー評価後にまとめて解決されるため、これらの操作は合致で解決される前の配置を基準に行われます。"
+          style={{ fontSize: 11, color: "#ffb74d", margin: 0 }}
+        >
+          ⚠ この合致より後ろに押し出し/回転体のカット・追加があります。
+        </p>
+      )}
 
       <button type="button" data-testid="btn-delete-mate" onClick={() => removeFeature(mate.id)}>
         削除
