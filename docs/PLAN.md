@@ -635,3 +635,27 @@ angle})`を適用。newBody/add/cutの3操作は押し出しと共通のヘル�
 追加し、ShellEditor/RevolveEditorで肉厚・軸・角度・操作を編集できる。Vitest348件(evaluator.ts統合7件
 [シェル3件・回転体4件]が新規)。ブラウザ実機で箱上面開口シェル(中抜き表示)→スケッチ矩形の回転体360°
 (リング形状)→角度180°(半リング)確認済み。既知の制限: 面/軸再選択UIは無く、削除して作り直す運用。
+
+## Phase 25c: ねじフィーチャー
+
+新設フィーチャー`thread`(hand:"male"|"female"、preset:M3〜M12のISO並目テーブル
+[`src/model/threadPresets.ts`]、length、配置面のhashCode+center+normalスナップショット、面基底上の
+配置position、direction)。配置面はshellと同じ`resolveFaceGeometry()`で現在ボディから再解決する。
+事前スパイクは「sketchHelix()のヘリックスをスパインにSketch#sweepSketch()で三角プロファイルを掃引」を
+想定していたが、実装検証でこの経路(内部でtwistExtrude()を使う経路も含む)は本プロジェクトの
+replicad/OpenCascade WASMの組み合わせでは幾何的に破綻する(バウンディングボックスが理論値の
+2倍以上に膨らむ・体積が負値になる、半径やピッチによらず再現)ことが判明したため不採用にした。
+代わりに三角プロファイル(底辺=ピッチ、根本=谷径、先端=呼び径)を1回転あたり16断面で少しずつ
+回転・上昇させ、replicadの`loft()`(BRepOffsetAPI_ThruSections、ruled)で結んでリブ形状を作り、
+谷径の円柱に`fuse(..., {optimisation:"sameFace"})`する方式にした(evaluator.tsの
+`buildMaleThreadSolidLocal`/`orientLocalSolidToWorld`)。雄ねじは実測でM6×5mmが約10秒、
+長さに比例して増えるため上限20mmのバリデーションを設けた。**雌ねじは実ねじ山を切らず、規格の
+下穴径(呼び径-ピッチ)の円柱をcutする簡易表現にとどめる**(実ねじ山cutは評価時間が実用的でなくなる
+ことがスパイクで判明したため)。ツールバーに「ねじ」ボタン(プリセット・雄雌・長さのミニフォーム→
+平面を1クリックして配置。CadViewerに単一クリックで確定するThreadPlaceTool新設)を追加し、
+ThreadEditorでpreset/length/hand編集ができる。Vitest351件(evaluator.ts統合3件が新規)。
+ブラウザ実機で箱上面にM6雄ねじ(5mm、ねじ山の凹凸が見えるボス)→別位置にM6雌ねじ(穴が開く)→
+パネルで雌ねじの長さ変更→評価中インジケータ表示→再評価反映を確認済み。既知の制限: 面再選択UIは
+無く削除して作り直す運用、雌ねじは下穴のみ(ねじ山なし)の簡易表現、雄ねじ評価は長さに比例して
+数秒〜十数秒かかる(ドキュメントにねじが含まれる限り他フィーチャーの編集でも毎回再計算されるため、
+編集中はロールバックバーをねじの前に置くことを推奨)。
