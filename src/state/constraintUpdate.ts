@@ -21,19 +21,25 @@ import { useCadStore } from "./store";
  *    残差最大の拘束を人間可読な名前で特定して組み立てた具体的なメッセージ(store.tsの
  *    updateDocument()がsolveDocumentSketches()の結果をそのままerrorMessageにセットする)。
  * 3. 上記いずれも得られない場合の汎用フォールバック。
+ *
+ * Phase 35c: store.tsのupdateDocument()はPlaneGCS初期化待ちのため戻り値がPromiseになった
+ * (アプリ起動直後のごく短い初期化ウィンドウのみ実際に待つ、以後は実質同期的に解決する)。
+ * ここではそのPromiseをawaitしてからafterの状態を読むことで、以前の同期実装と同じ判定順序を保つ。
+ * 呼び出し側(App.tsx/SketchEditor.tsx/DimensionOverlay.tsx)はいずれもfire-and-forgetで
+ * 呼んでおり、この関数自体の戻り値(Promise<void>)を待つ必要はない。
  */
-export function updateDocumentWithConflictRollback(
+export async function updateDocumentWithConflictRollback(
   sketchId: FeatureId,
   mutate: (doc: CadDocument) => CadDocument,
   onConflict: (message: string) => void,
   describeConflict?: (before: CadDocument) => string | null,
-) {
+): Promise<void> {
   const before = useCadStore.getState().doc;
-  useCadStore.getState().updateDocument(mutate);
+  await useCadStore.getState().updateDocument(mutate);
   const after = useCadStore.getState();
   if (after.status === "error" && after.errorFeatureId === sketchId) {
     const message = describeConflict?.(before) ?? after.errorMessage ?? "拘束が矛盾するため取り消しました";
-    useCadStore.getState().updateDocument(() => before);
+    await useCadStore.getState().updateDocument(() => before);
     onConflict(message);
   }
 }

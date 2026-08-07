@@ -48,7 +48,7 @@ import type {
 import { deserializeProject, serializeProject } from "../project/serialization";
 import { updateOriginSnapshots } from "../sketch/originSnapshot";
 import { updateReferenceEdgeSnapshots } from "../sketch/referenceEdgeMatch";
-import { registerGcsAdapter, solveDocumentSketches } from "../sketch/solver";
+import { ensureGcsInitialized, solveDocumentSketchesAsync } from "../sketch/solver";
 import { createHistoryState, pushHistory, redoHistory, undoHistory, type HistoryState } from "./history";
 
 /**
@@ -423,8 +423,15 @@ interface CadStoreState {
 
   /** Workerを起動し、ready後に初期ドキュメントを評価する。複数回呼んでも安全(冪等)。 */
   initialize: () => void;
-  /** ドキュメントを更新し、直ちに(デバウンスなしで)再評価を要求する。変更前の状態を履歴に積む。 */
-  updateDocument: (updater: (doc: CadDocument) => CadDocument) => void;
+  /**
+   * ドキュメントを更新し、直ちに(デバウンスなしで)再評価を要求する。変更前の状態を履歴に積む。
+   * 戻り値のPromiseは、スケッチ拘束solve(PlaneGCS)+状態反映(set())が完了した時点で解決する
+   * (Phase 35c。呼び出し側の大半はfire-and-forgetで結果を待たないが、
+   * src/state/constraintUpdate.tsのupdateDocumentWithConflictRollback()のように「solve結果を見て
+   * 追加のロールバックを行う」呼び出し元はawaitする)。PlaneGCS初期化が完了していれば
+   * マイクロタスク1回分の遅延で解決し、アプリ起動直後の初期化未完了ウィンドウのみ実際に待つ。
+   */
+  updateDocument: (updater: (doc: CadDocument) => CadDocument) => Promise<void>;
   /**
    * ドラッグ操作(部品移動、Phase 28a)の開始時に呼ぶ。現在のドキュメントを履歴に1回だけpushする
    * (doc自体・再評価は変更しない)。以降のドラッグ中の更新は updateDocumentDuringDrag() で
@@ -436,7 +443,7 @@ interface CadStoreState {
    * (beginDragHistory()で開始点を1回だけpush済みの前提)。呼び出し側(CadViewerの150ms
    * スロットル)の都合で高頻度に呼ばれることを想定する。
    */
-  updateDocumentDuringDrag: (updater: (doc: CadDocument) => CadDocument) => void;
+  updateDocumentDuringDrag: (updater: (doc: CadDocument) => CadDocument) => Promise<void>;
   /** フィーチャーツリーの選択を変更する(selectedEntityId[Phase 31b]はクリアする)。 */
   selectFeature: (featureId: FeatureId | null) => void;
   /**
@@ -722,44 +729,46 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
     set({ status: "evaluating", latestEvaluateRequestId: requestId });
     promise.then((response) => applyEvaluated(set, get, requestId, response));
 
-    // PlaneGCSソルバの初期化(Phase 35b-1)。src/sketch/gcsAdapter.tsを動的importすることで、
-    // メインバンドルにはPlaneGCSのJSラッパー・WASMを含めない(npm run sizeの許容増分数KB以内、
-    // src/sketch/solver.tsのコメント参照)。完了までのsolveSketch()呼び出しは自動的に旧ソルバへ
-    // フォールバックする。
-    void import("../sketch/gcsAdapter").then((mod) => {
-      registerGcsAdapter(mod);
-      return mod.initGcs();
-    });
+    // PlaneGCSソルバの初期化(Phase 35b-1、Phase 35cで旧ソルバのフォールバックを撤去)。
+    // src/sketch/solver.tsのensureGcsInitialized()がgcsAdapter.tsを動的importすることで、
+    // メインバンドルにはPlaneGCSのJSラッパー・WASMを含めない(npm run sizeの許容増分数KB以内)。
+    // 完了までのsolveSketch()呼び出し(updateDocument()/updateDocumentDuringDrag()経由)は
+    // このPromiseの完了を待ってから解く(solveDocumentSketchesAsync()参照)。
+    void ensureGcsInitialized();
   },
 
   updateDocument: (updater) => {
     const prevDoc = get().doc;
     const updatedDoc = updater(prevDoc);
-    if (updatedDoc === prevDoc) return;
+    if (updatedDoc === prevDoc) return Promise.resolve();
     const nextHistory = pushHistory(get().history, structuredClone(prevDoc));
 
     // 拘束(SketchConstraint、Phase 20a)を持つsketchがあれば、Worker評価に回す前にsolveSketch()で
     // segmentsを解いた状態に置き換える(ソルバは純粋TSでメインスレッドで完結する)。
     // いずれかのスケッチで矛盾(過拘束)が検出された場合は評価そのものをスキップし、
     // featureId付きのエラーとして表示する(既存のWorker評価エラーと同じerrorMessage/errorFeatureId経路)。
-    const solved = solveDocumentSketches(updatedDoc);
-    if (solved.conflict) {
-      const requestId = nextRequestId(); // 実際にはWorkerへ送らないが、latestEvaluateRequestIdを進めて古い応答を無効化する。
-      set({
-        doc: updatedDoc,
-        status: "error",
-        errorMessage: solved.conflict.message,
-        errorFeatureId: solved.conflict.featureId,
-        latestEvaluateRequestId: requestId,
-        history: nextHistory,
-      });
-      return;
-    }
+    // solveDocumentSketchesAsync()はPlaneGCS(WASM)初期化が完了していれば実質同期的に(マイクロ
+    // タスク1回分だけ遅れて)解決し、アプリ起動直後の初期化未完了ウィンドウでは初期化完了を
+    // 待ってから解く(Phase 35c、旧ソルバのフォールバックを撤去したため)。
+    return solveDocumentSketchesAsync(updatedDoc).then((solved) => {
+      if (solved.conflict) {
+        const requestId = nextRequestId(); // 実際にはWorkerへ送らないが、latestEvaluateRequestIdを進めて古い応答を無効化する。
+        set({
+          doc: updatedDoc,
+          status: "error",
+          errorMessage: solved.conflict.message,
+          errorFeatureId: solved.conflict.featureId,
+          latestEvaluateRequestId: requestId,
+          history: nextHistory,
+        });
+        return;
+      }
 
-    const nextDoc = solved.doc;
-    const { requestId, promise } = postRequest({ kind: "evaluate", doc: resolveEvaluationDocument(nextDoc) });
-    set({ doc: nextDoc, status: "evaluating", latestEvaluateRequestId: requestId, history: nextHistory });
-    promise.then((response) => applyEvaluated(set, get, requestId, response));
+      const nextDoc = solved.doc;
+      const { requestId, promise } = postRequest({ kind: "evaluate", doc: resolveEvaluationDocument(nextDoc) });
+      set({ doc: nextDoc, status: "evaluating", latestEvaluateRequestId: requestId, history: nextHistory });
+      promise.then((response) => applyEvaluated(set, get, requestId, response));
+    });
   },
 
   beginDragHistory: () => {
@@ -770,36 +779,42 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   updateDocumentDuringDrag: (updater) => {
     const prevDoc = get().doc;
     const updatedDoc = updater(prevDoc);
-    if (updatedDoc === prevDoc) return;
+    if (updatedDoc === prevDoc) return Promise.resolve();
 
     // updateDocument()と同じくソルバを経由する(部品移動自体は拘束を持たないが、他のスケッチとの
-    // 整合性を崩さないため同じ経路を通す)。履歴(history)はここではpushしない。
-    const solved = solveDocumentSketches(updatedDoc);
-    if (solved.conflict) {
-      const requestId = nextRequestId();
-      set({
-        doc: updatedDoc,
-        status: "error",
-        errorMessage: solved.conflict.message,
-        errorFeatureId: solved.conflict.featureId,
-        latestEvaluateRequestId: requestId,
-      });
-      return;
-    }
+    // 整合性を崩さないため同じ経路を通す)。履歴(history)はここではpushしない。GCS初期化未完了時の
+    // 待ち合わせもupdateDocument()と同じ(solveDocumentSketchesAsync()参照)。
+    return solveDocumentSketchesAsync(updatedDoc).then((solved) => {
+      if (solved.conflict) {
+        const requestId = nextRequestId();
+        set({
+          doc: updatedDoc,
+          status: "error",
+          errorMessage: solved.conflict.message,
+          errorFeatureId: solved.conflict.featureId,
+          latestEvaluateRequestId: requestId,
+        });
+        return;
+      }
 
-    const nextDoc = solved.doc;
-    const { requestId, promise } = postRequest({ kind: "evaluate", doc: resolveEvaluationDocument(nextDoc) });
-    set({ doc: nextDoc, status: "evaluating", latestEvaluateRequestId: requestId });
-    promise.then((response) => applyEvaluated(set, get, requestId, response));
+      const nextDoc = solved.doc;
+      const { requestId, promise } = postRequest({ kind: "evaluate", doc: resolveEvaluationDocument(nextDoc) });
+      set({ doc: nextDoc, status: "evaluating", latestEvaluateRequestId: requestId });
+      promise.then((response) => applyEvaluated(set, get, requestId, response));
+    });
   },
 
   selectFeature: (featureId) => set({ selectedFeatureId: featureId, selectedEntityId: null }),
 
   setRollbackIndex: (index) => {
-    get().updateDocument((doc) => setDocRollbackIndex(doc, index));
+    // nextDocはここでローカルに計算する(updateDocument()はPhase 35cでGCS初期化待ちのため
+    // 非同期になったので、直後にget().doc を読んでも更新後の値が反映されているとは限らない)。
+    // rollbackIndex・features配列の並びはsolveDocumentSketches()では変わらない(segments/entities
+    // の座標のみ更新される)ため、選択解除の判定はこのローカルなnextDocで行って問題ない。
+    const nextDoc = setDocRollbackIndex(get().doc, index);
+    get().updateDocument(() => nextDoc);
     // ロールバックで選択中フィーチャーが範囲外になった場合は選択を解除する
     // (範囲外フィーチャーは選択不可の方針。インデックス比較は現在のdoc.featuresの並び順に基づく)。
-    const nextDoc = get().doc;
     const selected = get().selectedFeatureId;
     if (selected) {
       const idx = nextDoc.features.findIndex((f) => f.id === selected);

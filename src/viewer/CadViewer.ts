@@ -29,7 +29,7 @@ import {
   type SnapKind,
 } from "../sketch/snapping";
 import { buildPointClusterRepMap, resolvePointClusterRepresentative } from "../sketch/pointClusters";
-import { solveSketch, type DragTarget } from "../sketch/solver";
+import { isSolverReady, solveSketch, type DragTarget } from "../sketch/solver";
 import { findSharedEndpoint } from "../sketch/segmentCorner";
 import {
   distPointToEntityShape,
@@ -5888,10 +5888,15 @@ export class CadViewer {
    * を解き、プレビュー(毎フレーム)とonDragMove(SKETCH_DRAG_THROTTLE_MSスロットル)を更新する。
    * 収束失敗時はそのフレームの更新をスキップする(pending.lastSolvedは直前に成功した解のまま、
    * エラー表示はしない=ドラッグ中の一時的な失敗は無視するという仕様どおり)。
+   * PlaneGCS初期化未完了(isSolverReady()===false、アプリ起動直後のごく短い間のみ起こりうる。
+   * ドラッグ可能なスケッチが既に存在する時点で通常は初期化済みのはず)の場合も同様にそのフレームの
+   * 更新をスキップする(solveSketch()は未初期化時に例外を投げるため、Phase 35cで追加したガード。
+   * 次フレームで再試行され、初期化はその頃には完了しているはず)。
    */
   private updateSketchDragFrame(clientX: number, clientY: number) {
     const pending = this.sketchDragPendingState;
     if (!pending) return;
+    if (!isSolverReady()) return;
     const rawTarget = this.screenToLocal(pending.basis, clientX, clientY);
     if (!rawTarget) return;
     const target: [number, number] = this.sketchDragSnap

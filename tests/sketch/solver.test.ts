@@ -12,9 +12,8 @@ import type { DragTarget } from "../../src/sketch/solver";
 import type { CadDocument, SketchConstraint, SketchEntity, SketchFeature, SketchSegment } from "../../src/model/types";
 
 // このテストファイル全体、solveSketch()はPlaneGCS(gcsAdapter.ts)経由で解かれる
-// (Phase 35b-1: 「既存のsolver系VitestをGCS実装で全通過させる」の対応。gcsAdapter.tsが
-// 未登録/未初期化のときのみ使われる旧ソルバへのフォールバック経路は別途
-// tests/sketch/solverLegacyFallback.test.tsで確認する)。
+// (Phase 35b-1: 「既存のsolver系VitestをGCS実装で全通過させる」の対応。Phase 35cで自前実装の
+// LM法[旧ソルバ]のフォールバックを完全撤去したため、以後solveSketch()は常にPlaneGCS経由になる)。
 beforeAll(async () => {
   gcsAdapter.setGcsWasmPathForTests(path.resolve("node_modules/@salusoft89/planegcs/dist/planegcs_dist/planegcs.wasm"));
   registerGcsAdapter(gcsAdapter);

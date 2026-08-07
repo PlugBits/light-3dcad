@@ -1,12 +1,13 @@
 // PlaneGCS(FreeCADのSketcherが使う2D幾何拘束ソルバのWASM移植、LGPL-2.1-or-later、
 // @salusoft89/planegcs)アダプタ(Phase 35b-1)。src/sketch/solver.ts の solveSketch() から
-// (初期化が完了していれば)呼ばれ、自前実装のLevenberg-Marquardt法(旧ソルバ、Phase 35cまでは
-// フォールバックとして残す)を置き換える。
+// 常に呼ばれる(Phase 35cで自前実装のLevenberg-Marquardt法[旧ソルバ]のフォールバックを撤去し、
+// 拘束solveはこのファイルのみが担う)。
 //
 // このファイルもsolver.ts同様、ReactにもThree.jsにもReplicad(OCCT)にも依存しない純粋TS方針
 // だが、PlaneGCSのWASMモジュールという重い依存を持つため、実際のロードは遅延させる
-// (initGcs()を呼ぶまでWASMは読み込まれない。src/state/store.tsのinitialize()がアプリ起動時に
-// 一度だけ呼び、完了前のsolveSketch()呼び出しは旧ソルバへフォールバックする)。
+// (initGcs()を呼ぶまでWASMは読み込まれない。src/sketch/solver.tsのensureGcsInitialized()が
+// アプリ起動時に一度だけ呼び、完了前のsolveSketch()呼び出しはそのPromiseの完了を待つ
+// [solveDocumentSketchesAsync()参照]、または同期呼び出し元では例外になる)。
 //
 // 変数モデルは旧ソルバ(solver.ts)と同一にする(既存モデルと差分最小、スパイクPhase 35aの結論):
 // - 全セグメントの両端点(p1・p2)を独立したGCS点として持つ(coincident拘束は端点マージせず
@@ -81,9 +82,10 @@ export function isGcsReady(): boolean {
 }
 
 /**
- * GCSソルバの初期化を開始する(アプリ起動時に1回呼ぶ想定、src/state/store.tsのinitialize()から)。
- * 複数回呼んでも初回のPromiseを使い回す。完了前にsolveSketch()が呼ばれた場合は
- * 呼び出し側(solver.ts)が旧ソルバへフォールバックする。
+ * GCSソルバの初期化を開始する(アプリ起動時に1回呼ぶ想定、src/sketch/solver.tsの
+ * ensureGcsInitialized()から)。複数回呼んでも初回のPromiseを使い回す。完了前に
+ * solveSketch()系が呼ばれた場合、呼び出し元(src/state/store.tsのupdateDocument()等)は
+ * solveDocumentSketchesAsync()経由でこの完了を待つ(Phase 35c、旧ソルバのフォールバックは撤去済み)。
  */
 export function initGcs(): Promise<void> {
   if (initPromise) return initPromise;
