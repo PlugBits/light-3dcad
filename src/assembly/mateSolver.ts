@@ -83,8 +83,20 @@ const MAX_ITERATIONS = 60;
 const CONVERGE_NORM = 1e-8;
 /** 収束後、各合致の残差(正則化を除く)の絶対値最大がこれを超えていれば矛盾とみなす。 */
 const CONFLICT_TOLERANCE = 1e-4;
-/** 正則化(初期値からの移動量)の重み。値が小さいほど拘束(合致)を優先する。 */
+/** 正則化(初期値からの移動量)の重み(位置、mm)。値が小さいほど拘束(合致)を優先する。 */
 const REGULARIZATION_WEIGHT = 1e-4;
+/**
+ * 正則化の重み(回転、ラジアン)。位置用より大幅に大きくする(実装検証で判明した理由:
+ * 面中心が部品原点[position]から離れているほど、その面の残差[距離]は回転に対して
+ * 「てこの原理」で過敏になる[距離残差の回転方向の感度 ≈ 面中心と目標点の距離]。
+ * position用と同じ重みのままだと、LMが「本来動かすべきでない回転」を経由して局所的に
+ * 残差を稼ごうとし、位置が本来の解から大きくドリフトしたまま収束しなくなる現象を
+ * 実装検証で確認した。回転の正則化を強くすることで、真に必要な場合(大きな向き違い)を
+ * 除き、この「てこ」を利用した見せかけの改善を抑制し、並進のみで解ける合致は並進のみで
+ * 解かれるようにする。値は複数の実データ(部品位置60mm程度のオフセット)で収束を確認した
+ * 上での経験的な選択。
+ */
+const ROTATION_REGULARIZATION_WEIGHT = 1000;
 /** 中心差分の数値微分ステップ幅(mm・度共通)。 */
 const NUMERIC_DIFF_H = 1e-6;
 /** LMの減衰係数の初期値・上限。 */
@@ -93,15 +105,23 @@ const MAX_LAMBDA = 1e12;
 /** 出力座標を丸めるグリッド幅(mm・度)。solveSketch()のROUND_GRIDと同じ「きれいな値に丸めて次回のドリフトを防ぐ」意図。 */
 const ROUND_GRID = 1e-6;
 
-/** XYZオイラー角(度、X軸回転→Y軸回転→Z軸回転の順)の合成回転行列。replicadのShape3D#rotate()を
+/**
+ * XYZオイラー角(ラジアン、X軸回転→Y軸回転→Z軸回転の順)の合成回転行列。replicadのShape3D#rotate()を
  * 同じ順序(X, Y, Zの順に world 軸まわりへ回転)で連続適用する変換と一致させる
  * (src/worker/evaluator.tsのapplyPartInstanceToBodies参照)。
+ *
+ * 単位について: ソルバの変数ベクトル(x[3..5])は意図的にラジアンで持つ(度ではない)。
+ * PartPlacement/PartInstanceFeature.rotationは度で表現するが、度のままLMの変数にすると
+ * 「位置(mm、スケール10〜100)」と「回転(度、スケール0〜360だが実際の残差への感度は
+ * ラジアン換算でさらに1/57)」の間でJ^T*Jの対角成分(=各変数方向の感度の2乗)が3桁近く
+ * 乖離し、正規方程式の条件数が悪化して収束が不安定になる(実装検証で確認: 度のままだと
+ * 単純な並進のみで解けるはずの合致が、回転方向に大きくドリフトしたまま収束不能になる
+ * ケースがあった)。ラジアンに揃えることで位置・回転の感度スケールが近くなり、数値微分
+ * ベースのLMでも安定して収束するようになる。度⇔ラジアンの変換はsolveMates()の入出力境界
+ * (初期値の変換・最終placementsの変換)とworldPointToLocal/worldDirectionToLocal
+ * (PartInstanceFeature.rotation[度]を受け取るUI向けAPI)でのみ行う。
  */
-function rotationMatrix(rxDeg: number, ryDeg: number, rzDeg: number): number[][] {
-  const toRad = Math.PI / 180;
-  const rx = rxDeg * toRad;
-  const ry = ryDeg * toRad;
-  const rz = rzDeg * toRad;
+function rotationMatrixRad(rx: number, ry: number, rz: number): number[][] {
   const cx = Math.cos(rx);
   const sx = Math.sin(rx);
   const cy = Math.cos(ry);
@@ -172,20 +192,30 @@ function transposeMat(m: number[][]): number[][] {
  * 部品ローカル座標系で保存しておく必要がある(ワールド座標のまま保存すると、
  * 部品が原点から離れているほどフォールバック照合が一致しなくなる)。
  */
+const DEG_TO_RAD = Math.PI / 180;
+
+/** rotation(度、PartInstanceFeatureと同じ単位)からラジアン版の回転行列を作る(公開API境界用)。 */
+function rotationMatrixDeg(rotationDeg: Tuple3): number[][] {
+  return rotationMatrixRad(rotationDeg[0] * DEG_TO_RAD, rotationDeg[1] * DEG_TO_RAD, rotationDeg[2] * DEG_TO_RAD);
+}
+
 export function worldPointToLocal(worldPoint: Tuple3, position: Tuple3, rotation: Tuple3): Tuple3 {
-  const Rt = transposeMat(rotationMatrix(rotation[0], rotation[1], rotation[2]));
+  const Rt = transposeMat(rotationMatrixDeg(rotation));
   return applyMat(Rt, subtract(worldPoint, position));
 }
 
 /** ワールド座標の方向ベクトルを、rotationを使って部品ローカル方向へ逆変換する(平行移動は無関係)。 */
 export function worldDirectionToLocal(worldDir: Tuple3, rotation: Tuple3): Tuple3 {
-  const Rt = transposeMat(rotationMatrix(rotation[0], rotation[1], rotation[2]));
+  const Rt = transposeMat(rotationMatrixDeg(rotation));
   return applyMat(Rt, worldDir);
 }
 
-/** ローカル面ジオメトリを、6変数スライス[px,py,pz,rx,ry,rz]の現在値でワールド座標へ写像する。 */
+/**
+ * ローカル面ジオメトリを、6変数スライス[px,py,pz,rx,ry,rz]の現在値でワールド座標へ写像する。
+ * rx/ry/rzはラジアン(ソルバの変数は度ではなくラジアンで持つ。rotationMatrixRadのコメント参照)。
+ */
 function transformGeom(local: MateGeom, slice: readonly number[]): MateGeom {
-  const R = rotationMatrix(slice[3], slice[4], slice[5]);
+  const R = rotationMatrixRad(slice[3], slice[4], slice[5]);
   const t: Tuple3 = [slice[0], slice[1], slice[2]];
   if (local.surface === "plane") {
     return { surface: "plane", center: add(applyMat(R, local.center), t), normal: applyMat(R, local.normal) };
@@ -297,7 +327,7 @@ function runLM(residualFn: (x: number[]) => number[], x0: readonly number[], max
 
     let improved = false;
     for (let attempt = 0; attempt < 20 && !improved; attempt += 1) {
-      const damped = jtj.map((row, i) => row.map((v, j) => (i === j ? v + lambda * Math.max(v, 1e-6) : v)));
+      const damped = jtj.map((row, i) => row.map((v, j) => (i === j ? v + lambda * Math.max(v, 1e-3) : v)));
       const rhs = jtr.map((v) => -v);
       const delta = solveLinearSystem(damped, rhs);
       if (!delta) {
@@ -309,7 +339,7 @@ function runLM(residualFn: (x: number[]) => number[], x0: readonly number[], max
       const costTry = cost(residualFn(xTry));
       if (costTry < currentCost) {
         x = xTry;
-        lambda = Math.max(lambda / 10, 1e-12);
+        lambda = Math.max(lambda / 10, 1e-6);
         improved = true;
       } else {
         lambda = Math.min(lambda * 10, MAX_LAMBDA);
@@ -360,16 +390,20 @@ export function solveMates(mates: readonly MateInput[], initialPlacements: Reado
     x0[base] = placement.position[0];
     x0[base + 1] = placement.position[1];
     x0[base + 2] = placement.position[2];
-    x0[base + 3] = placement.rotation[0];
-    x0[base + 4] = placement.rotation[1];
-    x0[base + 5] = placement.rotation[2];
+    // 回転はラジアンで変数化する(rotationMatrixRadのコメント参照。位置[mm]とスケールを
+    // 揃えることでLMの条件数が改善する)。
+    x0[base + 3] = placement.rotation[0] * DEG_TO_RAD;
+    x0[base + 4] = placement.rotation[1] * DEG_TO_RAD;
+    x0[base + 5] = placement.rotation[2] * DEG_TO_RAD;
   });
 
   const buildHardResiduals = (x: number[]): number[] => computeAllResiduals(mates, varIndex, x).flat;
-  const sqrtWeight = Math.sqrt(REGULARIZATION_WEIGHT);
+  const sqrtPositionWeight = Math.sqrt(REGULARIZATION_WEIGHT);
+  const sqrtRotationWeight = Math.sqrt(ROTATION_REGULARIZATION_WEIGHT);
+  // 変数インデックス i%6 が 0,1,2(position)なら位置用、3,4,5(rotation)なら回転用の重みを使う。
   const buildWarmupResiduals = (x: number[]): number[] => [
     ...buildHardResiduals(x),
-    ...x.map((v, i) => sqrtWeight * (v - x0[i])),
+    ...x.map((v, i) => (i % 6 < 3 ? sqrtPositionWeight : sqrtRotationWeight) * (v - x0[i])),
   ];
 
   const warm = runLM(buildWarmupResiduals, x0, MAX_ITERATIONS);
@@ -389,12 +423,17 @@ export function solveMates(mates: readonly MateInput[], initialPlacements: Reado
     return { ok: false, worstMateId: worstId, maxResidual: worstVal };
   }
 
+  const RAD_TO_DEG = 180 / Math.PI;
   const placements = new Map<string, PartPlacement>();
   partIds.forEach((id, i) => {
     const base = i * 6;
     placements.set(id, {
       position: [roundToGrid(solved[base]), roundToGrid(solved[base + 1]), roundToGrid(solved[base + 2])],
-      rotation: [roundToGrid(solved[base + 3]), roundToGrid(solved[base + 4]), roundToGrid(solved[base + 5])],
+      rotation: [
+        roundToGrid(solved[base + 3] * RAD_TO_DEG),
+        roundToGrid(solved[base + 4] * RAD_TO_DEG),
+        roundToGrid(solved[base + 5] * RAD_TO_DEG),
+      ],
     });
   });
   return { ok: true, placements };
