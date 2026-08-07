@@ -659,3 +659,21 @@ ThreadEditorでpreset/length/hand編集ができる。Vitest351件(evaluator.ts�
 無く削除して作り直す運用、雌ねじは下穴のみ(ねじ山なし)の簡易表現、雄ねじ評価は長さに比例して
 数秒〜十数秒かかる(ドキュメントにねじが含まれる限り他フィーチャーの編集でも毎回再計算されるため、
 編集中はロールバックバーをねじの前に置くことを推奨)。
+
+## Phase 26: プロジェクト保存/読み込み・自動保存・STEP出力
+
+新設`src/project/serialization.ts`(純粋TS)でプロジェクトファイル(拡張子`.l3dcad`、
+`{format:"l3dcad", schemaVersion:1, document:CadDocument}`のJSON)のserialize/deserializeを実装し、
+既存の`validateDocument()`をそのまま流用してバリデーションと将来のschemaVersion移行の受け口を兼ねる。
+ツールバー「ファイル」グループに「保存」(ダウンロード)・「開く」(file input、成功時はundo履歴クリア・
+選択解除・再評価、失敗時はエラー表示)・「新規」(確認ダイアログ→空ドキュメント)を追加した。
+ドキュメント変更のたびに500msデバウンスでlocalStorageへ自動保存し(`useCadStore.subscribe`)、起動時に
+復元する(壊れていれば従来の初期ドキュメントにフォールバック)。E2Eの「毎回クリーンな初期状態」前提を
+守るため、`e2e/helpers.ts`に`gotoApp()`(addInitScriptでlocalStorage.clear()してからgoto)を追加し
+既存spec全ての`page.goto("/")`を置き換えた。WorkerにSTEPエクスポート(`exportStep`、replicadの
+`Shape3D#blobSTEP()`)を追加し、STLボタンの隣に「STEP」ボタン(ボディなし時は無効)を追加した。
+Vitest357件(serialization往復・拒否4件+STEP出力のWASM統合1件が新規)。ブラウザ実機で
+形状作成→保存→新規→開くでフィーチャーツリー・拘束(円半径)が完全復元、リロードで自動保存から復元、
+STEPダウンロードのファイル先頭が`ISO-10303-21;`であることを確認済み。既知の制限: プロジェクトファイルの
+互換性はschemaVersion一致のみを見ており、将来のフィールド追加時のマイグレーション処理は未実装
+(受け口のみ用意)。

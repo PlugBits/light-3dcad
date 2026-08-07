@@ -2,12 +2,12 @@
 // 上流寸法変更でも(トポロジカルネーミングの幾何マッチングにより)エラーが出ないことを確認する。
 import { expect, test } from "@playwright/test";
 
-import { buildFaceCutFlow, collectPageErrors, waitForReady } from "./helpers";
+import { buildFaceCutFlow, collectPageErrors, gotoApp, waitForReady } from "./helpers";
 
 test("矩形の寸法を変更すると再評価に成功しreadyへ復帰する", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
 
-  await page.goto("/");
+  await gotoApp(page);
   await waitForReady(page);
 
   await page.getByTestId("feature-item-Sketch1").click();
@@ -25,7 +25,7 @@ test("矩形の寸法を変更すると再評価に成功しreadyへ復帰する
 test("面上スケッチ(穴)作成後も上流の矩形寸法を変更してエラーにならない", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
 
-  await page.goto("/");
+  await gotoApp(page);
   await waitForReady(page);
 
   // 上面に穴(カット)を作成する。

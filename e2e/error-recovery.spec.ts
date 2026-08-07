@@ -2,12 +2,12 @@
 // 操作をCutに変更すると復帰することを確認する。
 import { expect, test } from "@playwright/test";
 
-import { collectPageErrors, waitForReady, waitForStatus } from "./helpers";
+import { collectPageErrors, gotoApp, waitForReady, waitForStatus } from "./helpers";
 
 test("2つ目のNew Bodyはエラーになり、Cutへの変更で復帰する", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
 
-  await page.goto("/");
+  await gotoApp(page);
   await waitForReady(page);
 
   // 新しいXYスケッチを追加し、矩形を1つ入れる(初期ボディと重なる位置・20x20)。
@@ -44,7 +44,7 @@ test("2つ目のNew Bodyはエラーになり、Cutへの変更で復帰する",
 test("面が無い状態でカットするとエラーになる(スケッチが空)", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
 
-  await page.goto("/");
+  await gotoApp(page);
   await waitForReady(page);
 
   // 新しい空のXYスケッチに図形を入れずに押し出ししようとするとエラーになる。

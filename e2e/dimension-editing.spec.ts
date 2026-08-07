@@ -7,7 +7,7 @@
 //   持たないため)で検証。
 import { expect, type Locator, test } from "@playwright/test";
 
-import { collectPageErrors, screenPointForWorld, waitForReady } from "./helpers";
+import { collectPageErrors, gotoApp, screenPointForWorld, waitForReady } from "./helpers";
 
 /**
  * 数値入力欄(input[type=number])の値を誤差許容付きで検証する。
@@ -23,7 +23,7 @@ async function expectNumClose(locator: Locator, expected: number, precision = 6)
 test("寸法ラベルをクリックして長さを変更すると、始点を固定したまま終点が再計算される", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
 
-  await page.goto("/");
+  await gotoApp(page);
   await waitForReady(page);
 
   // 新規スケッチ(XY、Sketch2)を追加すると自動的に選択状態になる。
@@ -83,7 +83,7 @@ test("寸法ラベルをクリックして長さを変更すると、始点を�
 test("線分ツール中に数字キー入力+Enterで指定長の辺を引ける", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
 
-  await page.goto("/");
+  await gotoApp(page);
   await waitForReady(page);
 
   await page.getByTestId("btn-add-sketch").click();

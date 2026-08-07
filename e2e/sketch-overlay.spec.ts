@@ -3,12 +3,12 @@
 // CadViewerが開発ビルド時にのみ公開するwindow.__cadViewerDebugフックを使う。
 import { expect, test } from "@playwright/test";
 
-import { collectPageErrors, waitForReady } from "./helpers";
+import { collectPageErrors, gotoApp, waitForReady } from "./helpers";
 
 test("スケッチ線が描画され、選択でグリッドが表示され、トグルで非表示になる", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
 
-  await page.goto("/");
+  await gotoApp(page);
   await waitForReady(page);
 
   // 初期ドキュメント(XYスケッチ+矩形)のスケッチ線が1本以上描画されている。

@@ -2,6 +2,21 @@
 // WASM初期化待ち、viewer上の面クリック(スクリーン座標計算)、pageerror収集を提供する。
 import { expect, type Page } from "@playwright/test";
 
+/**
+ * アプリのトップページへ遷移する前にlocalStorageをクリアしてから遷移する(Phase 26)。
+ * Playwrightはデフォルトでテストごとに新しいブラウザコンテキスト(=新しいストレージ)を使うため
+ * 通常は不要だが、自動保存(localStorage)機能追加により「前回の自動保存が残っていない、
+ * 常にクリーンな初期状態」という既存E2Eの前提を明示的に保証するための防御的措置。
+ * addInitScript()はナビゲーション前のドキュメント生成時に実行されるため、
+ * アプリの初期化(自動保存の復元読み込み)より確実に先に走る。
+ */
+export async function gotoApp(page: Page, path = "/") {
+  await page.addInitScript(() => {
+    localStorage.clear();
+  });
+  await page.goto(path);
+}
+
 /** status-text が指定の状態文字列を含むまで待つ。 */
 export async function waitForStatus(page: Page, status: string, timeout = 120_000) {
   await expect(page.getByTestId("status-text")).toContainText(`状態: ${status}`, { timeout });

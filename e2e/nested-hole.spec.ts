@@ -6,13 +6,13 @@
 //  条件によって円が無視され穴の無い直方体になってしまっていた。詳細はdocs/PLAN.md Phase 21参照)。
 import { expect, test } from "@playwright/test";
 
-import { collectPageErrors, screenPointForWorld, waitForReady } from "./helpers";
+import { collectPageErrors, gotoApp, screenPointForWorld, waitForReady } from "./helpers";
 
 test("矩形ツールで外枠→円ツールで内側に穴→押し出しで穴あき立体になる(Phase 21回帰)", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
   page.on("dialog", (dialog) => dialog.accept());
 
-  await page.goto("/");
+  await gotoApp(page);
   await waitForReady(page);
 
   // 初期ドキュメント(Sketch1+Extrude1、60x40x20の箱)を削除し、まっさらな状態から始める

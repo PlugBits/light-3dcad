@@ -3,12 +3,12 @@
 // e2e/helpers.ts の面上スケッチフロー(clickTopFace等)を流用する。
 import { expect, test } from "@playwright/test";
 
-import { clickTopFace, collectPageErrors, waitForReady } from "./helpers";
+import { clickTopFace, collectPageErrors, gotoApp, waitForReady } from "./helpers";
 
 test("上面に円スケッチ→Add操作でエラーなく再評価が完了する", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
 
-  await page.goto("/");
+  await gotoApp(page);
   await waitForReady(page);
 
   // 初期ボックスの上面を選択し、選択面にスケッチを作成する。

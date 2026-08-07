@@ -7,12 +7,12 @@
 // 結果を検証する(確定・押し出しまでは行わない。Escでキャンセルして後始末する)。
 import { expect, test } from "@playwright/test";
 
-import { collectPageErrors, screenPointForWorld, waitForReady } from "./helpers";
+import { collectPageErrors, gotoApp, screenPointForWorld, waitForReady } from "./helpers";
 
 test("線分ツールで原点付近をクリックすると原点(0,0)にスナップする", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
 
-  await page.goto("/");
+  await gotoApp(page);
   await waitForReady(page);
 
   // 新規スケッチ(XY、Sketch2)を追加すると自動的に選択状態になる。
@@ -49,7 +49,7 @@ test("線分ツールで原点付近をクリックすると原点(0,0)にスナ
 test("水平から3度ずれたクリックは軸ロックにより正確に水平な辺になる", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
 
-  await page.goto("/");
+  await gotoApp(page);
   await waitForReady(page);
 
   await page.getByTestId("btn-add-sketch").click();

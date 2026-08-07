@@ -11,12 +11,12 @@
 // 評価成功する状態に保っておかないと「平面に正対」「多角形」ボタンが有効化されない)。
 import { expect, test } from "@playwright/test";
 
-import { collectPageErrors, screenPointForWorld, waitForReady, waitForStatus } from "./helpers";
+import { collectPageErrors, gotoApp, screenPointForWorld, waitForReady, waitForStatus } from "./helpers";
 
 test("多角形ツールで正六角形を描き、押し出し(Cut)できる", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
 
-  await page.goto("/");
+  await gotoApp(page);
   await waitForReady(page);
 
   // 新規スケッチ(XY)を追加すると自動的に選択状態になる。初期ボディはまだ残っているため
@@ -61,7 +61,7 @@ test("多角形ツールで正六角形を描き、押し出し(Cut)できる", 
 test("多角形の頂点にフィレットを設定すると、エラーなく再評価できる(Phase 11)", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
 
-  await page.goto("/");
+  await gotoApp(page);
   await waitForReady(page);
 
   await page.getByTestId("btn-add-sketch").click();
@@ -103,7 +103,7 @@ test("多角形の頂点にフィレットを設定すると、エラーなく�
 test("Escキーで描画中の多角形ツールを中断してモードを終了できる", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
 
-  await page.goto("/");
+  await gotoApp(page);
   await waitForReady(page);
 
   await page.getByTestId("feature-item-Sketch1").click();

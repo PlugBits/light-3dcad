@@ -5,12 +5,12 @@ import { readFileSync } from "node:fs";
 
 import { expect, test } from "@playwright/test";
 
-import { buildFaceCutFlow, collectPageErrors, waitForReady } from "./helpers";
+import { buildFaceCutFlow, collectPageErrors, gotoApp, waitForReady } from "./helpers";
 
 test("フルフロー: スケッチ→押し出し→面選択→面上スケッチ→カット→STL出力", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
 
-  await page.goto("/");
+  await gotoApp(page);
 
   // 1. ロード直後は初期化中オーバーレイが表示される。
   await expect(page.getByTestId("init-overlay")).toBeVisible();
