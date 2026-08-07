@@ -814,3 +814,11 @@ dimensionGraphicsのoffsetVec5件+.l3dcad往復のオフセット入りケース
 長さ寸法だけ通知付きで消える)でブラウザ実機確認した(既存24件は無傷、計26件)。既知の制限: 寸法線の
 オフセットは製図規則(JIS等)に沿った自動整列は行わない簡易モデル、entity輪郭のトリムは拘束引き継ぎ
 非対応のまま。
+
+## Phase 32: 接線拘束の矛盾誤判定・セグメント個別削除・拘束エラーメッセージ具体化(実機報告3件)
+
+tangent(円↔直線)のsideを拘束作成時に永続化し、収束失敗時は残差最大の拘束を狙った初期値リトライ
+(一致チェーン伝播込み)で退化解を回避、矛盾メッセージには残差最大の拘束名を含めるようにした
+(`src/sketch/solver.ts`/`constraintLabels.ts`)。SketchEditorのセグメント一覧を個別行+削除ボタン化し、
+Deleteキーでの直接選択削除(参照拘束カスケード+件数トースト)を追加した(`removeSketchElementCascade`)。
+Vitest455件、E2E新設`tangent-fix-and-segment-delete.spec.ts`4件でブラウザ実機確認した。

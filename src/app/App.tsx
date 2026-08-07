@@ -23,6 +23,7 @@ import {
   findFeature,
   getDependentFeatureIds,
   patchPartInstanceFeature,
+  removeSketchElementCascade,
   replaceFillet3DEdges,
   replaceMateFaces,
   replaceShellFaces,
@@ -531,13 +532,38 @@ export default function App() {
   }, [doc, selectedFeatureId, sketchPlanes, referenceEdges]);
 
   // Ctrl+Z(Mac: Cmd+Z)でアンドゥ、Ctrl+Shift+Z(Mac: Cmd+Shift+Z)でリドゥ(Phase 14)。
-  // テキスト入力欄にフォーカスがある間はブラウザ標準のテキスト編集アンドゥを優先し、何もしない。
+  // Delete/Backspaceでビューア直接選択中のスケッチセグメント/エンティティを削除する(実機報告対応、
+  // Phase 32②)。テキスト入力欄にフォーカスがある間はブラウザ標準の編集動作(Undo/文字削除)を
+  // 優先し、何もしない。selectedFeatureId/selectedEntityId/docは常に最新のstoreから読む(このeffect
+  // 自体は初回のみ登録するリスナーのため、useCadStore.getState()で都度取得することで古いクロージャの
+  // 値を参照しないようにする)。
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       const target = event.target as HTMLElement | null;
       const isEditable =
         !!target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
       if (isEditable) return;
+
+      if (event.key === "Delete" || event.key === "Backspace") {
+        const state = useCadStore.getState();
+        if (!state.selectedFeatureId || !state.selectedEntityId) return;
+        const feature = findFeature(state.doc, state.selectedFeatureId);
+        if (feature?.type !== "sketch") return;
+        const { doc: nextDoc, removedConstraintCount } = removeSketchElementCascade(
+          state.doc,
+          state.selectedFeatureId,
+          state.selectedEntityId,
+        );
+        if (nextDoc === state.doc) return; // 対象idが見つからなかった(何もしない)
+        event.preventDefault();
+        state.updateDocument(() => nextDoc);
+        useCadStore.setState({ selectedEntityId: null });
+        if (removedConstraintCount > 0) {
+          showTransientMessage(`関連する拘束${removedConstraintCount}件も削除しました`);
+        }
+        return;
+      }
+
       const meta = event.ctrlKey || event.metaKey;
       if (!meta || event.key.toLowerCase() !== "z") return;
       event.preventDefault();
@@ -1866,9 +1892,9 @@ export default function App() {
           if (a.kind === "circle" && b.kind === "circle") {
             next = addTangentEntityConstraint(constraints, feature.entities, a.entityId, b.entityId);
           } else if (a.kind === "circle" && b.kind === "segment") {
-            next = addTangentSegmentConstraint(constraints, a.entityId, b.segmentId);
+            next = addTangentSegmentConstraint(constraints, a.entityId, b.segmentId, feature.entities, feature.segments ?? []);
           } else if (a.kind === "segment" && b.kind === "circle") {
-            next = addTangentSegmentConstraint(constraints, b.entityId, a.segmentId);
+            next = addTangentSegmentConstraint(constraints, b.entityId, a.segmentId, feature.entities, feature.segments ?? []);
           }
         }
         return setSketchConstraints(doc, sketchId, next);
@@ -2688,7 +2714,7 @@ export default function App() {
 
           {selectedFeature && (
             <div style={{ borderTop: "1px solid #444", paddingTop: 12 }}>
-              {selectedFeature.type === "sketch" && <SketchEditor sketch={selectedFeature} />}
+              {selectedFeature.type === "sketch" && <SketchEditor sketch={selectedFeature} onNotice={showTransientMessage} />}
               {selectedFeature.type === "extrude" && <ExtrudeEditor extrude={selectedFeature} doc={doc} />}
               {selectedFeature.type === "fillet3d" && (
                 <Fillet3DEditor

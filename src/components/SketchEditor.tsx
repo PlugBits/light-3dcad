@@ -8,6 +8,7 @@ import {
   addSketchEntity,
   explodeSketchEntity,
   patchSketchFeature,
+  removeSketchElementCascade,
   removeSketchEntity,
   setPolygonVertexCorner,
   setSketchConstraints,
@@ -15,8 +16,9 @@ import {
   updateSketchEntity,
 } from "../model/document";
 import { createCircleEntity, createRectangleEntity, createRegularPolygonEntity, createSlotEntity } from "../model/entity";
-import type { FeatureId, PointRef, PolygonCorner, SketchConstraint, SketchEntity, SketchFeature } from "../model/types";
+import type { FeatureId, PolygonCorner, SketchEntity, SketchFeature, SketchSegment } from "../model/types";
 import { isEntityFixed, removeConstraint, setEntityFixed } from "../sketch/constraintDimensions";
+import { CONSTRAINT_KIND_LABELS, describeConstraint } from "../sketch/constraintLabels";
 import { formatMm } from "../sketch/format";
 import { updateDocumentWithConflictRollback } from "../state/constraintUpdate";
 import { useCadStore } from "../state/store";
@@ -72,21 +74,27 @@ function NumberField({
   );
 }
 
-export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
+/**
+ * SketchEditorの一時トースト通知先(削除時の「関連する拘束N件も削除しました」)。App.tsxの
+ * showTransientMessageを渡す想定(省略時は何もしない、テスト・単体利用時の後方互換)。
+ */
+export function SketchEditor({ sketch, onNotice }: { sketch: SketchFeature; onNotice?: (message: string) => void }) {
   const updateDocument = useCadStore((s) => s.updateDocument);
   // ビューア上のスケッチ線直接クリックで選択されたentity/segmentのid(Phase 31b、未選択はnull)。
-  // 該当エンティティ欄への自動スクロール&一時ハイライトに使う(セグメントはentity一覧に個別の
-  // 欄を持たないためスクロール対象はentitiesのみ。ビューア側の3D強調はentity/segment共通)。
+  // 該当エンティティ/セグメント欄への自動スクロール&一時ハイライトに使う(ビューア側の3D強調は
+  // entity/segment共通)。セグメント一覧も個別行を持つようになった(実機報告対応、Phase 32②)ため、
+  // entityRefs/segmentRefsの両方を対象にする。
   const selectedEntityId = useCadStore((s) => s.selectedEntityId);
   const entityRefs = useRef<Record<string, HTMLDivElement | null>>({});
-  // 一時ハイライト対象のentity id(selectedEntityIdが変わるたびに一定時間だけ強調表示する)。
+  const segmentRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  // 一時ハイライト対象のid(entity/segment共通、selectedEntityIdが変わるたびに一定時間だけ強調表示する)。
   const [highlightEntityId, setHighlightEntityId] = useState<string | null>(null);
   const highlightTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!selectedEntityId) return;
-    const el = entityRefs.current[selectedEntityId];
-    if (!el) return; // segmentId等、entities一覧に欄を持たない対象は何もしない。
+    const el = entityRefs.current[selectedEntityId] ?? segmentRefs.current[selectedEntityId];
+    if (!el) return; // このsketchに属さないid(他スケッチのentity選択等)は何もしない。
     el.scrollIntoView({ behavior: "smooth", block: "center" });
     setHighlightEntityId(selectedEntityId);
     if (highlightTimerRef.current !== null) window.clearTimeout(highlightTimerRef.current);
@@ -136,6 +144,28 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
   /** sketchのsegments(Phase 19a)を全削除する。 */
   function handleClearSegments() {
     updateDocument((doc) => setSketchSegments(doc, sketch.id, []));
+  }
+
+  /**
+   * セグメント1本を個別に削除する(実機報告対応、Phase 32②)。参照する拘束
+   * (coincident/horizontal/tangent等)も同時に削除され、削除件数が1件以上あれば一時トーストで
+   * 通知する(App.tsxのonNotice、省略時は通知しない)。削除したセグメントが選択中だった場合は
+   * 選択も解除する(存在しないidを参照したままにしないため)。
+   */
+  function handleRemoveSegment(segmentId: string) {
+    updateDocument((doc) => {
+      const { doc: nextDoc, removedConstraintCount } = removeSketchElementCascade(doc, sketch.id, segmentId);
+      if (removedConstraintCount > 0) onNotice?.(`関連する拘束${removedConstraintCount}件も削除しました`);
+      return nextDoc;
+    });
+    if (useCadStore.getState().selectedEntityId === segmentId) {
+      useCadStore.setState({ selectedEntityId: null });
+    }
+  }
+
+  /** セグメント一覧の行クリックでビューア直接選択と同じselectedEntityIdへ反映する(強調表示の統一)。 */
+  function handleSelectSegment(segmentId: string) {
+    useCadStore.getState().selectSketchEntity(sketch.id, segmentId);
   }
 
   function handleCenterChange(entityId: string, axis: 0 | 1, value: number, center: [number, number]) {
@@ -418,10 +448,64 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
             onClick={handleClearSegments}
             disabled={!sketch.segments || sketch.segments.length === 0}
             style={{ fontSize: 11 }}
+            title="全てのセグメントを一括削除します(参照する拘束も一緒に削除されます)"
           >
             全削除
           </button>
         </div>
+        {/*
+          セグメント個別行の一覧(実機報告対応、Phase 32②: 従来は件数+全削除ボタンのみだった)。
+          クリックでビューア直接選択と同じselectedEntityIdに反映され、行が強調表示される
+          (ビューア上でクリック選択→Deleteキーの操作とも連動する)。行数が多い場合は
+          max-heightで縦スクロールする。
+        */}
+        {sketch.segments && sketch.segments.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 240, overflowY: "auto" }}>
+            {sketch.segments.map((seg, index) => {
+              const isSelected = seg.id === selectedEntityId;
+              const isHighlighted = seg.id === highlightEntityId;
+              return (
+                <div
+                  key={seg.id}
+                  ref={(el) => {
+                    segmentRefs.current[seg.id] = el;
+                  }}
+                  data-testid={`segment-row-${index}`}
+                  onClick={() => handleSelectSegment(seg.id)}
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "4px 6px",
+                    borderRadius: 4,
+                    cursor: "pointer",
+                    border: isSelected ? "2px solid #4a90d9" : "1px solid #444",
+                    background: isHighlighted ? "rgba(255, 234, 0, 0.12)" : isSelected ? "rgba(74, 144, 217, 0.12)" : undefined,
+                    transition: "background-color 0.3s ease, border-color 0.3s ease",
+                    fontSize: 11,
+                  }}
+                >
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {segmentRowLabel(seg, index)}
+                  </span>
+                  <button
+                    type="button"
+                    title="このセグメントを削除します(参照する拘束も一緒に削除されます)"
+                    data-testid={`segment-row-${index}-delete`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleRemoveSegment(seg.id);
+                    }}
+                    style={{ fontSize: 11, flexShrink: 0 }}
+                  >
+                    削除
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       <ConstraintListPanel sketch={sketch} />
@@ -429,110 +513,15 @@ export function SketchEditor({ sketch }: { sketch: SketchFeature }) {
   );
 }
 
-/** セグメントidから「セグメント1」のような表示用の短いラベルを作る(順序はsketch.segments配列準拠)。 */
-function segmentLabel(segments: SketchFeature["segments"], segmentId: string): string {
-  const index = (segments ?? []).findIndex((s) => s.id === segmentId);
-  return index >= 0 ? `セグメント${index + 1}` : segmentId;
-}
-
-function pointRefLabel(segments: SketchFeature["segments"], ref: PointRef): string {
-  return `${segmentLabel(segments, ref.segmentId)}.${ref.end}`;
-}
-
-/** 拘束種別の日本語ラベル。 */
-const CONSTRAINT_KIND_LABELS: Record<SketchConstraint["kind"], string> = {
-  coincident: "一致",
-  horizontal: "水平",
-  vertical: "垂直",
-  length: "長さ",
-  distance: "距離",
-  radius: "半径",
-  fix: "固定",
-  distanceEntityOrigin: "中心↔原点距離",
-  distancePointOrigin: "端点↔原点距離",
-  coincidentOrigin: "原点一致",
-  distanceEntityEntity: "中心間距離",
-  distanceEntityLine: "中心↔辺距離",
-  distancePointLine: "端点↔辺距離",
-  fixEntity: "円の固定",
-  perpendicular: "垂直",
-  concentric: "同心",
-  tangent: "接線",
-  distanceLineLine: "平行距離",
-  angleLineLine: "角度",
-  distanceLineRefEdge: "平行距離(参照エッジ)",
-  angleLineRefEdge: "角度(参照エッジ)",
-};
-
-/** entityIdから「円1」のような表示用の短いラベルを作る(順序はentities配列準拠)。 */
-function entityLabel(entities: SketchFeature["entities"], entityId: string): string {
-  const index = entities.findIndex((e) => e.id === entityId);
-  return index >= 0 ? `円${index + 1}` : entityId;
-}
-
-/** 拘束の対象・値を1行で表す説明文を作る。 */
-function describeConstraint(
-  segments: SketchFeature["segments"],
-  entities: SketchFeature["entities"],
-  constraint: SketchConstraint,
-): string {
-  switch (constraint.kind) {
-    case "coincident":
-      return `${pointRefLabel(segments, constraint.a)} = ${pointRefLabel(segments, constraint.b)}`;
-    case "horizontal":
-    case "vertical":
-      return segmentLabel(segments, constraint.segmentId);
-    case "length":
-      return `${segmentLabel(segments, constraint.segmentId)} = ${formatMm(constraint.value)}mm`;
-    case "radius":
-      return `${segmentLabel(segments, constraint.segmentId)} = R${formatMm(constraint.value)}mm`;
-    case "distance": {
-      const axisPrefix = constraint.axis === "x" ? "X:" : constraint.axis === "y" ? "Y:" : "";
-      return `${pointRefLabel(segments, constraint.a)} - ${pointRefLabel(segments, constraint.b)} = ${axisPrefix}${formatMm(constraint.value)}mm`;
-    }
-    case "fix":
-      return pointRefLabel(segments, constraint.point);
-    case "distanceEntityOrigin":
-      return `${entityLabel(entities, constraint.entity.entityId)} - 原点 = ${formatMm(constraint.value)}mm`;
-    case "distancePointOrigin": {
-      const axisPrefix = constraint.axis === "x" ? "X:" : constraint.axis === "y" ? "Y:" : "";
-      return `${pointRefLabel(segments, constraint.point)} - 原点 = ${axisPrefix}${formatMm(constraint.value)}mm`;
-    }
-    case "coincidentOrigin":
-      return "segmentId" in constraint.point
-        ? `${pointRefLabel(segments, constraint.point)} = 原点`
-        : `${entityLabel(entities, constraint.point.entityId)} = 原点`;
-    case "distanceEntityEntity": {
-      const axisPrefix = constraint.axis === "x" ? "X:" : constraint.axis === "y" ? "Y:" : "";
-      return `${entityLabel(entities, constraint.a.entityId)} - ${entityLabel(entities, constraint.b.entityId)} = ${axisPrefix}${formatMm(constraint.value)}mm`;
-    }
-    case "distanceEntityLine":
-      return `${entityLabel(entities, constraint.entity.entityId)} - 辺 = ${formatMm(constraint.value)}mm`;
-    case "distancePointLine":
-      return `${pointRefLabel(segments, constraint.point)} - 辺 = ${formatMm(constraint.value)}mm`;
-    case "fixEntity":
-      return entityLabel(entities, constraint.entity.entityId);
-    case "perpendicular":
-      return `${segmentLabel(segments, constraint.a)} ⊥ ${segmentLabel(segments, constraint.b)}`;
-    case "distanceLineLine":
-      return `${segmentLabel(segments, constraint.a)} // ${segmentLabel(segments, constraint.b)} = ${formatMm(constraint.value)}mm`;
-    case "angleLineLine":
-      return `${segmentLabel(segments, constraint.a)} ∠ ${segmentLabel(segments, constraint.b)} = ${formatMm(constraint.value)}°`;
-    case "distanceLineRefEdge":
-      return `${segmentLabel(segments, constraint.segmentId)} // 参照エッジ = ${formatMm(constraint.value)}mm`;
-    case "angleLineRefEdge":
-      return `${segmentLabel(segments, constraint.segmentId)} ∠ 参照エッジ = ${formatMm(constraint.value)}°`;
-    case "concentric":
-      return `${entityLabel(entities, constraint.a.entityId)} = ${entityLabel(entities, constraint.b.entityId)}`;
-    case "tangent": {
-      const from = entityLabel(entities, constraint.entity.entityId);
-      const to =
-        constraint.target.kind === "segment"
-          ? segmentLabel(segments, constraint.target.segmentId)
-          : `${entityLabel(entities, constraint.target.entityId)}(${constraint.target.mode === "internal" ? "内接" : "外接"})`;
-      return `${from} - ${to}`;
-    }
-  }
+/**
+ * セグメント個別行の表示ラベル(種類+概略座標、実機報告対応Phase 32②)。
+ * 例: 「セグメント1(線分): (0, 0) → (10, 0)」。座標はformatMm()で小数3桁に丸める(表示用)。
+ */
+function segmentRowLabel(seg: SketchSegment, index: number): string {
+  const kindLabel = seg.kind === "arc" ? "円弧" : "線分";
+  const p1 = `(${formatMm(seg.p1[0])}, ${formatMm(seg.p1[1])})`;
+  const p2 = `(${formatMm(seg.p2[0])}, ${formatMm(seg.p2[1])})`;
+  return `セグメント${index + 1}(${kindLabel}): ${p1} → ${p2}`;
 }
 
 /**

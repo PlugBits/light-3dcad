@@ -11,6 +11,7 @@ import {
   addSketchSegments,
   addThreadFeature,
   applySegmentCornerToSketch,
+  constraintReferencesId,
   createEmptyDocument,
   createCircleEntity,
   createLineSegment,
@@ -26,6 +27,7 @@ import {
   patchSketchFeature,
   removeFeature,
   removeFeatureCascade,
+  removeSketchElementCascade,
   removeSketchEntity,
   replaceFillet3DEdges,
   replaceMateFaces,
@@ -34,6 +36,8 @@ import {
   resolveEvaluationDocument,
   setPolygonVertexCorner,
   setRollbackIndex,
+  setSketchConstraints,
+  setSketchSegments,
   updateSketchEntity,
   validateDocument,
   validateFeature,
@@ -256,6 +260,65 @@ describe("addSketchEntity / removeSketchEntity", () => {
     const updated = removeSketchEntity(doc, sketch.id, "nope");
     const found = findFeature(updated, sketch.id) as SketchFeature;
     expect(found.entities).toHaveLength(1);
+  });
+});
+
+describe("constraintReferencesId / removeSketchElementCascade(個別削除のカスケード、実機報告対応Phase 32②)", () => {
+  function makeChainDoc(): { doc: CadDocument; sketch: SketchFeature } {
+    const empty = createEmptyDocument();
+    const { doc: withSketch, feature } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [],
+    });
+    const s1: SketchSegment = { id: "s1", kind: "line", p1: [0, 0], p2: [10, 0] };
+    const s2: SketchSegment = { id: "s2", kind: "line", p1: [10, 0], p2: [10, 10] };
+    let doc = setSketchSegments(withSketch, feature.id, [s1, s2]);
+    const constraints: SketchConstraint[] = [
+      { id: "co1", kind: "coincident", a: { segmentId: "s1", end: "p2" }, b: { segmentId: "s2", end: "p1" } },
+      { id: "h1", kind: "horizontal", segmentId: "s1" },
+      { id: "v2", kind: "vertical", segmentId: "s2" },
+      { id: "len1", kind: "length", segmentId: "s1", value: 10 },
+    ];
+    doc = setSketchConstraints(doc, feature.id, constraints);
+    return { doc, sketch: { ...feature, segments: [s1, s2], constraints } };
+  }
+
+  it("constraintReferencesIdはcoincident/horizontal/lengthなど各種拘束がsegmentIdを参照しているかを正しく判定する", () => {
+    const { sketch } = makeChainDoc();
+    const [coincident, horizontal, vertical, length] = sketch.constraints!;
+    // s1を参照する拘束: coincident(a側)・horizontal・length
+    expect(constraintReferencesId(coincident, "s1")).toBe(true);
+    expect(constraintReferencesId(horizontal, "s1")).toBe(true);
+    expect(constraintReferencesId(length, "s1")).toBe(true);
+    expect(constraintReferencesId(vertical, "s1")).toBe(false);
+    // s2を参照する拘束: coincident(b側)・vertical
+    expect(constraintReferencesId(coincident, "s2")).toBe(true);
+    expect(constraintReferencesId(vertical, "s2")).toBe(true);
+    expect(constraintReferencesId(horizontal, "s2")).toBe(false);
+    // どちらも参照しないid
+    expect(constraintReferencesId(coincident, "s3")).toBe(false);
+  });
+
+  it("removeSketchElementCascadeはセグメント1本を削除し、それを参照する拘束(coincident/horizontal/length)を全て削除して件数を返す(参照しないvertical拘束は残る)", () => {
+    const { doc, sketch } = makeChainDoc();
+    const { doc: updated, removedConstraintCount } = removeSketchElementCascade(doc, sketch.id, "s1");
+    const found = findFeature(updated, sketch.id) as SketchFeature;
+    expect(found.segments).toHaveLength(1);
+    expect(found.segments![0].id).toBe("s2");
+    // coincident・horizontal・lengthの3件がs1を参照しているため削除される。
+    expect(removedConstraintCount).toBe(3);
+    expect(found.constraints).toHaveLength(1);
+    expect(found.constraints![0].kind).toBe("vertical");
+    // 非破壊: 元のdocは変更されない。
+    expect((findFeature(doc, sketch.id) as SketchFeature).segments).toHaveLength(2);
+  });
+
+  it("存在しないidの削除は何もしない(removedConstraintCount: 0、docは変更されない)", () => {
+    const { doc, sketch } = makeChainDoc();
+    const { doc: updated, removedConstraintCount } = removeSketchElementCascade(doc, sketch.id, "nope");
+    expect(removedConstraintCount).toBe(0);
+    expect(updated).toBe(doc);
   });
 });
 

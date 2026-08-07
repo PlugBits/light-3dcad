@@ -10,6 +10,7 @@ import type {
   FeatureId,
   Fillet3DFeature,
   FilletEdgeRef,
+  LineRef,
   MateFaceRef,
   MateFeature,
   PartInstanceFeature,
@@ -597,6 +598,97 @@ export function removeSketchEntity(doc: CadDocument, sketchId: FeatureId, entity
     ...sketch,
     entities: sketch.entities.filter((entity) => entity.id !== entityId),
   }));
+}
+
+/** LineRefがtargetId(segmentId/entityId)を参照しているか判定する(constraintReferencesId()のヘルパー)。 */
+function lineRefReferencesId(line: LineRef, targetId: string): boolean {
+  if (line.kind === "entityEdge") return line.entityId === targetId;
+  if (line.kind === "segmentEdge") return line.segmentId === targetId;
+  return false; // refEdge: ピック時点のスナップショット座標のみを持ち、生きたidを参照しない。
+}
+
+/**
+ * 拘束cがsegments/entitiesのid(targetId)を参照しているか判定する(個別削除のカスケード用の
+ * 純粋関数、実機報告対応Phase 32②)。segmentIdとentityIdは別々の名前空間だが、generateId()で
+ * 採番されるため衝突しない前提で1つのtargetIdとして扱える。SketchConstraintの全種別を網羅する
+ * (switchがconstraint.kindで分岐し尽くしていない場合はTypeScriptの型チェックでnever型エラーに
+ * なるため、新しい拘束種別を追加した際にここの更新漏れがコンパイル時に検出される)。
+ */
+export function constraintReferencesId(constraint: SketchConstraint, targetId: string): boolean {
+  switch (constraint.kind) {
+    case "coincident":
+      return constraint.a.segmentId === targetId || constraint.b.segmentId === targetId;
+    case "horizontal":
+    case "vertical":
+    case "length":
+    case "radius":
+    case "distanceLineRefEdge":
+    case "angleLineRefEdge":
+      return constraint.segmentId === targetId;
+    case "distance":
+      return constraint.a.segmentId === targetId || constraint.b.segmentId === targetId;
+    case "fix":
+      return constraint.point.segmentId === targetId;
+    case "distanceEntityOrigin":
+    case "fixEntity":
+      return constraint.entity.entityId === targetId;
+    case "distancePointOrigin":
+      return constraint.point.segmentId === targetId;
+    case "coincidentOrigin":
+      return "segmentId" in constraint.point ? constraint.point.segmentId === targetId : constraint.point.entityId === targetId;
+    case "distanceEntityEntity":
+    case "concentric":
+      return constraint.a.entityId === targetId || constraint.b.entityId === targetId;
+    case "distanceEntityLine":
+      return constraint.entity.entityId === targetId || lineRefReferencesId(constraint.line, targetId);
+    case "distancePointLine":
+      return constraint.point.segmentId === targetId || lineRefReferencesId(constraint.line, targetId);
+    case "perpendicular":
+    case "distanceLineLine":
+    case "angleLineLine":
+      return constraint.a === targetId || constraint.b === targetId;
+    case "tangent":
+      return (
+        constraint.entity.entityId === targetId ||
+        (constraint.target.kind === "segment" ? constraint.target.segmentId === targetId : constraint.target.entityId === targetId)
+      );
+    default: {
+      const exhaustive: never = constraint;
+      return exhaustive;
+    }
+  }
+}
+
+/**
+ * sketchからsegments/entitiesいずれかの1件(id指定、種類は自動判定)を削除し、それを参照する
+ * 拘束(coincident/tangent/length等)も同時に削除する(個別削除・実機報告対応、Phase 32②)。
+ * SketchEditorのセグメント一覧の削除ボタン、およびビューア直接選択+Deleteキーの両方から使う
+ * 共通実装。idがsegments/entitiesのどちらにも見つからなければdocをそのまま返す
+ * (removedConstraintCount: 0)。戻り値のremovedConstraintCountは呼び出し側の一時トースト
+ * (「関連する拘束N件も削除しました」)に使う。
+ */
+export function removeSketchElementCascade(
+  doc: CadDocument,
+  sketchId: FeatureId,
+  id: string,
+): { doc: CadDocument; removedConstraintCount: number } {
+  const sketch = findFeature(doc, sketchId);
+  if (!sketch || sketch.type !== "sketch") return { doc, removedConstraintCount: 0 };
+  const isSegment = (sketch.segments ?? []).some((s) => s.id === id);
+  const isEntity = sketch.entities.some((e) => e.id === id);
+  if (!isSegment && !isEntity) return { doc, removedConstraintCount: 0 };
+
+  const constraints = sketch.constraints ?? [];
+  const removedConstraintCount = constraints.filter((c) => constraintReferencesId(c, id)).length;
+  const nextConstraints = constraints.filter((c) => !constraintReferencesId(c, id));
+
+  const nextDoc = updateFeature<SketchFeature>(doc, sketchId, (s) => ({
+    ...s,
+    segments: isSegment ? (s.segments ?? []).filter((seg) => seg.id !== id) : s.segments,
+    entities: isEntity ? s.entities.filter((e) => e.id !== id) : s.entities,
+    constraints: nextConstraints,
+  }));
+  return { doc: nextDoc, removedConstraintCount };
 }
 
 /** sketch の自由な線分・円弧セグメント(Phase 19a)配列を丸ごと置き換える(Phase 19b)。 */
