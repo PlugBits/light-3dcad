@@ -226,6 +226,12 @@ export type SketchConstraint =
   /**
    * circleエンティティが直線セグメント、または別のcircleエンティティに接すること(Phase 23)。
    * target.kind:"segment" は直線セグメント(kind:"line"のみ)への接線(円中心↔直線の距離=半径)。
+   * side(実機報告対応、Phase 32)は円の中心が直線のどちら側にあるかを固定する符号(1|-1、
+   * lineSideSign()と同じ規約: (中心-p1)×(p2-p1)の外積が負なら-1、それ以外は+1)。拘束作成時点の
+   * 現在位置から一度だけ決めて保存し、以後solveSketch()を何度呼んでも(その都度initXから符号を
+   * 再計算する旧実装と違い)反対側の解へ非凸的に引っ張られないようにする(省略時はsolveSketch()側で
+   * 従来通りinitXから都度計算する後方互換フォールバック、src/sketch/constraintDimensions.tsの
+   * addTangentSegmentConstraint参照)。
    * target.kind:"entity" は円同士の接線で、mode:"external"(外接、中心間距離=r1+r2)/
    * "internal"(内接、中心間距離=|r1-r2|)のいずれか。modeは拘束作成時点の現在の中心間距離が
    * external/internalどちらの目標値に近いかで自動選択し、以後は固定値として保存する
@@ -235,7 +241,9 @@ export type SketchConstraint =
       id: string;
       kind: "tangent";
       entity: EntityRef;
-      target: { kind: "segment"; segmentId: string } | { kind: "entity"; entityId: string; mode: "external" | "internal" };
+      target:
+        | { kind: "segment"; segmentId: string; side?: 1 | -1 }
+        | { kind: "entity"; entityId: string; mode: "external" | "internal" };
     }
   /**
    * 2本の直線セグメント(kind:"line"のみ対象)がほぼ平行なときの、平行距離拘束(Phase 24)。

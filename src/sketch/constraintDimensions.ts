@@ -326,19 +326,44 @@ export function addConcentricConstraint(
 
 /**
  * circleエンティティ↔直線セグメントのtangent拘束を追加する(既に同じ組み合わせがあれば何もしない)。
+ * side(実機報告対応、Phase 32: 接線拘束が解けるのに「矛盾」になるバグの修正)は、円の中心が
+ * 直線のどちら側にあるかを拘束作成時点の現在の形状(entities/segments)から一度だけ決めて
+ * 保存する(以後solveSketch()を何度呼んでもここで決めたsideをそのまま使い、都度initXから
+ * 符号を再計算しない。src/sketch/solver.tsのlineSideSign()と全く同じ規約(外積が負なら-1、
+ * それ以外は+1)で計算するため、solver.ts側のフォールバック計算[side省略時]と常に整合する)。
+ * entities/segmentsが渡されない(または対象が見つからない)場合はside省略で作成し、
+ * solveSketch()側の後方互換フォールバックに委ねる。
  */
 export function addTangentSegmentConstraint(
   constraints: readonly SketchConstraint[],
   entityId: string,
   segmentId: string,
+  entities: readonly SketchEntity[] = [],
+  segments: readonly SketchSegment[] = [],
 ): SketchConstraint[] {
   const exists = constraints.some(
     (c) => c.kind === "tangent" && c.entity.entityId === entityId && c.target.kind === "segment" && c.target.segmentId === segmentId,
   );
   if (exists) return constraints.slice();
+
+  const circle = entities.find((e) => e.id === entityId && e.kind === "circle");
+  const segment = findSegment(segments, segmentId);
+  let side: 1 | -1 | undefined;
+  if (circle && circle.kind === "circle" && segment) {
+    const [ax, ay] = segment.p1;
+    const [bx, by] = segment.p2;
+    const cross = (circle.center[0] - ax) * (by - ay) - (circle.center[1] - ay) * (bx - ax);
+    side = cross < 0 ? -1 : 1;
+  }
+
   return [
     ...constraints,
-    { id: generateId("constraint"), kind: "tangent", entity: { entityId }, target: { kind: "segment", segmentId } },
+    {
+      id: generateId("constraint"),
+      kind: "tangent",
+      entity: { entityId },
+      target: side !== undefined ? { kind: "segment", segmentId, side } : { kind: "segment", segmentId },
+    },
   ];
 }
 

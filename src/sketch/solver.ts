@@ -12,6 +12,7 @@
 // 拘束が不足している(劣拘束)自由度については「入力形状に最も近い解」を選ぶ(SolidWorks等の
 // スケッチソルバに倣った自然な挙動。無関係な点が意図せず動かないようにする効果もある)。
 import type { CadDocument, EntityRef, FeatureId, LineRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
+import { constraintFullLabel } from "./constraintLabels";
 import { polygonEdgePointsWithOffset, rectangleEdgePointsAtCenter, resolveLineRefPoints } from "./entityEdges";
 
 export type Point2 = [number, number];
@@ -685,9 +686,13 @@ function buildConstraintResiduals(
         if (target.kind === "segment") {
           const lineBase = varIndex.get(target.segmentId);
           if (lineBase === undefined) break;
-          const a0: Point2 = [initX[lineBase], initX[lineBase + 1]];
-          const b0: Point2 = [initX[lineBase + 2], initX[lineBase + 3]];
-          const sign = lineSideSign(initX, idx, a0, b0);
+          // 実機報告対応(Phase 32): sideが拘束に保存されていれば(addTangentSegmentConstraint参照)
+          // それを使い、都度initXから符号を再計算しない(非凸性による反対側の解への意図しない
+          // 収束を防ぐ)。省略されている拘束(旧バージョンのファイルを読み込んだ場合)は
+          // 従来通りinitXから計算する後方互換フォールバック。
+          const sign =
+            target.side ??
+            lineSideSign(initX, idx, [initX[lineBase], initX[lineBase + 1]], [initX[lineBase + 2], initX[lineBase + 3]]);
           eqs.push(
             numericResidual((vars) => tangentLineValue(vars, idx, lineBase, circle.radius, sign), x, [
               idx[0],
@@ -806,6 +811,206 @@ function buildFixResiduals(
     }
   }
   return eqs;
+}
+
+/**
+ * 拘束1件だけの残差式を作る(実機報告対応、Phase 32。矛盾時のメッセージ用の残差ランキング、
+ * および収束失敗時の初期値リトライのnudge計算で共用する)。fix/fixEntityはbuildFixResiduals、
+ * それ以外はbuildConstraintResidualsに1件だけの配列を渡して流用する(残差式の定義自体は
+ * 拘束の種類ごとに1箇所[buildConstraintResiduals/buildFixResiduals]にしか無いようにするため)。
+ */
+function constraintResidualEqs(
+  c: SketchConstraint,
+  segments: readonly SketchSegment[],
+  segmentsById: Map<string, SketchSegment>,
+  varIndex: VarIndexMap,
+  entityVarIdx: EntityVarIndexMap,
+  entities: readonly SketchEntity[],
+  x: number[],
+  initX: number[],
+): ResidualEq[] {
+  if (c.kind === "fix" || c.kind === "fixEntity") {
+    return buildFixResiduals([c], varIndex, entityVarIdx, x, initX);
+  }
+  return buildConstraintResiduals([c], segments, segmentsById, varIndex, entityVarIdx, entities, x, initX);
+}
+
+function constraintResidualMaxAbs(
+  c: SketchConstraint,
+  segments: readonly SketchSegment[],
+  segmentsById: Map<string, SketchSegment>,
+  varIndex: VarIndexMap,
+  entityVarIdx: EntityVarIndexMap,
+  entities: readonly SketchEntity[],
+  x: number[],
+  initX: number[],
+): number {
+  return constraintResidualEqs(c, segments, segmentsById, varIndex, entityVarIdx, entities, x, initX).reduce(
+    (acc, eq) => Math.max(acc, Math.abs(eq.value)),
+    0,
+  );
+}
+
+interface RankedConstraint {
+  constraint: SketchConstraint;
+  residual: number;
+}
+
+/** 拘束を残差の絶対値最大が大きい順に並べる(矛盾メッセージ・初期値リトライの対象選定に使う)。 */
+function rankConstraintsByResidual(
+  constraints: readonly SketchConstraint[],
+  segments: readonly SketchSegment[],
+  segmentsById: Map<string, SketchSegment>,
+  varIndex: VarIndexMap,
+  entityVarIdx: EntityVarIndexMap,
+  entities: readonly SketchEntity[],
+  x: number[],
+  initX: number[],
+): RankedConstraint[] {
+  return constraints
+    .map((constraint) => ({
+      constraint,
+      residual: constraintResidualMaxAbs(constraint, segments, segmentsById, varIndex, entityVarIdx, entities, x, initX),
+    }))
+    .sort((a, b) => b.residual - a.residual);
+}
+
+/**
+ * 収束失敗時の初期値リトライ(実機報告対応、Phase 32②)向けに、指定した拘束1件をおおよそ満たす
+ * 方向へ変数を大きく動かした初期値ベクトルを作る(x0自体は書き換えずコピーを返す)。
+ *
+ * tangent(円↔直線)は特別扱いで、円中心を動かさずに直線をその法線方向へ「剛体並進」させる
+ * 厳密解を使う。直線を並進させたときの符号付き距離の変化は並進量に対して線形(角度が変わらない
+ * 限り)なので、この1回の補正で当該tangent拘束の残差は理論上ちょうど0になる。これが重要な理由:
+ * 「垂直+一致チェーンで繋がった直線をcircleに接するまで動かす」という典型ケースで、単純な
+ * 最小二乗補正(疑似逆行列)だとp1/p2が独立に(=直線の形を歪めて)動いてしまい、warmup+LMの
+ * 探索がその歪んだ方向の局所解(直線が退化してほぼ1点に潰れる、実機報告の根本原因だったパターン)
+ * に迷い込みやすい。剛体並進なら「直線を動かす」というユーザーの意図に沿った良い初期値になり、
+ * そこからの再solveがその近傍の(退化していない)解に収束しやすくなる。
+ *
+ * それ以外の拘束種別は、残差のヤコビアンから最小ノルム補正(1本の残差式ごとに
+ * delta_i = -coef_i*value/Σcoef_j^2、疑似逆行列の単純な特殊形)を使う汎用フォールバック
+ * (非線形な残差では厳密に0にはならないが、十分近い初期値を作れれば再solveのLM反復で
+ * 収束しやすくなる、という統計的な効果を狙う)。
+ *
+ * 対象変数が見つからない、または既に残差がCONFLICT_TOLERANCE以下(nudgeする意味が無い)なら
+ * nullを返す。
+ */
+function computeNudgedInitX(
+  c: SketchConstraint,
+  x0: readonly number[],
+  segments: readonly SketchSegment[],
+  segmentsById: Map<string, SketchSegment>,
+  varIndex: VarIndexMap,
+  entityVarIdx: EntityVarIndexMap,
+  entities: readonly SketchEntity[],
+  initX: readonly number[],
+): number[] | null {
+  if (c.kind === "tangent" && c.target.kind === "segment") {
+    const idx = entityVarIndex(entityVarIdx, c.entity);
+    const lineBase = varIndex.get(c.target.segmentId);
+    const circle = entities.find((e): e is CircleEntity => e.kind === "circle" && e.id === c.entity.entityId);
+    if (idx && lineBase !== undefined && circle) {
+      const target = c.target;
+      const sign =
+        target.side ??
+        lineSideSign(initX as number[], idx, [initX[lineBase], initX[lineBase + 1]], [initX[lineBase + 2], initX[lineBase + 3]]);
+      const ax = x0[lineBase];
+      const ay = x0[lineBase + 1];
+      const bx = x0[lineBase + 2];
+      const by = x0[lineBase + 3];
+      const dx = bx - ax;
+      const dy = by - ay;
+      const len = Math.max(Math.hypot(dx, dy), MIN_SAFE_LENGTH);
+      const value = tangentLineValue(x0 as number[], idx, lineBase, circle.radius, sign);
+      if (Math.abs(value) < CONFLICT_TOLERANCE) return null;
+      // 直線をt*(nx,ny)だけ剛体並進させると符号付き距離がちょうど-sign*t変化する
+      // (導出: cross'=(px-(ax+t*nx))*dy-(py-(ay+t*ny))*dx = cross - t*(nx*dy-ny*dx) = cross - t*len
+      //  [nx=dy/len, ny=-dx/lenなのでnx*dy-ny*dx=(dy^2+dx^2)/len=len]。よってcross'/len = cross/len - t、
+      //  sign*cross'/len = sign*cross/len - sign*t。value=0にするにはt=sign*value)。
+      const t = sign * value;
+      const nx = dy / len;
+      const ny = -dx / len;
+      const nudged = x0.slice();
+      nudged[lineBase] += t * nx;
+      nudged[lineBase + 1] += t * ny;
+      nudged[lineBase + 2] += t * nx;
+      nudged[lineBase + 3] += t * ny;
+      return nudged;
+    }
+    return null;
+  }
+
+  const eqs = constraintResidualEqs(c, segments, segmentsById, varIndex, entityVarIdx, entities, x0 as number[], initX as number[]);
+  const nudged = x0.slice();
+  let touched = false;
+  for (const eq of eqs) {
+    if (Math.abs(eq.value) < CONFLICT_TOLERANCE) continue;
+    let sumSq = 0;
+    for (const t of eq.terms) sumSq += t.coef * t.coef;
+    if (sumSq < 1e-12) continue;
+    const factor = -eq.value / sumSq;
+    for (const t of eq.terms) nudged[t.index] += factor * t.coef;
+    touched = true;
+  }
+  return touched ? nudged : null;
+}
+
+/**
+ * computeNudgedInitX()が作った初期値リトライのnudgeを、coincident拘束で繋がった端点の連鎖に
+ * 沿って伝播させる(実機報告対応、Phase 32②。tangent(円↔直線)の剛体並進nudgeは対象の
+ * セグメント自身の2端点しか動かさないため、そのままだと隣接セグメント(一致チェーンで繋がった
+ * 相手側の端点)がattemptSolve()の正則化アンカー[regularizationAnchor=nudgedInitX]では
+ * 「元の位置のまま」扱いになり、一致拘束(隣接セグメントの端点=移動した端点)と正則化(隣接
+ * セグメントの端点を元の位置に留めたい)が綱引きになって、結局nudge前と同様の退化した解に
+ * 迷い込みやすいことが実測でわかった)。coincident拘束をグラフの辺とみなし、nudgeで動いた
+ * 端点(x0との差分が非ゼロ)を起点にBFSで「同じ変位」を隣接端点へ伝播する(端点同士が
+ * coincidentで直接繋がっているなら、正則化アンカー上でも同じ量だけ動いているのが自然な仮定)。
+ * 到達しない端点(一致チェーンで繋がっていない部分)は元のまま。
+ */
+function propagateNudgeThroughCoincidence(
+  x0: readonly number[],
+  nudged: number[],
+  constraints: readonly SketchConstraint[],
+  varIndex: VarIndexMap,
+): number[] {
+  const adjacency = new Map<number, number[]>();
+  const addEdge = (a: number, b: number) => {
+    if (!adjacency.has(a)) adjacency.set(a, []);
+    if (!adjacency.has(b)) adjacency.set(b, []);
+    adjacency.get(a)!.push(b);
+    adjacency.get(b)!.push(a);
+  };
+  for (const c of constraints) {
+    if (c.kind !== "coincident") continue;
+    const a = pointVarIndex(varIndex, c.a);
+    const b = pointVarIndex(varIndex, c.b);
+    if (!a || !b) continue;
+    addEdge(a[0], b[0]); // ノードidは端点のxインデックス(yは常にx+1として扱う)。
+  }
+
+  const result = nudged.slice();
+  const visited = new Set<number>();
+  const queue: number[] = [];
+  for (const node of adjacency.keys()) {
+    if (result[node] !== x0[node] || result[node + 1] !== x0[node + 1]) {
+      visited.add(node);
+      queue.push(node);
+    }
+  }
+  while (queue.length > 0) {
+    const node = queue.shift() as number;
+    const dx = result[node] - x0[node];
+    const dy = result[node + 1] - x0[node + 1];
+    for (const nbr of adjacency.get(node) ?? []) {
+      if (visited.has(nbr)) continue;
+      result[nbr] += dx;
+      result[nbr + 1] += dy;
+      visited.add(nbr);
+      queue.push(nbr);
+    }
+  }
+  return result;
 }
 
 /** 正則化残差(各変数について「初期位置からの移動量×sqrt(重み)」)を作る。 */
@@ -1079,26 +1284,78 @@ export function solveSketch(
     ...buildRegularizationResiduals(vars, initX, REGULARIZATION_WEIGHT),
   ];
 
-  const warm = runLevenbergMarquardt(buildWarmupResiduals, initX, m, MAX_ITERATIONS);
-  const solved = runLevenbergMarquardt(buildHardResiduals, warm, m, MAX_ITERATIONS);
+  /**
+   * 与えた初期値x0からウォームアップ+仕上げの2段階LMを実行し、丸め済みの解と拘束残差の
+   * 絶対値最大を返す(実機報告対応、Phase 32。従来1回しか呼ばれなかった処理を関数化し、
+   * 下記の初期値リトライから複数回呼べるようにしたもの)。
+   *
+   * regularizationAnchor(正則化=「形状をできるだけ変えない」ソフト制約の目標形状)は通常initX
+   * (従来通り、単独成功時の挙動・戻り値は変わらない)。初期値リトライ(computeNudgedInitX)で
+   * x0を大きく動かした場合にregularizationAnchorをinitXのままにすると、ウォームアップの
+   * 正則化項が「x0をinitXへ引き戻そう」とする力になり、せっかくのnudgeの効果を(部分的に)
+   * 打ち消してしまう(実測: 打ち消された結果、nudge無しより悪化するケースがあった)。
+   * そこでx0自体をregularizationAnchorとして渡せるようにし、「nudge後の形状の近くで
+   * 形状をできるだけ変えない」ように正則化の基準点を移せるようにする。
+   */
+  function attemptSolve(x0: number[], regularizationAnchor: number[] = initX): { x: number[]; maxAbs: number } {
+    const buildWarmupResidualsFrom =
+      regularizationAnchor === initX
+        ? buildWarmupResiduals
+        : (vars: number[]): ResidualEq[] => [...buildHardResiduals(vars), ...buildRegularizationResiduals(vars, regularizationAnchor, REGULARIZATION_WEIGHT)];
+    const warm = runLevenbergMarquardt(buildWarmupResidualsFrom, x0, m, MAX_ITERATIONS);
+    const solved = runLevenbergMarquardt(buildHardResiduals, warm, m, MAX_ITERATIONS);
+    // 累積ドリフト対策その2: 出力座標をROUND_GRIDに丸める。次回solveSketch()が同じ形状で呼ばれたとき
+    // (=何も編集していないのに再solveされたとき)、丸められた「きりのいい」座標が
+    // EARLY_RETURN_TOLERANCE判定を安定して通過するようにする(=座標が完全に不変になる)。
+    // 丸め幅(1e-6mm)はCONFLICT_TOLERANCE(1e-4mm)より2桁小さいため、丸めによって矛盾判定が
+    // 悪化することはない。
+    const xr = solved.map(roundToGrid);
+    const maxAbsR = buildHardResiduals(xr).reduce((acc, eq) => Math.max(acc, Math.abs(eq.value)), 0);
+    return { x: xr, maxAbs: maxAbsR };
+  }
 
-  // 累積ドリフト対策その2: 出力座標をROUND_GRIDに丸める。次回solveSketch()が同じ形状で呼ばれたとき
-  // (=何も編集していないのに再solveされたとき)、丸められた「きりのいい」座標が
-  // EARLY_RETURN_TOLERANCE判定を安定して通過するようにする(=座標が完全に不変になる)。
-  // 丸め幅(1e-6mm)はCONFLICT_TOLERANCE(1e-4mm)より2桁小さいため、丸めによって矛盾判定が
-  // 悪化することはない。
-  const x = solved.map(roundToGrid);
+  let best = attemptSolve(initX);
 
-  const maxAbs = buildHardResiduals(x).reduce((acc, eq) => Math.max(acc, Math.abs(eq.value)), 0);
+  // 実機報告対応(Phase 32②): 通常の初期値からの1回の解法では許容誤差内に収まらなかった場合、
+  // 残差が最大の拘束(最大2件)を狙って初期値を大きく動かした状態から再solveする(最大2回の
+  // リトライ)。問題なく収束する既存のケースはこのブロックに到達しないため挙動は変わらない。
+  // 「残差が大きいまま停滞」(=初期値次第で解ける)と「真の矛盾」を判別する決定的な方法は
+  // 無いが、少なくともこのリトライで解けるケースは前者だったと言える。
+  if (best.maxAbs > CONFLICT_TOLERANCE) {
+    const rankedAtInit = rankConstraintsByResidual(constraints, segments, segmentsById, varIndex, entityVarIdx, entities, initX, initX);
+    const RETRY_CANDIDATE_COUNT = 2;
+    for (const { constraint, residual } of rankedAtInit.slice(0, RETRY_CANDIDATE_COUNT)) {
+      if (residual <= CONFLICT_TOLERANCE) break; // 降順ソート済みなのでこれ以降も対象外
+      if (best.maxAbs <= CONFLICT_TOLERANCE) break;
+      const nudgedInitX = computeNudgedInitX(constraint, initX, segments, segmentsById, varIndex, entityVarIdx, entities, initX);
+      if (!nudgedInitX) continue;
+      // nudgeで動かした端点にcoincidentで繋がる隣接端点にも同じ変位を伝播してから使う
+      // (単独の端点だけ動かすと、隣接セグメントの反対側の端点が正則化アンカー上では
+      // 「動いていない」ことになり、一致拘束との綱引きで元の悪い局所解に迷い込みやすいため)。
+      const propagated = propagateNudgeThroughCoincidence(initX, nudgedInitX, constraints, varIndex);
+      const attempt = attemptSolve(propagated, propagated);
+      if (attempt.maxAbs < best.maxAbs) best = attempt;
+    }
+  }
 
-  if (maxAbs > CONFLICT_TOLERANCE) {
+  if (best.maxAbs > CONFLICT_TOLERANCE) {
+    // 実機報告対応(Phase 32③): 残差が最大の拘束(上位1〜2件、best.xで評価)を人間可読な名前
+    // (拘束一覧パネルと同じ表記、src/sketch/constraintLabels.ts)で特定し、メッセージに含める。
+    const rankedAtBest = rankConstraintsByResidual(constraints, segments, segmentsById, varIndex, entityVarIdx, entities, best.x, initX);
+    const offenders = rankedAtBest.filter((r) => r.residual > CONFLICT_TOLERANCE).slice(0, 2);
+    const names = offenders.map((o) => `『${constraintFullLabel(segments, entities, o.constraint)}』`);
+    const detail =
+      names.length > 0
+        ? `${names[0]}を満たす位置に到達できませんでした${names.length > 1 ? `(関連: ${names[1]})` : ""}。`
+        : "";
     return {
       ok: false,
       conflicting: true,
-      message: `拘束が矛盾しています(残差 ${maxAbs.toFixed(4)}mm)`,
+      message: `${detail}拘束が矛盾しているか、現在の配置から解に到達できません(残差 ${best.maxAbs.toFixed(4)}mm)`,
     };
   }
 
+  const x = best.x;
   return {
     ok: true,
     segments: segmentsFromVars(segments, x, varIndex),
@@ -1131,7 +1388,9 @@ export function solveDocumentSketches(doc: CadDocument): SolveDocumentResult {
     if (feature.type !== "sketch" || !feature.constraints || feature.constraints.length === 0) return feature;
     const result = solveSketch(feature.segments ?? [], feature.constraints, feature.entities);
     if (!result.ok) {
-      conflict = { featureId: feature.id, message: "拘束が矛盾しています" };
+      // 実機報告対応(Phase 32③): solveSketch()が特定した具体的な原因(残差最大の拘束名)を
+      // そのまま伝播する(以前はここで汎用メッセージに握りつぶしていた)。
+      conflict = { featureId: feature.id, message: result.message };
       return feature;
     }
     return { ...feature, segments: result.segments, entities: result.entities };

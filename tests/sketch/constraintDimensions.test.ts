@@ -2,8 +2,9 @@
 // 寸法ツール・拘束一覧パネル・寸法ラベル編集が使う拘束作成/更新ヘルパーの最小限の検証。
 import { describe, expect, it } from "vitest";
 
-import type { SketchSegment } from "../../src/model/types";
+import type { SketchEntity, SketchSegment } from "../../src/model/types";
 import {
+  addTangentSegmentConstraint,
   computeConstraintDimensions,
   distanceBetweenRefs,
   segmentLength,
@@ -120,6 +121,44 @@ describe("現在値の計算(segmentLength/segmentRadius/distanceBetweenRefs)", 
     const dist = distanceBetweenRefs(segments, { segmentId: "s1", end: "p1" }, { segmentId: "s2", end: "p1" });
     expect(dist).toBeCloseTo(10, 9);
     expect(distanceBetweenRefs(segments, { segmentId: "missing", end: "p1" }, { segmentId: "s2", end: "p1" })).toBeNull();
+  });
+});
+
+describe("addTangentSegmentConstraint(接線拘束のside永続化、実機報告対応Phase 32)", () => {
+  function circle(id: string, center: [number, number], radius: number): Extract<SketchEntity, { kind: "circle" }> {
+    return { kind: "circle", id, center, radius };
+  }
+
+  it("円が直線の右側(x>0)にある場合と左側(x<0)にある場合とで、逆符号のsideが保存される", () => {
+    const segLeft: SketchSegment = { id: "s1", kind: "line", p1: [0, -10], p2: [0, 10] }; // 垂直な直線(x=0)
+    const circleOnRightSide = circle("c1", [10, 0], 3); // 直線の右側(+x)にある円
+    const circleOnLeftSide = circle("c2", [-10, 0], 3); // 直線の左側(-x)にある円
+
+    const right = addTangentSegmentConstraint([], "c1", "s1", [circleOnRightSide], [segLeft]);
+    const left = addTangentSegmentConstraint([], "c2", "s1", [circleOnLeftSide], [segLeft]);
+
+    expect(right).toHaveLength(1);
+    expect(left).toHaveLength(1);
+    const rightTarget = right[0].kind === "tangent" && right[0].target.kind === "segment" ? right[0].target : null;
+    const leftTarget = left[0].kind === "tangent" && left[0].target.kind === "segment" ? left[0].target : null;
+    expect(rightTarget?.side).toBeDefined();
+    expect(leftTarget?.side).toBeDefined();
+    expect(rightTarget?.side).toBe(-leftTarget?.side);
+  });
+
+  it("entities/segmentsを省略した場合はsideを省略して作成する(後方互換フォールバック)", () => {
+    const result = addTangentSegmentConstraint([], "c1", "s1");
+    expect(result).toHaveLength(1);
+    const target = result[0].kind === "tangent" && result[0].target.kind === "segment" ? result[0].target : null;
+    expect(target?.side).toBeUndefined();
+  });
+
+  it("同じ組み合わせが既にあれば何もしない(重複追加しない)", () => {
+    const seg: SketchSegment = { id: "s1", kind: "line", p1: [0, -10], p2: [0, 10] };
+    const c = circle("c1", [10, 0], 3);
+    const once = addTangentSegmentConstraint([], "c1", "s1", [c], [seg]);
+    const twice = addTangentSegmentConstraint(once, "c1", "s1", [c], [seg]);
+    expect(twice).toHaveLength(1);
   });
 });
 

@@ -938,6 +938,138 @@ describe("solveSketch 幾何拘束(perpendicular/concentric/tangent、Phase 23)"
   });
 });
 
+describe("solveSketch 接線拘束が解けるのに矛盾判定されるバグの修正(実機報告、Phase 32)", () => {
+  function circle(id: string, center: [number, number], radius: number): Extract<SketchEntity, { kind: "circle" }> {
+    return { kind: "circle", id, center, radius };
+  }
+
+  /**
+   * 実機報告の再現: 一致拘束で繋がった5本の線分チェーン(4番目=水平、5番目=垂直)+中心固定の
+   * 円2つに囲まれた形状で、垂直な線分(セグメント5)と外側の円への接線を追加する。この形状・
+   * 座標自体はスクリーンショットの厳密な再現ではなく「垂直線が円から離れた位置にある同型の
+   * 構成」(タスク仕様)。修正前は、垂直セグメントが一致チェームを経由して円に接するまで
+   * 移動する解が明らかに存在するにもかかわらず、LM法が退化した解(セグメント5がほぼ1点に
+   * 潰れる局所解)に迷い込んで矛盾判定(ok:false, conflicting:true)になっていた
+   * (根本原因: tangent[円↔直線]のnudge無し・warmupの正則化が常にinitXへ引き戻す設計のため、
+   * 「線分を剛体並進させる」自然な解より先に退化解へ収束してしまっていた)。
+   */
+  it("① 一致チェーン(5本、4=水平・5=垂直)+中心固定の2円: 垂直セグメントと外側の円への接線が、退化せずに解ける", () => {
+    const s1: SketchSegment = { id: "s1", kind: "line", p1: [2.902695, -0.419605], p2: [2.196322, 4.216721] };
+    const s2: SketchSegment = { id: "s2", kind: "line", p1: [2.196322, 4.216721], p2: [-7.607091, 5.758038] };
+    const s3: SketchSegment = { id: "s3", kind: "line", p1: [-7.607091, 5.758038], p2: [-8.268544, -8.246643] };
+    const s4: SketchSegment = { id: "s4", kind: "line", p1: [-8.268544, -8.246643], p2: [2.902695, -8.246643] };
+    const s5: SketchSegment = { id: "s5", kind: "line", p1: [2.902695, -8.246643], p2: [2.902695, -0.419605] };
+    const segments = [s1, s2, s3, s4, s5];
+    const innerCircle = circle("c1", [0, 0], 27.5);
+    const outerCircle = circle("c2", [0, 0], 59);
+    const entities: SketchEntity[] = [innerCircle, outerCircle];
+
+    const constraints: SketchConstraint[] = [
+      { id: "co1", kind: "coincident", a: { segmentId: "s1", end: "p2" }, b: { segmentId: "s2", end: "p1" } },
+      { id: "co2", kind: "coincident", a: { segmentId: "s2", end: "p2" }, b: { segmentId: "s3", end: "p1" } },
+      { id: "co3", kind: "coincident", a: { segmentId: "s3", end: "p2" }, b: { segmentId: "s4", end: "p1" } },
+      { id: "co4", kind: "coincident", a: { segmentId: "s4", end: "p2" }, b: { segmentId: "s5", end: "p1" } },
+      { id: "co5", kind: "coincident", a: { segmentId: "s5", end: "p2" }, b: { segmentId: "s1", end: "p1" } },
+      { id: "h4", kind: "horizontal", segmentId: "s4" },
+      { id: "v5", kind: "vertical", segmentId: "s5" },
+      { id: "fix1", kind: "fixEntity", entity: { entityId: "c1" } },
+      { id: "fix2", kind: "fixEntity", entity: { entityId: "c2" } },
+      { id: "tan1", kind: "tangent", entity: { entityId: "c2" }, target: { kind: "segment", segmentId: "s5" } },
+    ];
+
+    const result = solveSketch(segments, constraints, entities);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const outS1 = result.segments.find((s) => s.id === "s1")!;
+    const outS4 = result.segments.find((s) => s.id === "s4")!;
+    const outS5 = result.segments.find((s) => s.id === "s5")!;
+
+    // セグメント5は垂直かつ円2(半径59)に接する(=x=±59)まで移動している。
+    expect(outS5.p1[0]).toBeCloseTo(outS5.p2[0], 6);
+    expect(Math.abs(outS5.p1[0])).toBeCloseTo(59, 3);
+    // 退化(セグメント5が1点に潰れる)していない: 修正前のバグでは長さがほぼ0になっていた。
+    expect(dist(outS5.p1, outS5.p2)).toBeGreaterThan(5);
+    // 一致チェームで繋がった隣接セグメント(s1, s4)もセグメント5の移動に連動して端点が追従する。
+    expect(outS4.p2[0]).toBeCloseTo(outS5.p1[0], 6);
+    expect(outS4.p2[1]).toBeCloseTo(outS5.p1[1], 6);
+    expect(outS1.p1[0]).toBeCloseTo(outS5.p2[0], 6);
+    expect(outS1.p1[1]).toBeCloseTo(outS5.p2[1], 6);
+    // 水平拘束を保っている。
+    expect(outS4.p1[1]).toBeCloseTo(outS4.p2[1], 6);
+  });
+
+  it("② ①と同じ形状を200通りのランダムな初期配置で解いても常に成功する(局所解への迷い込みの再発防止)", () => {
+    function mulberry32(seed: number) {
+      let s = seed;
+      return () => {
+        s |= 0;
+        s = (s + 0x6d2b79f5) | 0;
+        let t = Math.imul(s ^ (s >>> 15), 1 | s);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+
+    const baseConstraints: SketchConstraint[] = [
+      { id: "co1", kind: "coincident", a: { segmentId: "s1", end: "p2" }, b: { segmentId: "s2", end: "p1" } },
+      { id: "co2", kind: "coincident", a: { segmentId: "s2", end: "p2" }, b: { segmentId: "s3", end: "p1" } },
+      { id: "co3", kind: "coincident", a: { segmentId: "s3", end: "p2" }, b: { segmentId: "s4", end: "p1" } },
+      { id: "co4", kind: "coincident", a: { segmentId: "s4", end: "p2" }, b: { segmentId: "s5", end: "p1" } },
+      { id: "co5", kind: "coincident", a: { segmentId: "s5", end: "p2" }, b: { segmentId: "s1", end: "p1" } },
+      { id: "h4", kind: "horizontal", segmentId: "s4" },
+      { id: "v5", kind: "vertical", segmentId: "s5" },
+      { id: "fix1", kind: "fixEntity", entity: { entityId: "c1" } },
+      { id: "fix2", kind: "fixEntity", entity: { entityId: "c2" } },
+    ];
+    const entities: SketchEntity[] = [circle("c1", [0, 0], 27.5), circle("c2", [0, 0], 59)];
+
+    let failures = 0;
+    for (let seed = 0; seed < 200; seed += 1) {
+      const rand = mulberry32(seed);
+      const r = (a: number, b: number) => a + rand() * (b - a);
+      const pts: [number, number][] = [];
+      for (let i = 0; i < 5; i += 1) {
+        const angle = (i / 5) * Math.PI * 2 + r(-0.3, 0.3);
+        const radius = r(3, 15);
+        pts.push([Math.cos(angle) * radius, Math.sin(angle) * radius]);
+      }
+      const segments: SketchSegment[] = pts.map((p, i) => ({
+        id: `s${i + 1}`,
+        kind: "line",
+        p1: p,
+        p2: pts[(i + 1) % 5],
+      }));
+
+      const pre = solveSketch(segments, baseConstraints, entities);
+      if (!pre.ok) continue; // 前処理(接線を追加する前)自体が解けない配置は対象外。
+      const withTangent: SketchConstraint[] = [
+        ...baseConstraints,
+        { id: "tan1", kind: "tangent", entity: { entityId: "c2" }, target: { kind: "segment", segmentId: "s5" } },
+      ];
+      const result = solveSketch(pre.segments, withTangent, pre.entities);
+      if (!result.ok) failures += 1;
+    }
+    expect(failures).toBe(0);
+  }, 60000);
+
+  it("③ 矛盾時のメッセージに、残差最大の拘束の人間可読な名前(拘束一覧と同じ表記)が含まれる", () => {
+    // 同一セグメントに互いに両立しない長さを2つ指定する、常に検出可能な真の矛盾。
+    const s1: SketchSegment = { id: "s1", kind: "line", p1: [0, 0], p2: [10, 0] };
+    const constraints: SketchConstraint[] = [
+      { id: "len1", kind: "length", segmentId: "s1", value: 10 },
+      { id: "len2", kind: "length", segmentId: "s1", value: 20 },
+    ];
+    const result = solveSketch([s1], constraints, []);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.conflicting).toBe(true);
+    // 拘束一覧パネルと同じ表記(種類ラベル+セグメントラベル)を含む。
+    expect(result.message).toContain("セグメント1");
+    expect(result.message).toMatch(/長さ/);
+  });
+});
+
 describe("solveSketch 線分↔線分の寸法(distanceLineLine/angleLineLine、Phase 24)", () => {
   it("① distanceLineLine: ほぼ平行な2直線が、指定距離だけ離れた平行線に解ける", () => {
     const a: SketchSegment = { id: "a", kind: "line", p1: [0, 0], p2: [10, 0.1] };
