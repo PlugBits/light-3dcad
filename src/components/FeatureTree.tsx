@@ -13,6 +13,7 @@ const ICONS: Record<Feature["type"], string> = {
   shell: "▨", // シェル(中抜き、Phase 25b)
   revolve: "◍", // 回転体(Phase 25b)
   thread: "⚙", // ねじ(Phase 25c)
+  partInstance: "▣", // 部品配置(簡易アセンブリ、Phase 27b)
 };
 
 const TYPE_LABEL: Record<Feature["type"], string> = {
@@ -22,6 +23,7 @@ const TYPE_LABEL: Record<Feature["type"], string> = {
   shell: "シェル",
   revolve: "回転体",
   thread: "ねじ",
+  partInstance: "部品配置",
 };
 
 /**
@@ -134,8 +136,14 @@ export function FeatureTree({ doc, selectedFeatureId, errorFeatureId, onSelect, 
             >
               <span aria-hidden="true">{ICONS[feature.type]}</span>
               <span style={{ flex: 1, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {feature.name}
-                <span style={{ opacity: 0.6 }}> ({typeLabel(feature)})</span>
+                {feature.type === "partInstance" ? (
+                  `部品: ${feature.name}`
+                ) : (
+                  <>
+                    {feature.name}
+                    <span style={{ opacity: 0.6 }}> ({typeLabel(feature)})</span>
+                  </>
+                )}
               </span>
               {hasError && (
                 <span title="評価エラーがあります" style={{ color: "#ff6b6b" }}>

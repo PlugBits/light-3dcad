@@ -9,6 +9,7 @@ import type {
   FeatureId,
   Fillet3DFeature,
   FilletEdgeRef,
+  PartInstanceFeature,
   PlaneRef,
   PolygonCorner,
   RevolveFeature,
@@ -203,6 +204,39 @@ export function patchThreadFeature(
   patch: Partial<Pick<ThreadFeature, "name" | "preset" | "length" | "hand">>,
 ): CadDocument {
   return updateFeature<ThreadFeature>(doc, featureId, (f) => ({ ...f, ...patch }));
+}
+
+/**
+ * 新しい部品配置(簡易アセンブリ)フィーチャーを作成して末尾に追加する。IDは自動生成される(Phase 27b)。
+ * params.part は既に(deserializeProject()等で)検証済みの部品CadDocumentを渡すこと。
+ * このヘルパー自体は入れ子チェック等のバリデーションを行わない(呼び出し側=UIで事前チェックし、
+ * 保存/読み込み時はvalidateFeature()が最終的な整合性を保証する)。
+ */
+export function addPartInstanceFeature(
+  doc: CadDocument,
+  params: { name: string; part: CadDocument; position: [number, number, number]; rotation: [number, number, number] },
+): { doc: CadDocument; feature: PartInstanceFeature } {
+  const feature: PartInstanceFeature = {
+    type: "partInstance",
+    id: generateId("partInstance"),
+    name: params.name,
+    part: params.part,
+    position: params.position,
+    rotation: params.rotation,
+  };
+  return { doc: addFeature(doc, feature), feature };
+}
+
+/**
+ * partInstance フィーチャーの一部フィールド(name, position, rotation)を更新する(Phase 27b)。
+ * part(埋め込み部品データ)自体はv1では編集不可(再配置=削除して作り直す運用)のため対象外。
+ */
+export function patchPartInstanceFeature(
+  doc: CadDocument,
+  featureId: FeatureId,
+  patch: Partial<Pick<PartInstanceFeature, "name" | "position" | "rotation">>,
+): CadDocument {
+  return updateFeature<PartInstanceFeature>(doc, featureId, (f) => ({ ...f, ...patch }));
 }
 
 /** 指定IDのフィーチャーを探す。見つからなければ undefined。 */

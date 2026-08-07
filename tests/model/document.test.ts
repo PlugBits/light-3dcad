@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   addExtrudeFeature,
+  addPartInstanceFeature,
   addSketchEntity,
   addSketchFeature,
   addSketchSegments,
@@ -17,6 +18,7 @@ import {
   getDirectDependentFeatureIds,
   isDocumentValid,
   patchExtrudeFeature,
+  patchPartInstanceFeature,
   patchSketchFeature,
   removeFeature,
   removeFeatureCascade,
@@ -28,7 +30,7 @@ import {
   validateDocument,
   validateFeature,
 } from "../../src/model";
-import type { CadDocument, ExtrudeFeature, SketchConstraint, SketchFeature, SketchSegment } from "../../src/model";
+import type { CadDocument, ExtrudeFeature, PartInstanceFeature, SketchConstraint, SketchFeature, SketchSegment } from "../../src/model";
 
 function makeRectSketchDoc(): { doc: CadDocument; sketch: SketchFeature } {
   const empty = createEmptyDocument();
@@ -942,5 +944,116 @@ describe("ロールバックバー(rollbackIndex、Phase 25)", () => {
     const restoredByLength = setRollbackIndex(rolledBack, 999);
     expect(restoredByLength.rollbackIndex).toBeNull();
     expect(effectiveFeatureCount(restoredByLength)).toBe(3);
+  });
+});
+
+describe("部品配置(簡易アセンブリ、Phase 27b)", () => {
+  function makePartDoc(): CadDocument {
+    const { doc } = makeRectSketchDoc();
+    const { doc: doc2 } = addExtrudeFeature(doc, {
+      name: "Extrude1",
+      sketchId: (doc.features[0] as SketchFeature).id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+    return doc2;
+  }
+
+  it("addPartInstanceFeature/patchPartInstanceFeatureで追加・更新できる", () => {
+    const empty = createEmptyDocument();
+    const part = makePartDoc();
+    const { doc, feature } = addPartInstanceFeature(empty, {
+      name: "Part1",
+      part,
+      position: [10, 20, 30],
+      rotation: [0, 90, 0],
+    });
+    expect(feature.type).toBe("partInstance");
+    expect(doc.features).toHaveLength(1);
+    expect((findFeature(doc, feature.id) as PartInstanceFeature).part).toEqual(part);
+
+    const patched = patchPartInstanceFeature(doc, feature.id, { position: [1, 2, 3], name: "Part1 renamed" });
+    const updated = findFeature(patched, feature.id) as PartInstanceFeature;
+    expect(updated.position).toEqual([1, 2, 3]);
+    expect(updated.name).toBe("Part1 renamed");
+    // rotationはpatchしていないので不変。
+    expect(updated.rotation).toEqual([0, 90, 0]);
+  });
+
+  it("validateFeature: 正常な部品配置はエラーなし", () => {
+    const part = makePartDoc();
+    const feature: PartInstanceFeature = {
+      type: "partInstance",
+      id: "pi1",
+      name: "Part1",
+      part,
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+    };
+    expect(validateFeature(feature, [feature])).toEqual([]);
+  });
+
+  it("validateFeature: 部品(part)内にpartInstanceを含む(入れ子)は拒否される", () => {
+    const innerPart = makePartDoc();
+    const nestedInner: PartInstanceFeature = {
+      type: "partInstance",
+      id: "inner",
+      name: "Inner",
+      part: innerPart,
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+    };
+    const partWithNesting: CadDocument = { version: 1, features: [nestedInner] };
+    const outer: PartInstanceFeature = {
+      type: "partInstance",
+      id: "outer",
+      name: "Outer",
+      part: partWithNesting,
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+    };
+    const errors = validateFeature(outer, [outer]);
+    expect(errors.some((e) => e.message.includes("入れ子"))).toBe(true);
+  });
+
+  it("validateFeature: position/rotationがNaN等の非有限値はエラー", () => {
+    const part = makePartDoc();
+    const feature: PartInstanceFeature = {
+      type: "partInstance",
+      id: "pi1",
+      name: "Part1",
+      part,
+      position: [NaN, 0, 0],
+      rotation: [0, Infinity, 0],
+    };
+    const errors = validateFeature(feature, [feature]);
+    expect(errors.some((e) => e.message.includes("位置"))).toBe(true);
+    expect(errors.some((e) => e.message.includes("回転"))).toBe(true);
+  });
+
+  it("targetBodyIdはpartInstanceフィーチャーも指せる(以降のcut/add対象にできる)", () => {
+    const part = makePartDoc();
+    const partInstance: PartInstanceFeature = {
+      type: "partInstance",
+      id: "pi1",
+      name: "Part1",
+      part,
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+    };
+    const sketchFeature: SketchFeature = { type: "sketch", id: "s1", name: "S", plane: { kind: "world", plane: "XY" }, entities: [] };
+    const cutExtrude: ExtrudeFeature = {
+      type: "extrude",
+      id: "e2",
+      name: "Cut1",
+      sketchId: "s1",
+      distance: 5,
+      direction: 1,
+      operation: "cut",
+      targetBodyId: "pi1",
+    };
+    const errors = validateFeature(cutExtrude, [partInstance, sketchFeature, cutExtrude]);
+    expect(errors).toEqual([]);
   });
 });

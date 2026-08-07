@@ -188,7 +188,9 @@ function validateTargetBodyId(
   const targetIdx = allFeatures.findIndex((f) => f.id === targetBodyId);
   const target = targetIdx >= 0 ? allFeatures[targetIdx] : undefined;
   const isNewBodyFeature =
-    !!target && (target.type === "extrude" || target.type === "revolve") && target.operation === "newBody";
+    !!target &&
+    (((target.type === "extrude" || target.type === "revolve") && target.operation === "newBody") ||
+      target.type === "partInstance");
   if (!isNewBodyFeature) {
     return [
       {
@@ -459,6 +461,27 @@ export function validateFeature(feature: Feature, allFeatures: readonly Feature[
     }
     if (!feature.face.center.every((c) => Number.isFinite(c)) || !feature.face.normal.every((c) => Number.isFinite(c))) {
       errors.push({ featureId: feature.id, message: "ねじの配置面の中心・法線座標が不正です" });
+    }
+  } else if (feature.type === "partInstance") {
+    if (!feature.position.every((c) => Number.isFinite(c))) {
+      errors.push({ featureId: feature.id, message: `部品配置(${feature.name})の位置座標が不正です` });
+    }
+    if (!feature.rotation.every((c) => Number.isFinite(c))) {
+      errors.push({ featureId: feature.id, message: `部品配置(${feature.name})の回転角が不正です` });
+    }
+    if (
+      typeof feature.part !== "object" ||
+      feature.part === null ||
+      feature.part.version !== 1 ||
+      !Array.isArray(feature.part.features)
+    ) {
+      errors.push({ featureId: feature.id, message: `部品配置(${feature.name})の部品データの構造が不正です` });
+    } else if (feature.part.features.some((f) => f.type === "partInstance")) {
+      // 入れ子(アセンブリのアセンブリ)禁止。src/model/types.tsのPartInstanceFeatureコメント参照。
+      errors.push({
+        featureId: feature.id,
+        message: `部品配置(${feature.name})の部品内に入れ子の部品配置を含めることはできません`,
+      });
     }
   }
 

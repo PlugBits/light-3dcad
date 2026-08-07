@@ -12,6 +12,7 @@ import type { OpenCascadeInstance } from "replicad-opencascadejs/src/replicad_si
 import {
   addExtrudeFeature,
   addFillet3DFeature,
+  addPartInstanceFeature,
   addRevolveFeature,
   addShellFeature,
   addSketchFeature,
@@ -28,7 +29,7 @@ import {
   resolveEvaluationDocument,
   setRollbackIndex,
 } from "../../src/model";
-import type { FilletEdgeRef, SketchSegment } from "../../src/model/types";
+import type { CadDocument, FilletEdgeRef, SketchSegment } from "../../src/model/types";
 import { evaluateDocument } from "../../src/worker/evaluator";
 
 const initOpenCascade = initOpenCascadeUntyped as unknown as (moduleOverrides: {
@@ -124,6 +125,28 @@ function topFaceEdgeSnapshots(shape: Shape3D, topZ: number): FilletEdgeRef[] {
 }
 
 const SKIP_NOTE = "Node上でのOpenCascade WASM初期化に失敗したためスキップ";
+
+/**
+ * テスト用(Phase 27b、簡易アセンブリ): XY平面中心の矩形(width x height)をdistanceだけ+Z方向に
+ * 押し出した単一ボディのドキュメントを作る(部品として使う)。
+ */
+function boxDoc(width: number, height: number, distance: number): CadDocument {
+  const empty = createEmptyDocument();
+  const rect = createRectangleEntity({ width, height });
+  const { doc: withSketch, feature: sketch } = addSketchFeature(empty, {
+    name: "PartSketch1",
+    plane: { kind: "world", plane: "XY" },
+    entities: [rect],
+  });
+  const { doc } = addExtrudeFeature(withSketch, {
+    name: "PartExtrude1",
+    sketchId: sketch.id,
+    distance,
+    direction: 1,
+    operation: "newBody",
+  });
+  return doc;
+}
 
 /** 頂点列(閉ループ、最後は最初に自動的に戻る)から直線セグメントの配列を作る(Phase 19a評価テスト用)。 */
 function rectSegments(points: [number, number][]): SketchSegment[] {
@@ -2554,5 +2577,174 @@ describe("evaluateDocument (WASM統合): 複数ボディ(Phase 27a)", () => {
     } finally {
       shape.delete();
     }
+  });
+});
+
+describe("evaluateDocument (WASM統合): 簡易アセンブリ(部品配置、Phase 27b)", () => {
+  it("① 部品を位置(50,0,0)に配置すると、体積が本体+部品の合計になり、部品のバウンディングボックスが指定位置になる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    // 部品: 10x10x10の箱(原点中心、XY center=[0,0])。
+    const partDoc = boxDoc(10, 10, 10);
+    // 本体: 20x20x20の箱(原点中心)。
+    const mainDoc = boxDoc(20, 20, 20);
+
+    const { doc } = addPartInstanceFeature(mainDoc, {
+      name: "Part1",
+      part: partDoc,
+      position: [50, 0, 0],
+      rotation: [0, 0, 0],
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const shape = result.shape as Shape3D;
+    try {
+      const volume = measureVolume(shape);
+      expect(volume).toBeCloseTo(20 * 20 * 20 + 10 * 10 * 10, 3);
+
+      // 本体はx:[-10,10]、部品(x:[-5,5]がposition[50,0,0]だけ平行移動)はx:[45,55]になるはず。
+      const bbox = shape.boundingBox;
+      const [min, max] = bbox.bounds;
+      bbox.delete();
+      expect(min[0]).toBeCloseTo(-10, 6);
+      expect(max[0]).toBeCloseTo(55, 6);
+    } finally {
+      shape.delete();
+    }
+  });
+
+  it("② 回転90°(X軸)で配置すると、部品のY/Z方向の外形寸法が入れ替わる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    // 部品: X方向10、Y方向4、Z方向(押し出し距離)2の非対称な直方体。
+    const partDoc = boxDoc(10, 4, 2);
+
+    const { doc: unrotatedDoc } = addPartInstanceFeature(createEmptyDocument(), {
+      name: "Part0",
+      part: partDoc,
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+    });
+    const unrotatedResult = evaluateDocument(unrotatedDoc);
+    expect(unrotatedResult.ok).toBe(true);
+    if (!unrotatedResult.ok) return;
+    const unrotatedShape = unrotatedResult.shape as Shape3D;
+    const bbox0 = unrotatedShape.boundingBox;
+    expect(bbox0.width).toBeCloseTo(10, 6);
+    expect(bbox0.height).toBeCloseTo(4, 6);
+    expect(bbox0.depth).toBeCloseTo(2, 6);
+    bbox0.delete();
+    unrotatedShape.delete();
+
+    const { doc: rotatedDoc } = addPartInstanceFeature(createEmptyDocument(), {
+      name: "Part1",
+      part: partDoc,
+      position: [0, 0, 0],
+      rotation: [90, 0, 0],
+    });
+    const rotatedResult = evaluateDocument(rotatedDoc);
+    expect(rotatedResult.ok).toBe(true);
+    if (!rotatedResult.ok) return;
+    const rotatedShape = rotatedResult.shape as Shape3D;
+    const bbox1 = rotatedShape.boundingBox;
+    // X軸周りの回転なのでX方向の寸法は不変、Y/Zの外形寸法が入れ替わる。
+    expect(bbox1.width).toBeCloseTo(10, 6);
+    expect(bbox1.height).toBeCloseTo(2, 6);
+    expect(bbox1.depth).toBeCloseTo(4, 6);
+    bbox1.delete();
+    rotatedShape.delete();
+  });
+
+  it("③ 部品(part)内にpartInstanceを含む(入れ子)ドキュメントの評価は明確なエラーになる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const innerPart = boxDoc(10, 10, 10);
+    const { doc: partWithNesting } = addPartInstanceFeature(createEmptyDocument(), {
+      name: "Inner",
+      part: innerPart,
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+    });
+    const { doc } = addPartInstanceFeature(createEmptyDocument(), {
+      name: "Outer",
+      part: partWithNesting,
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).toMatch(/入れ子/);
+    expect(result.message).toContain("Outer");
+  });
+
+  it("④ 同一部品docは2回目以降の評価でキャッシュが再利用され、結果も正しい(2箇所配置+速度計測ログ)", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    // 上面4辺にフィレットを付けた、多少コストのある部品にする(キャッシュの効果を確認しやすくするため)。
+    const base = boxDoc(20, 20, 5);
+    const baseResult = evaluateDocument(base);
+    expect(baseResult.ok).toBe(true);
+    if (!baseResult.ok) return;
+    const topEdges = topFaceEdgeSnapshots(baseResult.shape as Shape3D, 5);
+    (baseResult.shape as Shape3D).delete();
+    expect(topEdges.length).toBe(4);
+
+    const { doc: partDoc } = addFillet3DFeature(base, {
+      name: "Fillet1",
+      kind: "fillet",
+      size: 2,
+      edges: topEdges,
+    });
+
+    // 同じ部品を2箇所(異なる位置)に配置する1つのドキュメント。
+    const { doc: doc1 } = addPartInstanceFeature(createEmptyDocument(), {
+      name: "PartA",
+      part: partDoc,
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+    });
+    const { doc } = addPartInstanceFeature(doc1, {
+      name: "PartB",
+      part: partDoc,
+      position: [100, 0, 0],
+      rotation: [0, 0, 0],
+    });
+
+    const t0 = performance.now();
+    const first = evaluateDocument(doc);
+    const t1 = performance.now();
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const shape1 = first.shape as Shape3D;
+    const volume1 = measureVolume(shape1);
+    shape1.delete();
+
+    // ドキュメント自体は変えず、もう一度評価する(部品docのJSONは完全に同一なので、
+    // Workerメモリキャッシュ[本テストではモジュールスコープを共有する同一プロセス内]により
+    // 部品の再評価[loft/fillet等の重い計算]は発生しないはず)。
+    const t2 = performance.now();
+    const second = evaluateDocument(doc);
+    const t3 = performance.now();
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    const shape2 = second.shape as Shape3D;
+    const volume2 = measureVolume(shape2);
+    shape2.delete();
+
+    // eslint-disable-next-line no-console
+    console.log(
+      `[part cache] 1回目(2箇所とも部品未キャッシュの可能性): ${(t1 - t0).toFixed(1)}ms, ` +
+        `2回目(2箇所ともキャッシュ済みのはず): ${(t3 - t2).toFixed(1)}ms`,
+    );
+
+    // 部品単体の体積を求め、2箇所配置(重ならない位置)なのでちょうど2倍になることを確認する。
+    const partOnlyResult = evaluateDocument(partDoc);
+    expect(partOnlyResult.ok).toBe(true);
+    if (!partOnlyResult.ok) return;
+    const partVolume = measureVolume(partOnlyResult.shape as Shape3D);
+    (partOnlyResult.shape as Shape3D).delete();
+
+    expect(volume1).toBeCloseTo(partVolume * 2, 3);
+    expect(volume2).toBeCloseTo(partVolume * 2, 3);
   });
 });

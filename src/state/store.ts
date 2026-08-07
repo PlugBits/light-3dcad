@@ -5,6 +5,7 @@ import { create } from "zustand";
 import {
   addExtrudeFeature,
   addFillet3DFeature,
+  addPartInstanceFeature,
   addRevolveFeature,
   addShellFeature,
   addSketchFeature,
@@ -266,6 +267,18 @@ interface CadStoreState {
   addThread: (params: { preset: ThreadPreset; hand: "male" | "female"; length: number; face: ThreadFaceRef; position: [number, number] }) => void;
 
   /**
+   * 部品配置(簡易アセンブリ、Phase 27b)フィーチャーを追加し、選択状態にする。
+   * partは.l3dcadから読み込んだ(deserializeProject()で検証済みの)CadDocumentを渡す想定。
+   * position/rotationは省略時は原点・無回転([0,0,0])。
+   */
+  addPartInstance: (params: {
+    name: string;
+    part: CadDocument;
+    position?: [number, number, number];
+    rotation?: [number, number, number];
+  }) => void;
+
+  /**
    * ドキュメントを丸ごと差し替える(プロジェクトを開く/新規作成、Phase 26)。undo()/redo()と異なり
    * アンドゥ履歴は保持しない(空にリセットする)。選択状態(フィーチャー・面)もクリアし、直ちに再評価する。
    */
@@ -510,6 +523,18 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
       position,
       // 雄はボスが面から外側(法線方向)へ伸び、雌は穴が面から内側(法線と逆方向)へ伸びる。
       direction: hand === "male" ? 1 : -1,
+    });
+    get().updateDocument(() => nextDoc);
+    set({ selectedFeatureId: feature.id });
+  },
+
+  addPartInstance: ({ name, part, position, rotation }) => {
+    const doc = get().doc;
+    const { doc: nextDoc, feature } = addPartInstanceFeature(doc, {
+      name,
+      part,
+      position: position ?? [0, 0, 0],
+      rotation: rotation ?? [0, 0, 0],
     });
     get().updateDocument(() => nextDoc);
     set({ selectedFeatureId: feature.id });

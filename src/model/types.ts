@@ -355,8 +355,46 @@ export interface ThreadFeature {
   direction: 1 | -1;
 }
 
+/**
+ * 部品配置(簡易アセンブリ)フィーチャー(Phase 27b)。他の.l3dcadプロジェクト(部品)の
+ * CadDocumentを丸ごと埋め込み、位置(mm)・回転(度、XYZオイラー順=X軸回転→Y軸回転→Z軸回転の順で
+ * 適用)で配置する。ブラウザ環境ではファイルシステム参照ができないため、ファイル参照ではなく
+ * 埋め込みコピー方式を取る(部品を後から更新したい場合は、元の.l3dcadを開いて編集・保存し、
+ * このフィーチャーを削除して配置し直す運用。v1では部品の中身をこのフィーチャーから直接編集する
+ * UIは持たない)。
+ *
+ * バリデーション: part.features に type:"partInstance" のフィーチャーを含めることは禁止する
+ * (入れ子=アセンブリのアセンブリを防ぎ、再帰評価の爆発・無限ループを避ける。
+ * src/model/validation.tsのvalidateFeature参照)。これにより評価側(src/worker/evaluator.ts)は
+ * 常に「外側の1回のみ」partInstanceを処理すればよく、実際の再帰は発生しない。
+ *
+ * evaluator.tsは、bodiesマップ(Phase 27a複数ボディ)に「このpartInstance自身が作った1つの
+ * 新規ボディ」として追加する(newBodyフィーチャーと同じ扱い。以降のextrude/revolveの
+ * targetBodyIdでこのボディをcut/addの対象にできる)。部品の評価結果(変換前のcompound)は
+ * 同一の part(JSON文字列で比較)ごとにWorkerメモリ内でキャッシュされ、位置・回転の変更だけでは
+ * 部品の再評価(重いフィーチャーの再計算)を伴わない。
+ */
+export interface PartInstanceFeature {
+  type: "partInstance";
+  id: FeatureId;
+  name: string;
+  /** 部品プロジェクトの埋め込みコピー。この中に type:"partInstance" を含めてはならない。 */
+  part: CadDocument;
+  /** 部品原点のワールド座標での配置位置(mm)。 */
+  position: [number, number, number];
+  /** 部品のワールド座標での回転(度)。X軸→Y軸→Z軸の順で適用する。 */
+  rotation: [number, number, number];
+}
+
 /** フィーチャー(履歴列の1要素)。 */
-export type Feature = SketchFeature | ExtrudeFeature | Fillet3DFeature | ShellFeature | RevolveFeature | ThreadFeature;
+export type Feature =
+  | SketchFeature
+  | ExtrudeFeature
+  | Fillet3DFeature
+  | ShellFeature
+  | RevolveFeature
+  | ThreadFeature
+  | PartInstanceFeature;
 
 /**
  * CADドキュメント全体。features は順序付き(=編集履歴)。

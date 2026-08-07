@@ -1,7 +1,7 @@
 // src/project/serialization.ts の単体テスト(Phase 26)。
 import { describe, expect, it } from "vitest";
 
-import { addExtrudeFeature, addSketchFeature, createEmptyDocument, createRectangleEntity } from "../../src/model";
+import { addExtrudeFeature, addPartInstanceFeature, addSketchFeature, createEmptyDocument, createRectangleEntity } from "../../src/model";
 import { deserializeProject, PROJECT_FORMAT, PROJECT_SCHEMA_VERSION, serializeProject } from "../../src/project/serialization";
 
 function sampleDoc() {
@@ -53,6 +53,44 @@ describe("serializeProject / deserializeProject", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.message).toMatch(/フォーマット/);
+    }
+  });
+
+  it("部品配置(簡易アセンブリ、Phase 27b)を含むドキュメントもserialize→deserializeで完全一致する(往復テスト)", () => {
+    const part = sampleDoc();
+    const { doc } = addPartInstanceFeature(sampleDoc(), {
+      name: "Part1",
+      part,
+      position: [10, 20, 30],
+      rotation: [0, 90, 0],
+    });
+    const text = serializeProject(doc);
+    const result = deserializeProject(text);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.doc).toEqual(doc);
+    }
+  });
+
+  it("部品(part)内に入れ子の部品配置を含むドキュメントは拒否される", () => {
+    const innerPart = sampleDoc();
+    const { doc: partWithNesting } = addPartInstanceFeature(createEmptyDocument(), {
+      name: "Inner",
+      part: innerPart,
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+    });
+    const { doc } = addPartInstanceFeature(sampleDoc(), {
+      name: "Outer",
+      part: partWithNesting,
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+    });
+    const text = serializeProject(doc);
+    const result = deserializeProject(text);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toMatch(/入れ子/);
     }
   });
 

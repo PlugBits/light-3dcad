@@ -18,6 +18,11 @@
 //     "cut"・"add"(targetBodyId省略時は最後に作られたボディが対象。指定時はそのボディのみに適用)
 //   - fillet3d/shell/thread: エッジ/面の幾何マッチングを全ボディ横断で行い、最良マッチのボディに適用する
 //   - direction: -1 は逆向き押し出し(面参照の場合は面法線の逆方向)
+//   - partInstance(簡易アセンブリ、Phase 27b): 埋め込まれた部品CadDocument(part)をevaluateDocument()で
+//     評価し(部品内にpartInstanceを含めることは禁止、入れ子なし=再帰は最大1段)、結果compoundを
+//     rotation(X→Y→Z順)・positionで変換してbodiesマップに新規ボディとして追加する(newBodyと同じ扱い)。
+//     部品docのJSON文字列をキーに変換前compoundをWorkerメモリにLRUキャッシュし(上限5件)、
+//     同一部品の再評価(重いフィーチャーの再計算)を避ける。
 //
 // 複数ボディ管理(Phase 27a): 単一の `body` 変数の代わりに `bodies: Map<FeatureId, Shape3D>`
 // (キー=そのボディを作ったnewBodyフィーチャーのid)を評価ループ全体で保持する。各フィーチャー評価後の
@@ -43,6 +48,7 @@ import type {
   FeatureId,
   Fillet3DFeature,
   FilletEdgeRef,
+  PartInstanceFeature,
   PolygonCorner,
   ShellFaceRef,
   ShellFeature,
@@ -932,6 +938,83 @@ function applyThreadToBodies(bodies: Map<FeatureId, Shape3D>, feature: ThreadFea
 }
 
 /**
+ * 部品配置(簡易アセンブリ、Phase 27b)フィーチャーの評価キャッシュの上限件数(LRU)。
+ * 部品にねじ等の重いフィーチャーが含まれる場合、毎回の再評価(数秒〜十数秒)を避けるため、
+ * 部品docのJSON文字列をキーに「変換(rotate/translate)前」の評価済みcompoundをWorkerメモリに
+ * 保持する(位置・回転の変更だけでは部品の再評価を伴わない)。キャッシュ本体は取り出し時に
+ * clone()してから返し、delete()しない(他のpartInstanceフィーチャーが同じキーを再利用できるように
+ * 保つ。buildBodiesCompound()と同じ「clone()して渡す、原本は生かしたまま」の方針)。上限を超えたら
+ * 最も古く使われたエントリを1件delete()して破棄する(単純なLRU。Mapは同一キーへのset()で
+ * 挿入順が末尾に更新される性質を使い、挿入順=最終アクセス順とみなす)。
+ */
+const PART_CACHE_MAX_SIZE = 5;
+const partShapeCache = new Map<string, Shape3D>();
+
+/**
+ * partInstanceフィーチャーの埋め込みdoc(feature.part)を評価し、変換(rotate/translate)前の
+ * compoundを返す(呼び出し側が所有する、都度clone()されたインスタンス。呼び出し側でdelete()すること)。
+ * 同一内容(JSON文字列が一致)の部品docはWorkerメモリ内でキャッシュされ、2回目以降は
+ * evaluateDocument()を再実行しない(キャッシュヒット時はclone()のみで済む)。
+ * 部品側の評価が失敗した場合・部品にボディが1つも無い場合は、呼び出し元
+ * (evaluateDocument()のtry/catch)がfeatureId付きエラーに変換できる通常のErrorをthrowする。
+ */
+function evaluatePartDocumentCached(part: CadDocument, partName: string): Shape3D {
+  const key = JSON.stringify(part);
+  const cached = partShapeCache.get(key);
+  if (cached) {
+    // LRU: 再利用したキーをMapの末尾へ移動する(delete()してからset()し直すと挿入順が更新される)。
+    partShapeCache.delete(key);
+    partShapeCache.set(key, cached);
+    return cached.clone();
+  }
+
+  // ネスト禁止の防御的チェック(v1ではUI・model/validation.tsの両方で弾いている想定だが、
+  // 手編集/旧バージョンのプロジェクトファイルを直接開いた場合に備え、evaluator側でも明確な
+  // エラーにする。この時点で弾いておけば、直後のevaluateDocument(part)呼び出しがpartInstanceの
+  // 評価に再突入することはなく、実際の再帰は発生しない)。
+  if (part.features.some((f) => f.type === "partInstance")) {
+    throw new Error(`部品『${partName}』の評価に失敗: 部品内に入れ子の部品配置が含まれています`);
+  }
+
+  const result = evaluateDocument(part);
+  if (!result.ok) {
+    throw new Error(`部品『${partName}』の評価に失敗: ${result.message}`);
+  }
+  if (!result.shape) {
+    throw new Error(`部品『${partName}』の評価に失敗: 部品にボディがありません`);
+  }
+
+  partShapeCache.set(key, result.shape);
+  if (partShapeCache.size > PART_CACHE_MAX_SIZE) {
+    const oldestKey = partShapeCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      partShapeCache.get(oldestKey)?.delete();
+      partShapeCache.delete(oldestKey);
+    }
+  }
+  return result.shape.clone();
+}
+
+/**
+ * 部品配置(簡易アセンブリ、Phase 27b)フィーチャーを評価し、bodiesマップに新規ボディとして
+ * 追加する(常に「このpartInstance自身が作った1つの新規ボディ」。newBodyフィーチャーと同じ扱いで、
+ * 以降のextrude/revolveのtargetBodyIdで参照できる)。
+ * 変換はrotation(X軸→Y軸→Z軸の順、いずれも部品ローカル原点[0,0,0]周り)→position(平行移動)の順に
+ * 適用する。replicadのShape3D#rotate()/#translate()はいずれも呼び出し元のシェイプをdelete()して
+ * 新しいインスタンスを返す(node_modules/replicad/dist/replicad.jsのShape.rotate/translate実装、
+ * このファイルのorientLocalSolidToWorld()と同じパターン)。
+ */
+function applyPartInstanceToBodies(bodies: Map<FeatureId, Shape3D>, feature: PartInstanceFeature): void {
+  let shape = evaluatePartDocumentCached(feature.part, feature.name);
+  const [rx, ry, rz] = feature.rotation;
+  if (rx !== 0) shape = shape.rotate(rx, [0, 0, 0], [1, 0, 0]);
+  if (ry !== 0) shape = shape.rotate(ry, [0, 0, 0], [0, 1, 0]);
+  if (rz !== 0) shape = shape.rotate(rz, [0, 0, 0], [0, 0, 1]);
+  shape = shape.translate(feature.position);
+  bodies.set(feature.id, shape);
+}
+
+/**
  * 面の中心・法線から、決定的なxDirを持つスケッチ平面(Plane)を構築する。
  * 呼び出し側で使用後に plane.delete() すること。xDirの決定則はsrc/sketch/facePlaneBasis.tsの
  * facePlaneRawXDir()(ビューア側の面クリック点ローカル2D化と共通)。
@@ -1275,6 +1358,12 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
           throw new Error("ねじの対象となるボディがありません");
         }
         applyThreadToBodies(bodies, feature);
+        snapshots.set(feature.id, buildBodiesCompound(bodies));
+        continue;
+      }
+
+      if (feature.type === "partInstance") {
+        applyPartInstanceToBodies(bodies, feature);
         snapshots.set(feature.id, buildBodiesCompound(bodies));
         continue;
       }

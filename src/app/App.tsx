@@ -5,6 +5,7 @@ import { DimensionToolPopup } from "../components/DimensionToolPopup";
 import { ExtrudeEditor } from "../components/ExtrudeEditor";
 import { FeatureTree } from "../components/FeatureTree";
 import { Fillet3DEditor } from "../components/Fillet3DEditor";
+import { PartInstanceEditor } from "../components/PartInstanceEditor";
 import { RevolveEditor } from "../components/RevolveEditor";
 import { ShellEditor } from "../components/ShellEditor";
 import { SketchEditor } from "../components/SketchEditor";
@@ -107,6 +108,8 @@ export default function App() {
   const viewerRef = useRef<CadViewer | null>(null);
   // プロジェクトを開く(Phase 26)用の隠しfile input。
   const openProjectInputRef = useRef<HTMLInputElement | null>(null);
+  // 部品を配置(簡易アセンブリ、Phase 27b)用の隠しfile input。
+  const openPartInputRef = useRef<HTMLInputElement | null>(null);
 
   const doc = useCadStore((s) => s.doc);
   const status = useCadStore((s) => s.status);
@@ -134,6 +137,7 @@ export default function App() {
   const addFillet3D = useCadStore((s) => s.addFillet3D);
   const addShell3D = useCadStore((s) => s.addShell3D);
   const addThread = useCadStore((s) => s.addThread);
+  const addPartInstance = useCadStore((s) => s.addPartInstance);
   const exportStl = useCadStore((s) => s.exportStl);
   const exportStep = useCadStore((s) => s.exportStep);
   const loadDocument = useCadStore((s) => s.loadDocument);
@@ -154,6 +158,8 @@ export default function App() {
   const [gridSnap, setGridSnap] = useState(true);
   // 「開く」で選んだ.l3dcadファイルの読み込みに失敗したときのエラーメッセージ(Phase 26)。未発生はnull。
   const [openProjectError, setOpenProjectError] = useState<string | null>(null);
+  // 「部品を配置」で選んだ.l3dcadファイルの読み込みに失敗したときのエラーメッセージ(Phase 27b)。未発生はnull。
+  const [openPartError, setOpenPartError] = useState<string | null>(null);
   // 「スケッチ追加」ボタンで使う平面選択(Phase 13)。基準平面クリックと同等の機能をUIからも操作できるようにする。
   const [newSketchPlane, setNewSketchPlane] = useState<"XY" | "XZ" | "YZ">("XY");
   // 現在アクティブなフィレット/面取りツール(未選択はnull、Phase 18)。
@@ -523,6 +529,44 @@ export default function App() {
     if (!ok) return;
     setOpenProjectError(null);
     newProject();
+  }
+
+  /** 「部品を配置」ボタン(簡易アセンブリ、Phase 27b): 隠しfile inputのクリックを発火する。 */
+  function handleAddPartClick() {
+    setOpenPartError(null);
+    openPartInputRef.current?.click();
+  }
+
+  /**
+   * 部品配置用file input のファイル選択確定時(Phase 27b)。deserializeProject()で検証した上で、
+   * その部品ドキュメント自体が部品配置(partInstance)を含んでいないか(=入れ子になっていないか)を
+   * ここでも確認する(model/validation.tsのvalidateFeature()も同じ制約を持つが、UI側で早期に
+   * わかりやすいエラーを出すため)。原点(position:[0,0,0]、回転なし)に配置する。
+   * 成否に関わらずinputの値をリセットする(同じファイルを選び直せるように)。
+   */
+  async function handleAddPartFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const result = deserializeProject(text);
+      if (!result.ok) {
+        setOpenPartError(result.message);
+        return;
+      }
+      if (result.doc.features.some((f) => f.type === "partInstance")) {
+        setOpenPartError(
+          "選択したファイルは既に部品配置(アセンブリ)を含んでいるため、部品として配置できません(入れ子は禁止されています)",
+        );
+        return;
+      }
+      const name = file.name.replace(/\.l3dcad$/i, "") || "部品";
+      addPartInstance({ name, part: result.doc, position: [0, 0, 0], rotation: [0, 0, 0] });
+      setOpenPartError(null);
+    } catch (err) {
+      setOpenPartError(err instanceof Error ? err.message : String(err));
+    }
   }
 
   function handleAlignToPlane() {
@@ -1287,6 +1331,22 @@ export default function App() {
               style={{ display: "none" }}
               onChange={handleOpenProjectFile}
             />
+            <button
+              type="button"
+              data-testid="btn-add-part-instance"
+              onClick={handleAddPartClick}
+              title=".l3dcadファイルを部品として原点に配置します(簡易アセンブリ)"
+            >
+              部品を配置
+            </button>
+            <input
+              ref={openPartInputRef}
+              data-testid="input-add-part"
+              type="file"
+              accept=".l3dcad,application/json"
+              style={{ display: "none" }}
+              onChange={handleAddPartFile}
+            />
             <select
               data-testid="new-sketch-plane-select"
               value={newSketchPlane}
@@ -1869,6 +1929,15 @@ export default function App() {
               プロジェクトを開けませんでした: {openProjectError}
             </p>
           )}
+          {openPartError && (
+            <p
+              data-testid="open-part-error"
+              role="alert"
+              style={{ color: "#ff6b6b", fontSize: 12, whiteSpace: "pre-wrap", margin: 0 }}
+            >
+              部品を配置できませんでした: {openPartError}
+            </p>
+          )}
 
           {selectedFeature && (
             <div style={{ borderTop: "1px solid #444", paddingTop: 12 }}>
@@ -1878,6 +1947,7 @@ export default function App() {
               {selectedFeature.type === "shell" && <ShellEditor shell={selectedFeature} />}
               {selectedFeature.type === "revolve" && <RevolveEditor revolve={selectedFeature} doc={doc} />}
               {selectedFeature.type === "thread" && <ThreadEditor thread={selectedFeature} />}
+              {selectedFeature.type === "partInstance" && <PartInstanceEditor instance={selectedFeature} />}
             </div>
           )}
 
