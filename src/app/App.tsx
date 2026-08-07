@@ -33,6 +33,7 @@ import {
   trimSketchEntityAtPoint,
   trimSketchSegmentAtPoint,
   updateSketchEntity,
+  updateSketchGeometry,
 } from "../model/document";
 import { buildAutoConstraintsForChain } from "../sketch/autoConstraints";
 import {
@@ -353,6 +354,23 @@ export default function App() {
         useCadStore.getState().selectSketchEntity(sketchId, targetId);
       },
     );
+    // スケッチジオメトリのドラッグ編集(Phase 34)。部品移動ツール(startPartDragTool、下記)と同じ
+    // beginDragHistory/updateDocumentDuringDragパターンで、ドラッグ全体をUndo1回にまとめる。
+    // Escでの中断(onDragCancel)はundo()でbeginDragHistory()が積んだ開始時点へ戻す。
+    viewer.setSketchDragCallbacks({
+      onDragStart: () => {
+        useCadStore.getState().beginDragHistory();
+      },
+      onDragMove: (sketchId, segments, entities) => {
+        useCadStore.getState().updateDocumentDuringDrag((d) => updateSketchGeometry(d, sketchId, { segments, entities }));
+      },
+      onDragEnd: (sketchId, segments, entities) => {
+        useCadStore.getState().updateDocumentDuringDrag((d) => updateSketchGeometry(d, sketchId, { segments, entities }));
+      },
+      onDragCancel: () => {
+        useCadStore.getState().undo();
+      },
+    });
     viewerRef.current = viewer;
     return () => {
       viewer.dispose();
@@ -408,6 +426,9 @@ export default function App() {
         sketchId: feature.id,
         entities: feature.entities,
         segments: feature.segments,
+        // スケッチジオメトリのドラッグ編集(Phase 34): ドラッグ中のsolveSketch()呼び出しに使う
+        // (CadViewerはドキュメントの正本を持たないため、拘束もオーバーレイ入力として渡す)。
+        constraints: feature.constraints,
         origin: plane.origin,
         xDir: plane.xDir,
         yDir: plane.yDir,
@@ -421,6 +442,12 @@ export default function App() {
   useEffect(() => {
     viewerRef.current?.setSketchOverlay(sketchOverlays, selectedFeatureId, showSketches, selectedEntityId);
   }, [sketchOverlays, selectedFeatureId, showSketches, selectedEntityId]);
+
+  // スケッチジオメトリのドラッグ編集(Phase 34): 既存の「スナップ」トグルの値をビューアへ同期する
+  // (部品移動ツールと違い明示的なツール開始が無いため、都度startXxxTool()の引数として渡せない)。
+  useEffect(() => {
+    viewerRef.current?.setSketchDragSnap(gridSnap);
+  }, [gridSnap]);
 
   // 選択中の面が再評価後のfaceInfoに存在しなくなった場合(トポロジカルネーミングのずれ等)は
   // 選択状態をクリアする。

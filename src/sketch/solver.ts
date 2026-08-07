@@ -71,6 +71,17 @@ const EARLY_RETURN_TOLERANCE = 1e-7;
 const ROUND_GRID = 1e-6;
 /** 正則化(初期位置からの移動量)の重み。小さいほど拘束を優先し、大きいほど元形状を保つ。 */
 const REGULARIZATION_WEIGHT = 1e-3;
+/**
+ * ドラッグ目標(Phase 34、スケッチジオメトリのドラッグ編集)のソフト残差の重み。
+ * 「掴んだ点(または対象の代表点)をカーソル位置へ近づけたい」という弱い希望を表す残差で、
+ * 拘束(buildConstraintResiduals/buildFixResiduals、実質的な重み1)より弱く、正則化
+ * (REGULARIZATION_WEIGHT=1e-3、形状をできるだけ変えたくない希望)より強くなるよう選ぶ
+ * (1e-2〜1e-1の範囲で実験し、0.05を採用。REGULARIZATION_WEIGHTの50倍・拘束の1/20程度に
+ * 収まるため、自由な要素はカーソルに大きく追従しつつ、拘束や他の要素の正則化を大きくは崩さない)。
+ * finishing段階(hard残差のみ最小化)には加えない=ドラッグは常にソフトな希望のままで、
+ * 拘束を厳密に満たす結果を妨げない(既存拘束はすべて維持、という設計要求どおり)。
+ */
+const DRAG_TARGET_WEIGHT = 0.05;
 /** 長さ・半径残差の分母に使う距離が退化(0近傍)するのを防ぐ下限(mm)。 */
 const MIN_SAFE_LENGTH = 1e-9;
 /** LMの減衰係数の初期値・上限。 */
@@ -97,6 +108,35 @@ export interface SolveFailure {
 }
 
 export type SolveResult = SolveSuccess | SolveFailure;
+
+/**
+ * スケッチジオメトリのドラッグ編集(Phase 34)の一時的なドラッグ目標。既存拘束はすべて維持したまま、
+ * このターゲットに応じた弱いソフト残差(DRAG_TARGET_WEIGHT)を追加してsolveSketch()を解く
+ * (呼び出し側=CadViewerが毎フレーム、カーソル位置に応じて新しいDragTargetを渡す想定)。
+ *
+ * どの種別も「デルタ(target - grabPoint)を、掴んだ対象の各変数へ初期値からの移動量として適用したい」
+ * という同じ考え方(掴んだ点そのものがカーソル位置に一致するのではなく、掴んだ位置からの
+ * 相対移動量をカーソル移動量に一致させる。ドラッグ開始位置がジオメトリ上の厳密な位置から
+ * 多少ずれていても、ドラッグ開始時のオフセットを保ったまま追従する自然な挙動になる)。
+ *
+ * - kind:"point": 自由な線分(セグメント)の端点1つ(PointRef)を直接引っぱる(頂点ドラッグ)。
+ *   一致拘束で他の端点と繋がっている場合はクラスタの代表点を渡すこと(呼び出し側の責務。
+ *   src/sketch/pointClusters.tsのresolvePointClusterRepresentative()参照)。
+ * - kind:"segment": セグメント本体をつかんだ場合。両端点(p1,p2)に同じデルタを適用し、
+ *   セグメントを剛体的に動かす目標にする(既存拘束[horizontal/length等]がある分だけ実際の解は歪む)。
+ * - kind:"entity": circle/rectangle/regularPolygon(中心)・polygon/slot(並進オフセット)の
+ *   いずれかのエンティティ本体をつかんだ場合。中心または並進オフセット変数にデルタを適用する。
+ */
+export type DragTarget =
+  | { kind: "point"; point: PointRef; grabPoint: Point2; target: Point2 }
+  | { kind: "segment"; segmentId: string; grabPoint: Point2; target: Point2 }
+  | { kind: "entity"; entityId: string; grabPoint: Point2; target: Point2 };
+
+/** solveSketch()の追加オプション(Phase 34)。 */
+export interface SolveOptions {
+  /** 一時的なドラッグ目標(省略時は通常どおりの解法)。 */
+  dragTarget?: DragTarget;
+}
 
 /** 1件の残差式: value(現在の残差値)と、変数インデックスごとの偏微分係数(疎な項のみ保持)。 */
 interface ResidualTerm {
@@ -1050,6 +1090,47 @@ function buildRegularizationResiduals(x: number[], initX: number[], weight: numb
   return eqs;
 }
 
+/**
+ * DragTarget(Phase 34)1件から、対象変数(1点=2成分、segmentなら両端点=4成分)に対する
+ * ソフト残差を作る。すべてのkindで「デルタ(target-grabPoint)を、対象変数の初期値(initX)からの
+ * 移動量として適用したい」という同じ形の残差(重みDRAG_TARGET_WEIGHT)になる
+ * (DragTargetの型コメント参照)。対象の変数インデックスが見つからない(=対象がこのsolveSketch()
+ * 呼び出しのsegments/entitiesに存在しない)場合は空配列を返す(防御的、通常は起きない)。
+ */
+function buildDragTargetResiduals(
+  dragTarget: DragTarget,
+  varIndex: VarIndexMap,
+  entityVarIdx: EntityVarIndexMap,
+  x: number[],
+  initX: number[],
+): ResidualEq[] {
+  const sqrtWeight = Math.sqrt(DRAG_TARGET_WEIGHT);
+  const pull = (idx: [number, number], desired: Point2): ResidualEq[] => [
+    { value: sqrtWeight * (x[idx[0]] - desired[0]), terms: [{ index: idx[0], coef: sqrtWeight }] },
+    { value: sqrtWeight * (x[idx[1]] - desired[1]), terms: [{ index: idx[1], coef: sqrtWeight }] },
+  ];
+  const delta: Point2 = [dragTarget.target[0] - dragTarget.grabPoint[0], dragTarget.target[1] - dragTarget.grabPoint[1]];
+
+  if (dragTarget.kind === "point") {
+    const idx = pointVarIndex(varIndex, dragTarget.point);
+    if (!idx) return [];
+    return pull(idx, [initX[idx[0]] + delta[0], initX[idx[1]] + delta[1]]);
+  }
+  if (dragTarget.kind === "segment") {
+    const base = varIndex.get(dragTarget.segmentId);
+    if (base === undefined) return [];
+    const p1: [number, number] = [base, base + 1];
+    const p2: [number, number] = [base + 2, base + 3];
+    return [
+      ...pull(p1, [initX[p1[0]] + delta[0], initX[p1[1]] + delta[1]]),
+      ...pull(p2, [initX[p2[0]] + delta[0], initX[p2[1]] + delta[1]]),
+    ];
+  }
+  const idx = entityVarIndex(entityVarIdx, { entityId: dragTarget.entityId });
+  if (!idx) return [];
+  return pull(idx, [initX[idx[0]] + delta[0], initX[idx[1]] + delta[1]]);
+}
+
 /** 値をROUND_GRID(mm)グリッドに丸める(累積ドリフト対策、solveSketch()の出力座標に適用)。 */
 function roundToGrid(v: number): number {
   return Math.round(v / ROUND_GRID) * ROUND_GRID;
@@ -1252,7 +1333,9 @@ export function solveSketch(
   segments: readonly SketchSegment[],
   constraints: readonly SketchConstraint[] = [],
   entities: readonly SketchEntity[] = [],
+  options: SolveOptions = {},
 ): SolveResult {
+  const dragTarget = options.dragTarget;
   // 矩形・多角形をソルバで動かせるようにする改善: circleに加えrectangle/polygon/regularPolygon/slotも
   // entityVarIdxに積む(2変数ずつ。circle/rectangle/regularPolygonは中心、polygon/slotは並進オフセット)。
   const movableEntities: MovableEntity[] = entities.filter(isMovableEntity);
@@ -1260,7 +1343,9 @@ export function solveSketch(
   if (segments.length === 0 && movableEntities.length === 0) {
     return { ok: true, segments: [], entities: entities.map((e) => ({ ...e })) };
   }
-  if (constraints.length === 0) {
+  // ドラッグ目標がある場合、拘束が空でも(自由な要素をドラッグしているだけでも)ドラッグ残差を
+  // 解くためにショートカットせず先へ進む(Phase 34)。
+  if (constraints.length === 0 && !dragTarget) {
     return { ok: true, segments: segments.map((s) => ({ ...s })), entities: entities.map((e) => ({ ...e })) };
   }
 
@@ -1300,13 +1385,16 @@ export function solveSketch(
   // (例: 円中心-10が編集の度に-9.99999999888のようにドリフトする)、「動かす必要が無いなら
   // 何も動かさない」を最優先する。
   const initResidualMaxAbs = buildHardResiduals(initX).reduce((acc, eq) => Math.max(acc, Math.abs(eq.value)), 0);
-  if (initResidualMaxAbs < EARLY_RETURN_TOLERANCE) {
+  // ドラッグ中は拘束が既に満たされていてもカーソル位置が変わるたびに再solveする必要があるため、
+  // 早期リターンはdragTargetが無い場合のみ行う(Phase 34)。
+  if (initResidualMaxAbs < EARLY_RETURN_TOLERANCE && !dragTarget) {
     return { ok: true, segments: segments.map((s) => ({ ...s })), entities: entities.map((e) => ({ ...e })) };
   }
 
   const buildWarmupResiduals = (vars: number[]): ResidualEq[] => [
     ...buildHardResiduals(vars),
     ...buildRegularizationResiduals(vars, initX, REGULARIZATION_WEIGHT),
+    ...(dragTarget ? buildDragTargetResiduals(dragTarget, varIndex, entityVarIdx, vars, initX) : []),
   ];
 
   /**
@@ -1326,7 +1414,11 @@ export function solveSketch(
     const buildWarmupResidualsFrom =
       regularizationAnchor === initX
         ? buildWarmupResiduals
-        : (vars: number[]): ResidualEq[] => [...buildHardResiduals(vars), ...buildRegularizationResiduals(vars, regularizationAnchor, REGULARIZATION_WEIGHT)];
+        : (vars: number[]): ResidualEq[] => [
+            ...buildHardResiduals(vars),
+            ...buildRegularizationResiduals(vars, regularizationAnchor, REGULARIZATION_WEIGHT),
+            ...(dragTarget ? buildDragTargetResiduals(dragTarget, varIndex, entityVarIdx, vars, initX) : []),
+          ];
     const warm = runLevenbergMarquardt(buildWarmupResidualsFrom, x0, m, MAX_ITERATIONS);
     const solved = runLevenbergMarquardt(buildHardResiduals, warm, m, MAX_ITERATIONS);
     // 累積ドリフト対策その2: 出力座標をROUND_GRIDに丸める。次回solveSketch()が同じ形状で呼ばれたとき

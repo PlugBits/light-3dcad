@@ -390,6 +390,20 @@ export function patchSketchFeature(
   return updateFeature<SketchFeature>(doc, featureId, (f) => ({ ...f, ...patch }));
 }
 
+/**
+ * sketch フィーチャーのsegments/entitiesを丸ごと差し替える(スケッチジオメトリのドラッグ編集、
+ * Phase 34)。CadViewer側で solveSketch(...,{dragTarget}) を解いた結果をそのまま渡す想定
+ * (updateSketchEntity()のような部分パッチではなく、ドラッグで動いた可能性のある全セグメント/
+ * エンティティをまとめて置き換える)。省略したフィールドは変更しない。
+ */
+export function updateSketchGeometry(
+  doc: CadDocument,
+  sketchId: FeatureId,
+  patch: Partial<Pick<SketchFeature, "segments" | "entities">>,
+): CadDocument {
+  return updateFeature<SketchFeature>(doc, sketchId, (f) => ({ ...f, ...patch }));
+}
+
 /** sketch 内の1エンティティを部分更新する(kind は変更しない)。 */
 export function updateSketchEntity(
   doc: CadDocument,

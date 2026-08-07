@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { arcGeometryFromBulge } from "../../src/sketch/bulge";
 import { solveDocumentSketches, solveSketch } from "../../src/sketch/solver";
+import type { DragTarget } from "../../src/sketch/solver";
 import type { CadDocument, SketchConstraint, SketchEntity, SketchFeature, SketchSegment } from "../../src/model/types";
 
 function dist(a: [number, number], b: [number, number]): number {
@@ -1333,5 +1334,91 @@ describe("solveSketch 累積ドリフト対策(ユーザー報告修正)", () =>
     expect(dist(out.center, [0, 0])).toBeCloseTo(10, 4);
     // 早期リターンではなく実際に解いた結果なので、入力座標そのままではない。
     expect(out.center).not.toEqual(c.center);
+  });
+});
+
+// スケッチジオメトリのドラッグ編集(Phase 34)のソルバ側単体テスト。dragTargetは常に
+// grabPoint=対象の現在位置(=initXそのもの)を渡す形にし、target-grabPointがそのまま
+// 「その変数を動かしたい移動量」になるようにする(CadViewer側の「掴んだ位置からの相対移動」と
+// 同じ考え方、DragTargetの型コメント参照)。
+describe("solveSketch dragTarget(スケッチジオメトリのドラッグ編集、Phase 34)", () => {
+  it("① 拘束の無い自由な頂点をドラッグすると、目標位置の近くまで追従する", () => {
+    const seg: SketchSegment = { id: "s1", kind: "line", p1: [0, 0], p2: [10, 0] };
+    const dragTarget: DragTarget = { kind: "point", point: { segmentId: "s1", end: "p1" }, grabPoint: [0, 0], target: [5, 3] };
+    const result = solveSketch([seg], [], [], { dragTarget });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const p1 = result.segments[0].p1;
+    // ソフト残差(正則化より強いがハード拘束ではない)なので厳密に一致はしないが、大部分追従する。
+    expect(dist(p1, [5, 3])).toBeLessThan(0.3);
+    // 反対側の端点(拘束で繋がっていない)はほぼ動かない。
+    expect(dist(result.segments[0].p2, [10, 0])).toBeLessThan(1e-3);
+  });
+
+  it("② 水平拘束付き線分の端点ドラッグ: 水平を維持してY追従は拒否され、X方向のみ追従する", () => {
+    const seg: SketchSegment = { id: "s1", kind: "line", p1: [0, 0], p2: [10, 0] };
+    const constraints: SketchConstraint[] = [
+      { id: "c1", kind: "fix", point: { segmentId: "s1", end: "p1" } },
+      { id: "c2", kind: "horizontal", segmentId: "s1" },
+    ];
+    const dragTarget: DragTarget = { kind: "point", point: { segmentId: "s1", end: "p2" }, grabPoint: [10, 0], target: [8, 5] };
+    const result = solveSketch([seg], constraints, [], { dragTarget });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const [outP1, outP2] = [result.segments[0].p1, result.segments[0].p2];
+    // p1はfixで完全固定。
+    expect(outP1).toEqual([0, 0]);
+    // horizontalが厳密に維持される(Yはp1と一致=0のまま、Y追従は拒否される)。
+    expect(outP2[1]).toBeCloseTo(0, 6);
+    // X方向はカーソルへ大きく追従する(10→8に近づく、少なくとも半分以上移動)。
+    expect(outP2[0]).toBeLessThan(9);
+    expect(outP2[0]).toBeGreaterThan(7);
+  });
+
+  it("③ 長さ拘束+一致チェーンのドラッグ: つながった隣のセグメントが連動する", () => {
+    const a: SketchSegment = { id: "a", kind: "line", p1: [0, 0], p2: [10, 0] };
+    const b: SketchSegment = { id: "b", kind: "line", p1: [10, 0], p2: [10, 10] };
+    const constraints: SketchConstraint[] = [
+      { id: "c1", kind: "fix", point: { segmentId: "a", end: "p1" } },
+      { id: "c2", kind: "length", segmentId: "a", value: 10 },
+      { id: "c3", kind: "coincident", a: { segmentId: "a", end: "p2" }, b: { segmentId: "b", end: "p1" } },
+    ];
+    const dragTarget: DragTarget = { kind: "point", point: { segmentId: "a", end: "p2" }, grabPoint: [10, 0], target: [0, 10] };
+    const result = solveSketch([a, b], constraints, [], { dragTarget });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const [outA, outB] = result.segments;
+    // aはp1(原点)を中心に長さ10を保ったまま回転する(伸び縮みしない)。
+    expect(dist(outA.p1, [0, 0])).toBeCloseTo(0, 6);
+    expect(dist(outA.p1, outA.p2)).toBeCloseTo(10, 4);
+    // aのp2が動いた分、一致拘束でbのp1が追従する(=チェーンが連動する)。
+    expect(dist(outB.p1, outA.p2)).toBeLessThan(1e-4);
+    // 実際に元の位置(10,0)からは大きく動いている(何もしていないわけではない)。
+    expect(dist(outA.p2, [10, 0])).toBeGreaterThan(3);
+  });
+
+  it("④ 完全拘束(両端点fix)された線分をドラッグしても動かない", () => {
+    const seg: SketchSegment = { id: "s1", kind: "line", p1: [0, 0], p2: [10, 0] };
+    const constraints: SketchConstraint[] = [
+      { id: "c1", kind: "fix", point: { segmentId: "s1", end: "p1" } },
+      { id: "c2", kind: "fix", point: { segmentId: "s1", end: "p2" } },
+    ];
+    const dragTarget: DragTarget = { kind: "point", point: { segmentId: "s1", end: "p2" }, grabPoint: [10, 0], target: [50, 50] };
+    const result = solveSketch([seg], constraints, [], { dragTarget });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.segments[0].p1).toEqual([0, 0]);
+    expect(result.segments[0].p2).toEqual([10, 0]);
+  });
+
+  it("⑤ 拘束の無い円の中心ドラッグ: 目標位置の近くまで追従する", () => {
+    const c: Extract<SketchEntity, { kind: "circle" }> = { kind: "circle", id: "c1", center: [0, 0], radius: 5 };
+    const dragTarget: DragTarget = { kind: "entity", entityId: "c1", grabPoint: [0, 0], target: [7, -3] };
+    const result = solveSketch([], [], [c], { dragTarget });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.entities[0];
+    if (out.kind !== "circle") throw new Error("not circle");
+    expect(dist(out.center, [7, -3])).toBeLessThan(0.3);
   });
 });

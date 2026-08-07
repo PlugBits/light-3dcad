@@ -29,6 +29,7 @@ import {
   type SnapKind,
 } from "../sketch/snapping";
 import { buildPointClusterRepMap, resolvePointClusterRepresentative } from "../sketch/pointClusters";
+import { solveSketch, type DragTarget } from "../sketch/solver";
 import { findSharedEndpoint } from "../sketch/segmentCorner";
 import {
   distPointToEntityShape,
@@ -157,6 +158,12 @@ export interface SketchOverlayEntry {
   entities: SketchEntity[];
   /** 自由な線分・円弧セグメント(Phase 19a)。省略可(既存のentitiesのみのスケッチとの後方互換)。 */
   segments?: SketchSegment[];
+  /**
+   * このスケッチの拘束(Phase 34、スケッチジオメトリのドラッグ編集)。選択中スケッチのドラッグ中、
+   * solveSketch()にそのまま渡すために必要(ドラッグ目標を含めた解を毎フレーム計算するため)。
+   * 選択中でないスケッチのオーバーレイ描画自体には使わない(省略可、後方互換)。
+   */
+  constraints?: SketchConstraint[];
   origin: Tuple3;
   xDir: Tuple3;
   yDir: Tuple3;
@@ -354,6 +361,37 @@ export interface PartDragToolCallbacks {
 }
 
 /**
+ * スケッチジオメトリのドラッグ編集(Phase 34)がヒットした対象。頂点(セグメント端点、一致クラスタは
+ * 代表点に正規化済み)/セグメント本体(端点2つを同じデルタで動かす)/エンティティ本体
+ * (中心または並進オフセットを動かす)のいずれか。src/sketch/solver.tsのDragTargetを
+ * 組み立てる元になる。
+ */
+export type SketchDragHit =
+  | { kind: "point"; point: PointRef }
+  | { kind: "segment"; segmentId: string }
+  | { kind: "entity"; entityId: string };
+
+/**
+ * スケッチジオメトリのドラッグ編集(Phase 34)。部品移動ツール(PartDragToolCallbacks)と異なり
+ * 明示的な「ツール開始」操作を要さず、選択中スケッチで他のツール未使用時に常時有効
+ * (mousedownでヒットがあればドラッグ候補になり、SKETCH_DRAG_MOVE_THRESHOLD_PX以上動いて
+ * 初めてドラッグ開始とみなす。動かなければ通常のクリック[直接選択]として扱われる)。
+ * segments/entitiesは毎回solveSketch()の出力(ドラッグ目標を反映した解)で、
+ * App側はupdateDocumentDuringDrag()経由でそのままsketchフィーチャーへ書き込む想定
+ * (src/model/document.tsのupdateSketchGeometry())。
+ */
+export interface SketchDragCallbacks {
+  /** ドラッグが実際に始まった(閾値を超えて動いた)ときに呼ばれる。App側はbeginDragHistory()を呼ぶ想定。 */
+  onDragStart: (sketchId: FeatureId) => void;
+  /** ドラッグ中、SKETCH_DRAG_THROTTLE_MSごとに新しい解が得られるたびに呼ばれる(プレビュー自体は毎フレーム追従する)。 */
+  onDragMove: (sketchId: FeatureId, segments: SketchSegment[], entities: SketchEntity[]) => void;
+  /** マウスアップでドラッグが終了したときに、最終的な解で呼ばれる(スロットル無し、必ず呼ばれる)。 */
+  onDragEnd: (sketchId: FeatureId, segments: SketchSegment[], entities: SketchEntity[]) => void;
+  /** Escapeキーでドラッグが中断されたときに呼ばれる。App側はundo()でドラッグ開始点へ戻す想定。 */
+  onDragCancel: (sketchId: FeatureId) => void;
+}
+
+/**
  * 合致(メイト、Phase 28c)ツールがクリックで確定する面1つ分の情報。ShellFaceRefと同じ
  * center/normalスナップショットに加え、bodyFeatureId(その面が属するボディを作ったフィーチャーのid。
  * faceIdToBodyFeatureIdから逆引きする。Phase 28aの部品移動ツールと同じ仕組み)と
@@ -424,6 +462,23 @@ const EXTEND_HOVER_TOLERANCE_PX = 16;
 const SKETCH_ENTITY_PICK_TOLERANCE_PX = 8;
 /** 選択中エンティティ/セグメントのビューア強調色(黄緑系、選択中スケッチのオレンジと区別する)。 */
 const SELECTED_ENTITY_HIGHLIGHT_COLOR = 0xffea00;
+
+/**
+ * スケッチジオメトリのドラッグ編集(Phase 34)。選択中スケッチで、他のツール未使用時に
+ * 頂点(セグメント端点、一致クラスタの代表点)/セグメント本体/エンティティ本体をmousedown→
+ * ドラッグで動かせる。頂点はセグメント本体より広めの許容距離で優先ヒットさせる(寸法ツールの
+ * DIMENSION_ENDPOINT_TOLERANCE_PX/DIMENSION_SEGMENT_TOLERANCE_PXと同じ考え方・同じ値)。
+ */
+const SKETCH_DRAG_VERTEX_TOLERANCE_PX = 12;
+const SKETCH_DRAG_BODY_TOLERANCE_PX = 14;
+/** mousedown位置からこのpx以上動いたら「クリック」でなく「ドラッグ」とみなす。 */
+const SKETCH_DRAG_MOVE_THRESHOLD_PX = 4;
+/** ドラッグ中のドキュメント更新(updateDocumentDuringDrag)のスロットル間隔(ms)。プレビュー自体は毎フレーム追従する。 */
+const SKETCH_DRAG_THROTTLE_MS = 150;
+/** ドラッグ中のグリッドスナップ間隔(mm)。線描画ツールの1mmスナップと同じ粒度に揃える。 */
+const SKETCH_DRAG_GRID_SPACING = 1;
+/** ホバー中(未ドラッグ)のドラッグ対象強調色(水色、3Dエッジホバーと同系)。 */
+const SKETCH_DRAG_HOVER_COLOR = 0x40c4ff;
 
 /**
  * 寸法ツール(Phase 20b)がヒットした対象。値の確定・拘束の作成/更新は行わず、
@@ -1192,6 +1247,52 @@ export class CadViewer {
   private partHoverFeatureId: FeatureId | null = null;
   private partHoverGroupIndices: number[] = [];
 
+  // ---- スケッチジオメトリのドラッグ編集(Phase 34) ----
+  // 部品移動ツールと同じくmousedown〜mouseupのドラッグで完結するが、明示的な「ツール開始」を
+  // 要さない(選択中スケッチで他のツール未使用時は常時有効)。setSketchOverlay()呼び出しごとに
+  // 選択中スケッチID・各エンティティ/セグメントのTHREE.jsオブジェクトを記録しておき、
+  // mousedownでのヒット判定・ドラッグ中の毎フレームプレビュー(位置バッファの直接書き換え、
+  // ジオメトリの再構築はしない)に使う。
+  private sketchDragCallbacks: SketchDragCallbacks | null = null;
+  /** グリッドスナップの現在値(既存の「スナップ」トグルと同期、App側がsetSketchDragSnap()で更新)。 */
+  private sketchDragSnap = true;
+  /** 直近のsetSketchOverlay()で選択中とされたスケッチID(ドラッグ対象の絞り込みに使う)。 */
+  private sketchOverlaySelectedSketchId: FeatureId | null = null;
+  /**
+   * 直近のsetSketchOverlay()で構築したTHREE.jsオブジェクトの逆引き(sketchId→entityId/segmentId→
+   * オブジェクト+生成時の素材)。ドラッグプレビューの位置書き換え・ホバー強調の素材差し替えに使う。
+   */
+  private sketchOverlayObjectIndex: Map<
+    FeatureId,
+    {
+      entities: Map<string, { obj: THREE.LineLoop; material: THREE.Material }>;
+      segments: Map<string, { obj: THREE.Line; material: THREE.Material }>;
+    }
+  > = new Map();
+  /** mousedown〜閾値超え前の「ドラッグ候補」状態(閾値を超えるとsketchDragActive=trueになる)。 */
+  private sketchDragPendingState: {
+    sketchId: FeatureId;
+    hit: SketchDragHit;
+    basis: PlaneBasis;
+    startPx: { x: number; y: number };
+    /** mousedown位置のローカル2D座標(target-grabPointが「掴んだ位置からの移動量」になる)。 */
+    grabPoint: [number, number];
+    startSegments: SketchSegment[];
+    startEntities: SketchEntity[];
+    constraints: SketchConstraint[];
+    /** 直近に成功したsolveSketch()の出力(収束失敗フレーム・最終確定のフォールバックに使う)。 */
+    lastSolved: { segments: SketchSegment[]; entities: SketchEntity[] };
+  } | null = null;
+  /** 閾値を超えて実際にドラッグ中かどうか(pending状態のうち、これがtrueの間だけOrbitControlsを無効化する)。 */
+  private sketchDragActive = false;
+  private sketchDragLastEmitAt = 0;
+  /** ドラッグでhandleClick()の直後クリック(直接選択)を抑止するためのフラグ(1回だけ消費)。 */
+  private suppressNextSketchClick = false;
+  /** ホバー中(未ドラッグ)、ドラッグ対象になりうる線を強調するための状態(setSketchDragHover参照)。 */
+  private sketchDragHoverKey: string | null = null;
+  /** ホバー強調用の共有マテリアル(初回使用時に生成、disposeで破棄)。 */
+  private sketchDragHoverMaterial: THREE.LineBasicMaterial | null = null;
+
   /**
    * 合致(メイト、Phase 28c)ツール。3D面選択ツール(faceSelectActive)と同じfaceGroups/materialsを
    * 流用するが、複数選択ではなく「1つ目→2つ目」の順で2面を確定するとonPairPickedを呼ぶ点が
@@ -1324,6 +1425,7 @@ export class CadViewer {
     this.renderer.domElement.addEventListener("mousemove", this.handleDrawingMouseMove);
     this.renderer.domElement.addEventListener("mouseleave", this.handleMouseLeave);
     this.renderer.domElement.addEventListener("mousedown", this.handlePartDragCanvasMouseDown);
+    this.renderer.domElement.addEventListener("mousedown", this.handleSketchDragCanvasMouseDown);
     window.addEventListener("keydown", this.handleKeyDown);
 
     this.resizeObserver = new ResizeObserver(() => this.handleResize());
@@ -1410,6 +1512,15 @@ export class CadViewer {
    * 衝突しないよう、入力欄が開いている間はEscapeを入力キャンセルに限定する)。
    */
   private handleKeyDown = (event: KeyboardEvent) => {
+    // スケッチジオメトリのドラッグ編集(Phase 34)。ドラッグ候補/ドラッグ中は他のツールと排他
+    // (isSketchToolActive()が常にfalseの状態でのみ候補になるため)なので、他のどの分岐よりも先に
+    // ここで処理してよい。
+    if (this.sketchDragPendingState) {
+      if (event.key === "Escape") {
+        this.cancelSketchDrag();
+      }
+      return;
+    }
     if (this.mateToolActive) {
       if (event.key === "Escape") {
         this.cancelMateTool();
@@ -1558,6 +1669,14 @@ export class CadViewer {
   }
 
   private handleClick = (event: MouseEvent) => {
+    // スケッチジオメトリのドラッグ編集(Phase 34): 直前のmousedown〜mouseupが実際のドラッグ
+    // (SKETCH_DRAG_MOVE_THRESHOLD_PX以上動いた)だった場合、後続するこのclickイベントでの
+    // 直接選択(pickSketchOverlayAt→onSketchEntityPick)を1回だけ抑止する(動かなければ従来どおり
+    // クリック選択として扱われる=このフラグは立たない)。
+    if (this.suppressNextSketchClick) {
+      this.suppressNextSketchClick = false;
+      return;
+    }
     if (this.mateToolActive) {
       this.handleMateToolClick(event);
       return;
@@ -1691,6 +1810,9 @@ export class CadViewer {
    * 選択中の面はホバー色より選択色を優先する(setHoverGroup内で判定)。
    */
   private handleHoverMouseMove(event: MouseEvent) {
+    // スケッチジオメトリのドラッグ編集(Phase 34): ドラッグ対象のホバー強調は3D面ホバーと独立に
+    // 常に更新する(referencePlaneGroup表示中は通常スケッチが存在しないため実質no-op)。
+    this.updateSketchDragHover(event);
     if (this.referencePlaneGroup.visible) {
       this.handleReferencePlaneHover(event);
       return;
@@ -1726,6 +1848,7 @@ export class CadViewer {
   private handleMouseLeave = () => {
     this.setHoverGroup(null);
     this.setHoveredReferencePlane(null);
+    this.setSketchDragHover(null);
     if (this.dimensionToolActive && !this.dimensionPendingPoint) {
       this.clearDrawingPreview();
       this.dimensionHoverEntityHit = null;
@@ -2098,6 +2221,10 @@ export class CadViewer {
     this.sketchOverlayMaterials = [];
     this.sketchLineCount = 0;
     this.sketchGridBuilt = false;
+    // ドラッグ編集(Phase 34)のオブジェクト逆引き・ホバー強調も、参照先が破棄されるため合わせて破棄する
+    // (ホバー中の強調材質そのもの[sketchDragHoverMaterial]は使い回すため破棄しない)。
+    this.sketchOverlayObjectIndex.clear();
+    this.sketchDragHoverKey = null;
   }
 
   /**
@@ -2117,6 +2244,7 @@ export class CadViewer {
     this.clearSketchOverlay();
     this.sketchOverlayGroup.visible = visible;
     this.sketchOverlayEntries = entries;
+    this.sketchOverlaySelectedSketchId = visible ? selectedSketchId : null;
     if (!visible) return;
 
     let highlightMaterial: THREE.LineBasicMaterial | null = null;
@@ -2146,6 +2274,9 @@ export class CadViewer {
         depthTest: !isSelected,
       });
       this.sketchOverlayMaterials.push(material);
+      // ドラッグ編集(Phase 34)のオブジェクト逆引き(この entry 分)。
+      const objectIndex = { entities: new Map<string, { obj: THREE.LineLoop; material: THREE.Material }>(), segments: new Map<string, { obj: THREE.Line; material: THREE.Material }>() };
+      this.sketchOverlayObjectIndex.set(entry.sketchId, objectIndex);
 
       for (const entity of entry.entities) {
         const isHighlighted = entity.id === selectedEntityId;
@@ -2161,10 +2292,12 @@ export class CadViewer {
         geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
         this.sketchOverlayGeometries.push(geometry);
 
-        const line = new THREE.LineLoop(geometry, isHighlighted ? getHighlightMaterial() : material);
+        const usedMaterial = isHighlighted ? getHighlightMaterial() : material;
+        const line = new THREE.LineLoop(geometry, usedMaterial);
         if (isSelected || isHighlighted) line.renderOrder = SELECTED_SKETCH_RENDER_ORDER + (isHighlighted ? 1 : 0);
         this.sketchOverlayGroup.add(line);
         this.sketchLineCount += 1;
+        objectIndex.entities.set(entity.id, { obj: line, material: usedMaterial });
       }
 
       // 自由な線分・円弧セグメント(Phase 19a)。entitiesと異なり閉じている保証が無いため
@@ -2183,10 +2316,12 @@ export class CadViewer {
         geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
         this.sketchOverlayGeometries.push(geometry);
 
-        const line = new THREE.Line(geometry, isHighlighted ? getHighlightMaterial() : material);
+        const usedMaterial = isHighlighted ? getHighlightMaterial() : material;
+        const line = new THREE.Line(geometry, usedMaterial);
         if (isSelected || isHighlighted) line.renderOrder = SELECTED_SKETCH_RENDER_ORDER + (isHighlighted ? 1 : 0);
         this.sketchOverlayGroup.add(line);
         this.sketchLineCount += 1;
+        objectIndex.segments.set(segment.id, { obj: line, material: usedMaterial });
       }
 
       if (isSelected) {
@@ -2203,6 +2338,15 @@ export class CadViewer {
           this.sketchOverlayGroup.add(obj);
         });
       }
+    }
+
+    // ドラッグ中(または候補中)にsetSketchOverlay()が再呼び出しされた場合(ドラッグ中の
+    // updateDocumentDuringDrag()コミットが再評価をトリガーしたケース、Phase 34)、
+    // 新しく作り直したオブジェクトへ直近のドラッグ解(pending.lastSolved)を即座に反映し、
+    // 一瞬「コミット直前の古い位置」に巻き戻って見える不連続を防ぐ。
+    if (this.sketchDragPendingState) {
+      const pending = this.sketchDragPendingState;
+      this.previewSketchDragGeometry(pending.sketchId, pending.basis, pending.lastSolved.segments, pending.lastSolved.entities);
     }
   }
 
@@ -5472,6 +5616,339 @@ export class CadViewer {
     this.partHoverFeatureId = null;
   }
 
+  // ---- スケッチジオメトリのドラッグ編集(Phase 34) ----
+
+  /** ドラッグ編集コールバックを登録/解除する(App側がマウント時に一度だけ渡す想定)。 */
+  setSketchDragCallbacks(callbacks: SketchDragCallbacks | null) {
+    this.sketchDragCallbacks = callbacks;
+  }
+
+  /** グリッドスナップの現在値を同期する(既存の「スナップ」トグルとApp側で連動させる想定)。 */
+  setSketchDragSnap(enabled: boolean) {
+    this.sketchDragSnap = enabled;
+  }
+
+  /**
+   * 他のツール(部品移動・描画・寸法・拘束・トリム等)がどれか1つでもアクティブかどうか。
+   * スケッチジオメトリのドラッグ編集は「ツール未使用時」のみ有効なため、mousedown・ホバー双方の
+   * ゲート条件として使う(handleClick()の各ツール早期returnと同じ判定基準)。
+   */
+  private isSketchToolActive(): boolean {
+    return (
+      this.mateToolActive ||
+      this.partDragToolActive ||
+      this.trimActive ||
+      this.extendActive ||
+      this.cornerToolActive ||
+      this.dimensionToolActive ||
+      this.constraintToolActive ||
+      this.edgeSelectActive ||
+      this.faceSelectActive ||
+      this.threadPlaceActive ||
+      this.drawingActive ||
+      this.referencePlaneGroup.visible
+    );
+  }
+
+  /**
+   * 選択中スケッチ(entry)上で、canvas内スクリーン座標(px)からドラッグ対象を探す。
+   * 頂点(セグメント端点、一致クラスタは代表点に正規化)→セグメント本体→エンティティ本体の順に
+   * 優先する(頂点はSKETCH_DRAG_VERTEX_TOLERANCE_PX、それ以外はSKETCH_DRAG_BODY_TOLERANCE_PX)。
+   * pickSketchOverlayAt()と似ているが、対象を選択中スケッチ1つに絞り込み、頂点ヒットを追加している点が異なる
+   * (ドラッグは「掴んだ対象の種類」で挙動が変わるため、entity/segmentの区別だけでは不十分)。
+   */
+  private pickSketchDragTarget(entry: SketchOverlayEntry, px: number, py: number): SketchDragHit | null {
+    const segments = entry.segments ?? [];
+    if (segments.length > 0) {
+      const repMap = buildPointClusterRepMap(segments, entry.constraints ?? []);
+      let best: { ref: PointRef; distSq: number } | null = null;
+      for (const seg of segments) {
+        for (const end of ["p1", "p2"] as const) {
+          const local = end === "p1" ? seg.p1 : seg.p2;
+          const screen = this.projectPoint(toWorldPoint(entry, local[0], local[1]));
+          if (!screen) continue;
+          const dx = screen.x - px;
+          const dy = screen.y - py;
+          const distSq = dx * dx + dy * dy;
+          if (distSq > SKETCH_DRAG_VERTEX_TOLERANCE_PX * SKETCH_DRAG_VERTEX_TOLERANCE_PX) continue;
+          if (!best || distSq < best.distSq) {
+            best = { ref: resolvePointClusterRepresentative({ segmentId: seg.id, end }, repMap), distSq };
+          }
+        }
+      }
+      if (best) return { kind: "point", point: best.ref };
+    }
+
+    let bestSegment: { segmentId: string; dist: number } | null = null;
+    for (const segment of segments) {
+      const screenPts = segmentLocalPoints(segment).map(([u, v]) => this.projectPoint(toWorldPoint(entry, u, v)));
+      if (screenPts.some((p) => !p)) continue;
+      const pts = screenPts as { x: number; y: number }[];
+      for (let i = 0; i < pts.length - 1; i += 1) {
+        const d = distPointToRawSegment([px, py], [pts[i].x, pts[i].y], [pts[i + 1].x, pts[i + 1].y]);
+        if (d < SKETCH_DRAG_BODY_TOLERANCE_PX && (!bestSegment || d < bestSegment.dist)) {
+          bestSegment = { segmentId: segment.id, dist: d };
+        }
+      }
+    }
+    if (bestSegment) return { kind: "segment", segmentId: bestSegment.segmentId };
+
+    let bestEntity: { entityId: string; dist: number } | null = null;
+    for (const entity of entry.entities) {
+      const screenPts = entityLocalPoints(entity).map(([u, v]) => this.projectPoint(toWorldPoint(entry, u, v)));
+      if (screenPts.some((p) => !p)) continue;
+      const pts = screenPts as { x: number; y: number }[];
+      for (let i = 0; i < pts.length; i += 1) {
+        const a = pts[i];
+        const b = pts[(i + 1) % pts.length];
+        const d = distPointToRawSegment([px, py], [a.x, a.y], [b.x, b.y]);
+        if (d < SKETCH_DRAG_BODY_TOLERANCE_PX && (!bestEntity || d < bestEntity.dist)) {
+          bestEntity = { entityId: entity.id, dist: d };
+        }
+      }
+    }
+    if (bestEntity) return { kind: "entity", entityId: bestEntity.entityId };
+
+    return null;
+  }
+
+  /** ヒットの種類から、ホバー強調・プレビュー更新で参照するTHREE.jsオブジェクトの種別+idを求める。 */
+  private sketchDragHitObjectRef(hit: SketchDragHit): { kind: "entity" | "segment"; id: string } {
+    if (hit.kind === "entity") return { kind: "entity", id: hit.entityId };
+    if (hit.kind === "segment") return { kind: "segment", id: hit.segmentId };
+    return { kind: "segment", id: hit.point.segmentId };
+  }
+
+  /** hit種別+grabPoint(掴んだ位置)+target(現在のカーソル位置)からDragTargetを組み立てる。 */
+  private buildSketchDragTarget(hit: SketchDragHit, grabPoint: [number, number], target: [number, number]): DragTarget {
+    if (hit.kind === "point") return { kind: "point", point: hit.point, grabPoint, target };
+    if (hit.kind === "segment") return { kind: "segment", segmentId: hit.segmentId, grabPoint, target };
+    return { kind: "entity", entityId: hit.entityId, grabPoint, target };
+  }
+
+  /**
+   * canvasのmousedownハンドラ(常時登録)。他のツールが1つも使われておらず、選択中スケッチの
+   * オーバーレイが表示されている間、ヒットがあればドラッグ「候補」状態にする(まだドラッグ開始
+   * とはみなさない。SKETCH_DRAG_MOVE_THRESHOLD_PX以上動いて初めて実際のドラッグになる、
+   * handleSketchDragWindowMouseMove参照)。
+   */
+  private handleSketchDragCanvasMouseDown = (event: MouseEvent) => {
+    if (event.button !== 0) return;
+    if (this.sketchDragPendingState) return;
+    if (this.isSketchToolActive()) return;
+    if (!this.sketchOverlayGroup.visible || !this.sketchOverlaySelectedSketchId) return;
+    const entry = this.sketchOverlayEntries.find((e) => e.sketchId === this.sketchOverlaySelectedSketchId);
+    if (!entry) return;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+    const hit = this.pickSketchDragTarget(entry, px, py);
+    if (!hit) return;
+    const basis: PlaneBasis = { origin: entry.origin, xDir: entry.xDir, yDir: entry.yDir, normal: entry.normal };
+    const grabPoint = this.screenToLocal(basis, event.clientX, event.clientY);
+    if (!grabPoint) return;
+    const startSegments = (entry.segments ?? []).map((s) => ({ ...s }));
+    const startEntities = entry.entities.map((e) => ({ ...e }));
+    this.sketchDragPendingState = {
+      sketchId: entry.sketchId,
+      hit,
+      basis,
+      startPx: { x: event.clientX, y: event.clientY },
+      grabPoint,
+      startSegments,
+      startEntities,
+      constraints: entry.constraints ?? [],
+      lastSolved: { segments: startSegments, entities: startEntities },
+    };
+    window.addEventListener("mousemove", this.handleSketchDragWindowMouseMove);
+    window.addEventListener("mouseup", this.handleSketchDragWindowMouseUp);
+  };
+
+  /**
+   * ドラッグ候補〜ドラッグ中のwindow全体mousemove。閾値未満の間は何もしない(候補状態を保つのみ)。
+   * 閾値を超えた最初の1回でドラッグを開始する(beginDragHistory相当の通知はonDragStart経由でApp側が行う)。
+   */
+  private handleSketchDragWindowMouseMove = (event: MouseEvent) => {
+    const pending = this.sketchDragPendingState;
+    if (!pending) return;
+    if (!this.sketchDragActive) {
+      const dx = event.clientX - pending.startPx.x;
+      const dy = event.clientY - pending.startPx.y;
+      if (Math.hypot(dx, dy) < SKETCH_DRAG_MOVE_THRESHOLD_PX) return;
+      this.sketchDragActive = true;
+      this.suppressNextSketchClick = true;
+      this.controls.enabled = false;
+      this.setSketchDragHover(null);
+      this.sketchDragCallbacks?.onDragStart(pending.sketchId);
+    }
+    this.updateSketchDragFrame(event.clientX, event.clientY);
+  };
+
+  private handleSketchDragWindowMouseUp = (event: MouseEvent) => {
+    const pending = this.sketchDragPendingState;
+    if (!pending) return;
+    window.removeEventListener("mousemove", this.handleSketchDragWindowMouseMove);
+    window.removeEventListener("mouseup", this.handleSketchDragWindowMouseUp);
+    if (this.sketchDragActive) {
+      // スロットルで直近の移動が未反映の可能性があるため、最終位置を必ず解いてから確定する。
+      this.updateSketchDragFrame(event.clientX, event.clientY);
+      this.sketchDragCallbacks?.onDragEnd(pending.sketchId, pending.lastSolved.segments, pending.lastSolved.entities);
+    }
+    this.sketchDragPendingState = null;
+    this.sketchDragActive = false;
+    this.controls.enabled = true;
+  };
+
+  /**
+   * ドラッグ中(または候補中)にEscapeキーが押されたら呼ばれる(handleKeyDown参照)。実際にドラッグが
+   * 始まっていた場合、プレビューを開始時点の形状へ戻してからonDragCancelを呼ぶ(App側はundo()で
+   * beginDragHistory()が積んだ開始時点のドキュメントへ戻す想定)。
+   */
+  cancelSketchDrag() {
+    const pending = this.sketchDragPendingState;
+    if (!pending) return;
+    window.removeEventListener("mousemove", this.handleSketchDragWindowMouseMove);
+    window.removeEventListener("mouseup", this.handleSketchDragWindowMouseUp);
+    const wasActive = this.sketchDragActive;
+    this.sketchDragPendingState = null;
+    this.sketchDragActive = false;
+    this.controls.enabled = true;
+    if (wasActive) {
+      this.previewSketchDragGeometry(pending.sketchId, pending.basis, pending.startSegments, pending.startEntities);
+      this.sketchDragCallbacks?.onDragCancel(pending.sketchId);
+    }
+  }
+
+  /**
+   * ドラッグ中の1フレーム分の処理: カーソル位置(スナップ適用後)からDragTargetを組み立ててsolveSketch()
+   * を解き、プレビュー(毎フレーム)とonDragMove(SKETCH_DRAG_THROTTLE_MSスロットル)を更新する。
+   * 収束失敗時はそのフレームの更新をスキップする(pending.lastSolvedは直前に成功した解のまま、
+   * エラー表示はしない=ドラッグ中の一時的な失敗は無視するという仕様どおり)。
+   */
+  private updateSketchDragFrame(clientX: number, clientY: number) {
+    const pending = this.sketchDragPendingState;
+    if (!pending) return;
+    const rawTarget = this.screenToLocal(pending.basis, clientX, clientY);
+    if (!rawTarget) return;
+    const target: [number, number] = this.sketchDragSnap
+      ? [
+          Math.round(rawTarget[0] / SKETCH_DRAG_GRID_SPACING) * SKETCH_DRAG_GRID_SPACING,
+          Math.round(rawTarget[1] / SKETCH_DRAG_GRID_SPACING) * SKETCH_DRAG_GRID_SPACING,
+        ]
+      : rawTarget;
+    const dragTarget = this.buildSketchDragTarget(pending.hit, pending.grabPoint, target);
+    const result = solveSketch(pending.startSegments, pending.constraints, pending.startEntities, { dragTarget });
+    if (result.ok) {
+      pending.lastSolved = { segments: result.segments, entities: result.entities };
+    }
+    this.previewSketchDragGeometry(pending.sketchId, pending.basis, pending.lastSolved.segments, pending.lastSolved.entities);
+    const now = performance.now();
+    if (now - this.sketchDragLastEmitAt >= SKETCH_DRAG_THROTTLE_MS) {
+      this.sketchDragLastEmitAt = now;
+      this.sketchDragCallbacks?.onDragMove(pending.sketchId, pending.lastSolved.segments, pending.lastSolved.entities);
+    }
+  }
+
+  /**
+   * 指定スケッチのTHREE.jsオブジェクト(sketchOverlayObjectIndex)の位置バッファを、solveSketch()の
+   * 出力(segments/entities)に合わせて直接書き換える(ジオメトリの再構築はしない、毎フレーム呼ばれる
+   * ため軽量に保つ)。頂点数が変わるような編集はドラッグでは起きない(平行移動のみ)ため、
+   * 頂点数が一致する場合のみ書き換える(不一致は防御的にスキップ)。
+   */
+  private previewSketchDragGeometry(sketchId: FeatureId, basis: PlaneBasis, segments: SketchSegment[], entities: SketchEntity[]) {
+    const index = this.sketchOverlayObjectIndex.get(sketchId);
+    if (!index) return;
+    for (const entity of entities) {
+      const rec = index.entities.get(entity.id);
+      if (!rec) continue;
+      const localPoints = entityLocalPoints(entity);
+      const attr = rec.obj.geometry.getAttribute("position") as THREE.BufferAttribute | undefined;
+      if (!attr || attr.count !== localPoints.length) continue;
+      localPoints.forEach(([u, v], i) => {
+        const [x, y, z] = toWorldPointFromBasis(basis, u, v);
+        attr.setXYZ(i, x, y, z);
+      });
+      attr.needsUpdate = true;
+    }
+    for (const segment of segments) {
+      const rec = index.segments.get(segment.id);
+      if (!rec) continue;
+      const localPoints = segmentLocalPoints(segment);
+      const attr = rec.obj.geometry.getAttribute("position") as THREE.BufferAttribute | undefined;
+      if (!attr || attr.count !== localPoints.length) continue;
+      localPoints.forEach(([u, v], i) => {
+        const [x, y, z] = toWorldPointFromBasis(basis, u, v);
+        attr.setXYZ(i, x, y, z);
+      });
+      attr.needsUpdate = true;
+    }
+  }
+
+  /**
+   * ホバー中(未ドラッグ)、ドラッグ対象になりうる線を強調する(既存の直接選択ハイライトと同じ
+   * 「対象オブジェクトの material を差し替える」方式)。ドラッグ候補/ドラッグ中はこの関数を呼ばない
+   * (window側のハンドラが別途プレビューを描画するため、handleSketchDragCanvasMouseDown・
+   * handleSketchDragWindowMouseMoveから明示的にnullでクリアする)。
+   */
+  private setSketchDragHover(target: { sketchId: FeatureId; hit: SketchDragHit } | null) {
+    const resolved = target ? this.sketchDragHitObjectRef(target.hit) : null;
+    const key = target && resolved ? `${target.sketchId} ${resolved.kind} ${resolved.id}` : null;
+    if (key === this.sketchDragHoverKey) {
+      if (target) this.renderer.domElement.style.cursor = "move";
+      return;
+    }
+    if (this.sketchDragHoverKey) {
+      const [prevSketchId, prevKind, prevId] = this.sketchDragHoverKey.split(" ") as [FeatureId, "entity" | "segment", string];
+      this.applySketchDragHoverMaterial(prevSketchId, prevKind, prevId, false);
+    }
+    this.sketchDragHoverKey = key;
+    if (target && resolved) {
+      this.applySketchDragHoverMaterial(target.sketchId, resolved.kind, resolved.id, true);
+      this.renderer.domElement.style.cursor = "move";
+    } else {
+      this.renderer.domElement.style.cursor = "";
+    }
+  }
+
+  private applySketchDragHoverMaterial(sketchId: FeatureId, kind: "entity" | "segment", id: string, hovered: boolean) {
+    const index = this.sketchOverlayObjectIndex.get(sketchId);
+    if (!index) return;
+    const rec = (kind === "entity" ? index.entities : index.segments).get(id);
+    if (!rec) return;
+    if (hovered) {
+      if (!this.sketchDragHoverMaterial) {
+        this.sketchDragHoverMaterial = new THREE.LineBasicMaterial({ color: SKETCH_DRAG_HOVER_COLOR, linewidth: 3, depthTest: false });
+      }
+      rec.obj.material = this.sketchDragHoverMaterial;
+      rec.obj.renderOrder = SELECTED_SKETCH_RENDER_ORDER + 1;
+    } else {
+      rec.obj.material = rec.material;
+    }
+  }
+
+  /**
+   * ツール未使用時のホバー(handleHoverMouseMove、Phase 34)からドラッグ対象候補を検出して
+   * setSketchDragHover()を呼ぶ。ドラッグ候補/ドラッグ中(sketchDragPendingState)の間は何もしない
+   * (window側のハンドラが別途処理する)。
+   */
+  private updateSketchDragHover(event: MouseEvent) {
+    if (this.sketchDragPendingState) return;
+    if (!this.sketchOverlayGroup.visible || !this.sketchOverlaySelectedSketchId || this.isSketchToolActive()) {
+      this.setSketchDragHover(null);
+      return;
+    }
+    const entry = this.sketchOverlayEntries.find((e) => e.sketchId === this.sketchOverlaySelectedSketchId);
+    if (!entry) {
+      this.setSketchDragHover(null);
+      return;
+    }
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+    const hit = this.pickSketchDragTarget(entry, px, py);
+    this.setSketchDragHover(hit ? { sketchId: entry.sketchId, hit } : null);
+  }
+
   /**
    * 現在のカメラでワールド座標をcanvas内ピクセル座標(左上が原点)に投影する。
    * E2Eの`window.__cadViewerDebug.projectPoint`と、描画モードの始点近傍判定の両方から使う。
@@ -5496,10 +5973,14 @@ export class CadViewer {
     this.renderer.domElement.removeEventListener("mousemove", this.handleDrawingMouseMove);
     this.renderer.domElement.removeEventListener("mouseleave", this.handleMouseLeave);
     this.renderer.domElement.removeEventListener("mousedown", this.handlePartDragCanvasMouseDown);
+    this.renderer.domElement.removeEventListener("mousedown", this.handleSketchDragCanvasMouseDown);
     window.removeEventListener("mousemove", this.handlePartDragWindowMouseMove);
     window.removeEventListener("mouseup", this.handlePartDragWindowMouseUp);
+    window.removeEventListener("mousemove", this.handleSketchDragWindowMouseMove);
+    window.removeEventListener("mouseup", this.handleSketchDragWindowMouseUp);
     window.removeEventListener("keydown", this.handleKeyDown);
     this.clearPartDragPreview();
+    this.sketchDragHoverMaterial?.dispose();
     this.frameCallbacks.clear();
     this.controls.dispose();
     if (this.mesh) {
