@@ -791,3 +791,26 @@ distance/distancePointOrigin・一致クラスタ経由の連動6件+一致ク�
 E2E新設`point-dimension.spec.ts`3件(一致頂点から下の線分への距離指定で線分が伸びる/複合拘束下で
 X距離を指定してもエラーにならず連動する/direct距離の解なし誘導メッセージ)でブラウザ実機確認した
 (既存21件は無傷)。
+
+## Phase 31a: 寸法ラベルのドラッグ移動とトリムの拘束・寸法引き継ぎ(実機報告2件)
+
+寸法ラベル(実測・拘束とも)をドラッグで移動できるようにした。CadViewerに新設した`screenToLocal()`
+(スクリーン座標→スケッチ平面ローカル座標、raycastDrawingPlane()の応用)でドラッグ量をローカルの
+オフセットベクトルへ変換し、拘束由来の寸法は該当拘束の`labelOffset`、実測寸法は`SketchFeature.
+dimensionOffsets[dimensionKey]`へ永続化する(部品移動ツールと同じbeginDragHistory+
+updateDocumentDuringDragでアンドゥ1回)。寸法線グラフィックス(`src/viewer/dimensionGraphics.ts`)は
+新設の`offsetVec`パラメータで、引出線は測定点との接続を保ったまま寸法線側の点だけがオフセット分
+ずれる(製図的な厳密さより、ラベルが図形から離れて邪魔にならないことを優先する簡易モデル)。
+トリム(`src/sketch/trim.ts`)で線分が新IDの断片に置き換わり旧IDを参照する拘束・寸法が消えるバグを
+修正した。新設の`trimSegmentWithConstraints()`が、削除で生じる断片のうち元の端点を含む側の1つに
+元のsegmentIdを引き継がせ(splitSegmentAt()の境界順の性質を利用)、端点参照(PointRef)は座標一致
+(1e-6mm)で新しい断片へ付け替える。horizontal/vertical/radius等のsegmentId直接参照はプライマリ
+断片が元IDを引き継ぐため書き換え不要。length拘束は断片化で対象の長さの意味が変わるため削除し、
+削除件数を一時トーストで通知する(entity輪郭のトリムは既存のtrimSketchEntityAtPoint()のまま、
+拘束引き継ぎ非対応の既知の制限)。Vitest441件(trimSegmentWithConstraintsの純粋関数5件+
+dimensionGraphicsのoffsetVec5件+.l3dcad往復のオフセット入りケース1件が新規)。E2E新設
+`dimension-drag-and-trim.spec.ts`2件(寸法ラベルをドラッグ→寸法線ごと移動→リロード後も位置維持/
+一致+水平+垂直+長さ付き線分チェーンをトリム→水平・垂直・一致・残せる長さ寸法は残り、断片化した
+長さ寸法だけ通知付きで消える)でブラウザ実機確認した(既存24件は無傷、計26件)。既知の制限: 寸法線の
+オフセットは製図規則(JIS等)に沿った自動整列は行わない簡易モデル、entity輪郭のトリムは拘束引き継ぎ
+非対応のまま。
