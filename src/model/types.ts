@@ -169,6 +169,13 @@ export type SketchConstraint =
       entity: EntityRef;
       value: number;
       originLocal?: [number, number];
+      /**
+       * 省略/"direct"は原点までの直線距離、"x"/"y"は片方の軸成分のみ(Phase 35b-2、
+       * distancePointOriginのaxisと同じ意味)。
+       */
+      axis?: "direct" | "x" | "y";
+      /** signed(Phase 33と同じ意味)。distancePointOriginと同じく新規作成時のみtrue。 */
+      signed?: boolean;
       /** 寸法ラベルのドラッグ移動オフセット(Phase 31a)。省略=既定位置(後方互換)。 */
       labelOffset?: [number, number];
     }

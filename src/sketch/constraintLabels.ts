@@ -69,8 +69,10 @@ export function describeConstraint(
     }
     case "fix":
       return pointRefLabel(segments, constraint.point);
-    case "distanceEntityOrigin":
-      return `${entityLabel(entities, constraint.entity.entityId)} - 原点 = ${formatMm(constraint.value)}mm`;
+    case "distanceEntityOrigin": {
+      const axisPrefix = constraint.axis === "x" ? "X:" : constraint.axis === "y" ? "Y:" : "";
+      return `${entityLabel(entities, constraint.entity.entityId)} - 原点 = ${axisPrefix}${formatMm(constraint.value)}mm`;
+    }
     case "distancePointOrigin": {
       const axisPrefix = constraint.axis === "x" ? "X:" : constraint.axis === "y" ? "Y:" : "";
       return `${pointRefLabel(segments, constraint.point)} - 原点 = ${axisPrefix}${formatMm(constraint.value)}mm`;

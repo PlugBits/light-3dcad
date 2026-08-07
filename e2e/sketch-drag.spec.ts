@@ -288,7 +288,9 @@ test("⑤円のドラッグ→中心移動、Y距離拘束があればX方向の
   const originPopup = page.getByTestId("dimension-tool-popup");
   await expect(originPopup).toBeVisible();
   await page.getByTestId("dimension-tool-popup-axis-y").check();
-  await expect(page.getByTestId("dimension-tool-popup-value")).toHaveValue("0.00");
+  // 軸切替では値欄は自動再計算されない(direct距離30.00のまま、point-dimension.spec.ts②や
+  // dimension-sign.spec.ts①と同じ挙動)。Y距離0を明示的に入力する。
+  await page.getByTestId("dimension-tool-popup-value").fill("0");
   await page.getByTestId("dimension-tool-popup-apply").click();
   await expect(originPopup).toHaveCount(0);
   await waitForReady(page);

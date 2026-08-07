@@ -142,20 +142,27 @@ export function removeConstraint(constraints: readonly SketchConstraint[], const
  * 拘束作成時点のスケッチ平面基底から求めたワールド原点の投影位置(呼び出し側=App.tsxがselectedSketchPlane
  * から計算して渡す想定、省略時はローカル原点[0,0]扱い)。既存拘束を更新する場合もoriginLocalを渡せば
  * 最新値に差し替える(渡さなければ既存のスナップショットを保つ)。
+ * axis(Phase 35b-2。省略=direct・後方互換)はupsertDistancePointOriginConstraintと同じ意味
+ * (円のX/Y距離拘束、ドラッグ編集がX/Y方向のみに追従する挙動の土台)。signedの付与規則も同じ
+ * (新規作成時のみtrue)。
  */
 export function upsertDistanceEntityOriginConstraint(
   constraints: readonly SketchConstraint[],
   entityId: string,
   value: number,
   originLocal?: [number, number],
+  axis?: "direct" | "x" | "y",
 ): SketchConstraint[] {
   const idx = constraints.findIndex((c) => c.kind === "distanceEntityOrigin" && c.entity.entityId === entityId);
   if (idx >= 0) {
     const next = constraints.slice();
-    next[idx] = { ...next[idx], value, ...(originLocal ? { originLocal } : {}) } as SketchConstraint;
+    next[idx] = { ...next[idx], value, axis, ...(originLocal ? { originLocal } : {}) } as SketchConstraint;
     return next;
   }
-  return [...constraints, { id: generateId("constraint"), kind: "distanceEntityOrigin", entity: { entityId }, value, originLocal }];
+  return [
+    ...constraints,
+    { id: generateId("constraint"), kind: "distanceEntityOrigin", entity: { entityId }, value, originLocal, axis, signed: true },
+  ];
 }
 
 /**
@@ -585,6 +592,8 @@ export interface EntityOriginDimension {
   kind: "entity-distance-origin";
   constraintId: string;
   entityId: string;
+  /** 省略/"direct"は原点までの直線距離、"x"/"y"は片方の軸成分のみ(Phase 35b-2)。 */
+  axis?: "direct" | "x" | "y";
   value: number;
   anchor: Point2;
   /** 「原点」の実座標(ワールド原点のスケッチローカル投影、仕様変更対応)。寸法線の描画に使う。 */
@@ -689,7 +698,7 @@ export function computeConstraintDimensions(
       if (!center) continue;
       const origin: Point2 = c.originLocal ?? [0, 0];
       const anchor: Point2 = [(center[0] + origin[0]) / 2, (center[1] + origin[1]) / 2];
-      dims.push({ kind: "entity-distance-origin", constraintId: c.id, entityId: c.entity.entityId, value: c.value, anchor, origin, labelOffset: c.labelOffset });
+      dims.push({ kind: "entity-distance-origin", constraintId: c.id, entityId: c.entity.entityId, axis: c.axis, value: c.value, anchor, origin, labelOffset: c.labelOffset });
       continue;
     }
     if (c.kind === "distancePointOrigin") {
@@ -793,7 +802,12 @@ export function computeConstraintDimensions(
 export function formatConstraintDimensionLabel(dimension: ConstraintDimension): string {
   if (dimension.kind === "seg-radius") return `R${dimension.value.toFixed(1)}`;
   if (dimension.kind === "seg-angle-line-line") return `${dimension.value.toFixed(1)}°`;
-  if (dimension.kind === "entity-distance-entity" || dimension.kind === "seg-distance" || dimension.kind === "point-distance-origin") {
+  if (
+    dimension.kind === "entity-distance-entity" ||
+    dimension.kind === "seg-distance" ||
+    dimension.kind === "point-distance-origin" ||
+    dimension.kind === "entity-distance-origin"
+  ) {
     if (dimension.axis === "x") return `X${dimension.value.toFixed(1)}`;
     if (dimension.axis === "y") return `Y${dimension.value.toFixed(1)}`;
   }

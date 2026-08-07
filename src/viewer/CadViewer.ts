@@ -86,8 +86,14 @@ const REFERENCE_PLANE_COLORS: Record<"XY" | "XZ" | "YZ", number> = {
 /** ボディ端面参照エッジ(Phase 22)の破線オーバーレイ色(控えめなグレー)。 */
 const REFERENCE_EDGE_COLOR = 0x888888;
 
-/** 選択中スケッチの線色(オレンジ)。 */
+/** 選択中スケッチの線色(オレンジ、拘束診断が無い[GCS未初期化・図形が無い]間の既定色)。 */
 const SKETCH_SELECTED_COLOR = 0xff9800;
+/** 選択中スケッチが完全定義(dof=0、矛盾無し)のときの線色(拘束診断UI、Phase 35b-2、黒っぽく)。 */
+const SKETCH_FULLY_DEFINED_COLOR = 0x9aa0a6;
+/** 選択中スケッチが未定義(dof>0)のときの線色(拘束診断UI、Phase 35b-2、青系)。 */
+const SKETCH_UNDER_DEFINED_COLOR = 0x4da6ff;
+/** 選択中スケッチに矛盾拘束があるときの線色(拘束診断UI、Phase 35b-2、赤)。 */
+const SKETCH_CONFLICTING_COLOR = 0xff5252;
 /**
  * 寸法ツールで1点目(circle)を選択済みの間の強調色(UI改善対応)。選択中スケッチの線は既に
  * SKETCH_SELECTED_COLOR(オレンジ)で描かれているため、それと見分けが付くマゼンタ系にする。
@@ -1736,9 +1742,17 @@ export class CadViewer {
     // ツール未使用時、ビューア上のスケッチ線(全表示スケッチのオーバーレイ、Phase 31b)を
     // スクリーン距離SKETCH_ENTITY_PICK_TOLERANCE_PX以内でクリックしたら、面ピックより優先して
     // そのスケッチ・エンティティ/セグメントを選択する(スケッチ未選択・選択中どちらでも動作する)。
+    // ただし、そのスケッチ平面上の点より手前(カメラに近い)にボディの面がある場合は面が
+    // スケッチ線を物理的に隠しているとみなし、直接ピックを見送って面ピックへフォールスルーする
+    // (ユーザー報告対応: 複数ボディが離れた位置にあるシーンでズームアウトすると、押し出し量の
+    // 薄いボディの上面が、真下[同じスクリーン座標]にある元のスケッチ線とスクリーン距離的に
+    // 見分けがつかず、常にスケッチ線側が優先されて狙った面を選択できなくなるバグの修正、
+    // isSketchOverlayOccludedByMeshのコメント参照)。
     const clickRect = this.renderer.domElement.getBoundingClientRect();
-    const entityPick = this.pickSketchOverlayAt(event.clientX - clickRect.left, event.clientY - clickRect.top);
-    if (entityPick) {
+    const clickPx = event.clientX - clickRect.left;
+    const clickPy = event.clientY - clickRect.top;
+    const entityPick = this.pickSketchOverlayAt(clickPx, clickPy);
+    if (entityPick && !this.isSketchOverlayOccludedByMesh(entityPick.sketchId, clickPx, clickPy, clickRect)) {
       this.onSketchEntityPick?.(entityPick.sketchId, entityPick.targetId, entityPick.isEntity);
       return;
     }
@@ -2233,6 +2247,10 @@ export class CadViewer {
    * selectedEntityId(Phase 31b、未選択はnull)が指定されている場合、id一致するentity/segmentは
    * どのスケッチが選択中かに関わらずSELECTED_ENTITY_HIGHLIGHT_COLORで強調する(未選択状態での
    * スケッチ線直接クリック選択の視覚フィードバック)。
+   * definitionState(拘束診断UI、Phase 35b-2)は選択中スケッチの線色をSolidWorks流に切り替える:
+   * "conflicting"=赤、"fullyDefined"=黒っぽく、"underDefined"=青系、null(診断が無い/未選択)は
+   * 従来通りのオレンジ(SKETCH_SELECTED_COLOR)。要素単位のDOF色分けはスコープ外で、選択中スケッチ
+   * 全体を単一色に切り替えるのみ。
    * visible=false のときは何も描画せず(既存の描画があれば消す)、grid/lineCountも0になる。
    */
   setSketchOverlay(
@@ -2240,12 +2258,22 @@ export class CadViewer {
     selectedSketchId: FeatureId | null,
     visible: boolean,
     selectedEntityId: string | null = null,
+    definitionState: "conflicting" | "underDefined" | "fullyDefined" | null = null,
   ) {
     this.clearSketchOverlay();
     this.sketchOverlayGroup.visible = visible;
     this.sketchOverlayEntries = entries;
     this.sketchOverlaySelectedSketchId = visible ? selectedSketchId : null;
     if (!visible) return;
+
+    const selectedColor =
+      definitionState === "conflicting"
+        ? SKETCH_CONFLICTING_COLOR
+        : definitionState === "fullyDefined"
+          ? SKETCH_FULLY_DEFINED_COLOR
+          : definitionState === "underDefined"
+            ? SKETCH_UNDER_DEFINED_COLOR
+            : SKETCH_SELECTED_COLOR;
 
     let highlightMaterial: THREE.LineBasicMaterial | null = null;
     const getHighlightMaterial = () => {
@@ -2262,7 +2290,7 @@ export class CadViewer {
 
     for (const entry of entries) {
       const isSelected = entry.sketchId === selectedSketchId;
-      const color = isSelected ? SKETCH_SELECTED_COLOR : SKETCH_DEFAULT_COLOR;
+      const color = isSelected ? selectedColor : SKETCH_DEFAULT_COLOR;
       // 選択中スケッチはdepthTest:falseにしてソリッドを透過して常に見えるようにする
       // (ベーススケッチがソリッド内部に埋もれていても選択時は視認できることが狙い)。
       // 非選択スケッチは従来通り深度ありで描画する。
@@ -2392,6 +2420,31 @@ export class CadViewer {
       }
     }
     return best;
+  }
+
+  /**
+   * pickSketchOverlayAt()がヒットしたsketchIdの平面上の点(px,pyをスケッチ平面へレイキャストした
+   * 交点)より、ボディの面(this.mesh)がカメラに近い位置にあるかどうかを判定する
+   * (ユーザー報告対応)。pickSketchOverlayAt()はスクリーン距離のみで判定しスクリーン奥行きを
+   * 考慮しないため、押し出し量の薄いボディの上面が真下のスケッチ線とスクリーン座標的に
+   * 近接する状況(ズームアウトして離れた複数ボディを見ている等)では常にスケッチ線側が
+   * 選ばれてしまっていた。ボディの面が物理的に手前にある(=スケッチ線を隠している)場合は
+   * 面を優先させるため、この判定をhandleClick側のガードに使う。
+   * スケッチ平面が見つからない・レイが平面と交わらない・ボディが無い、のいずれかならfalse
+   * (=従来通りスケッチ側を優先)。
+   */
+  private isSketchOverlayOccludedByMesh(sketchId: FeatureId, px: number, py: number, rect: DOMRect): boolean {
+    if (!this.mesh) return false;
+    const entry = this.sketchOverlayEntries.find((e) => e.sketchId === sketchId);
+    if (!entry) return false;
+    const planeHit = this.raycastDrawingPlane(entry, px, py, rect);
+    if (!planeHit) return false;
+    const planeDist = this.camera.position.distanceTo(new THREE.Vector3(planeHit[0], planeHit[1], planeHit[2]));
+    // raycastDrawingPlane()内でthis.raycasterがこのpx,pyから設定済み(同じカメラ・同じレイ)なので、
+    // そのままボディへの交差判定に使い回せる。
+    const hits = this.raycaster.intersectObject(this.mesh, false);
+    if (hits.length === 0) return false;
+    return hits[0].distance < planeDist;
   }
 
   private clearDimensionOverlay() {
@@ -4699,15 +4752,24 @@ export class CadViewer {
    * 追加)。原点(ORIGIN_HIT_TOLERANCE_PX)→端点(DIMENSION_ENDPOINT_TOLERANCE_PX)→
    * segment本体/circle境界(findConstraintPickHit、ローカルmm空間)の優先順で判定する
    * (原点・端点はスクリーン距離ベースの方が小さい図形でも安定して選べるため優先)。
+   * exclude(ユーザー報告対応: 原点と重なる端点のヒットテスト優先順位バグの修正)を指定すると、
+   * それと同じ対象(isSameConstraintPickTarget)は候補から除外し、次点のヒットへフォールスルーする。
+   * 1つ目のクリックで既に選んだ対象(pending)ちょうど同じ画面位置に2つ目をクリックした場合
+   * (例: 線分の端点が原点に既に一致している状態で「端点」を1つ目、「原点」を2つ目として選びたい)、
+   * 常に優先度最上位の原点だけが選ばれ続けて2つ目のクリックが空振りする問題があったため、
+   * 2つ目以降のクリックではpendingを除外して探すことで「同じ場所への連続クリックで異なる対象へ
+   * 巡回する」挙動にした。
    */
   private findConstraintPickHitScreen(
     basis: PlaneBasis,
     px: number,
     py: number,
     rect: DOMRect,
+    exclude?: ConstraintPickTarget | null,
   ): { target: ConstraintPickTarget; highlightPoints: [number, number][] } | null {
+    const isExcluded = (t: ConstraintPickTarget) => exclude !== null && exclude !== undefined && this.isSameConstraintPickTarget(exclude, t);
     const originScreen = this.originScreenPoint(basis);
-    if (originScreen) {
+    if (originScreen && !isExcluded({ kind: "origin" })) {
       const dx = originScreen.x - px;
       const dy = originScreen.y - py;
       if (dx * dx + dy * dy <= ORIGIN_HIT_TOLERANCE_PX * ORIGIN_HIT_TOLERANCE_PX) {
@@ -4726,6 +4788,7 @@ export class CadViewer {
           // 一致クラスタ(頂点ベースの寸法指定、Phase 30新設): クリック/ホバーした端点を
           // クラスタの代表点に正規化する(寸法ツールと同じ考え方)。
           const point = resolvePointClusterRepresentative({ segmentId: seg.id, end }, this.constraintPointRepMap);
+          if (isExcluded({ kind: "point", point })) continue;
           return { target: { kind: "point", point }, highlightPoints: originMarkerHighlightPolyline(local) };
         }
       }
@@ -4735,7 +4798,7 @@ export class CadViewer {
     const local = planeWorldToLocal(basis, hit);
     const toleranceMm = this.pxToMm(DIMENSION_SEGMENT_TOLERANCE_PX, hit);
     const pickHit = this.findConstraintPickHit(local);
-    if (!pickHit || pickHit.dist > toleranceMm) return null;
+    if (!pickHit || pickHit.dist > toleranceMm || isExcluded(pickHit.target)) return null;
     return { target: pickHit.target, highlightPoints: pickHit.highlightPoints };
   }
 
@@ -4758,15 +4821,16 @@ export class CadViewer {
     const rect = this.renderer.domElement.getBoundingClientRect();
     const px = event.clientX - rect.left;
     const py = event.clientY - rect.top;
-    const pickHit = this.findConstraintPickHitScreen(basis, px, py, rect);
+    const pending = this.constraintPendingTarget;
+    // 2つ目以降のクリックはpendingを除外して探す(原点と重なる端点のヒットテスト優先順位バグの修正、
+    // findConstraintPickHitScreenのコメント参照)。
+    const pickHit = this.findConstraintPickHitScreen(basis, px, py, rect, pending);
     if (!pickHit) return;
 
-    const pending = this.constraintPendingTarget;
     if (!pending) {
       this.setConstraintPendingTarget(pickHit.target, pickHit.highlightPoints);
       return;
     }
-    if (this.isSameConstraintPickTarget(pending, pickHit.target)) return;
 
     this.setConstraintPendingTarget(null);
     this.clearDrawingPreview();
@@ -4780,7 +4844,7 @@ export class CadViewer {
     const rect = this.renderer.domElement.getBoundingClientRect();
     const px = event.clientX - rect.left;
     const py = event.clientY - rect.top;
-    const pickHit = this.findConstraintPickHitScreen(basis, px, py, rect);
+    const pickHit = this.findConstraintPickHitScreen(basis, px, py, rect, this.constraintPendingTarget);
     if (!pickHit) {
       this.clearDrawingPreview();
       return;

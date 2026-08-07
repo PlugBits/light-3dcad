@@ -647,7 +647,10 @@ function buildConstraintResiduals(
       case "distanceEntityOrigin": {
         const idx = entityVarIndex(entityVarIdx, c.entity);
         if (!idx) break;
-        eqs.push(pointToFixedDistanceResidual(x, idx, c.originLocal ?? [0, 0], c.value));
+        const origin = c.originLocal ?? [0, 0];
+        if (c.axis === "x") eqs.push(axisDistanceToFixedResidual(x, idx, origin, c.value, 0, c.signed === true));
+        else if (c.axis === "y") eqs.push(axisDistanceToFixedResidual(x, idx, origin, c.value, 1, c.signed === true));
+        else eqs.push(pointToFixedDistanceResidual(x, idx, origin, c.value));
         break;
       }
       case "distancePointOrigin": {
@@ -1515,6 +1518,26 @@ export function solveSketch(
 ): SolveResult {
   if (gcsAdapter?.isGcsReady()) return gcsAdapter.solveSketchGcs(segments, constraints, entities, options);
   return solveSketchLegacy(segments, constraints, entities, options);
+}
+
+/** gcsAdapter.tsのSketchDiagnostics(dof・矛盾/冗長拘束id)を再エクスポートする(拘束診断UI、Phase 35b-2)。 */
+export type SketchDiagnostics = GcsAdapterModule.SketchDiagnostics;
+
+/**
+ * スケッチの定義状態の診断(自由度[dof]・矛盾/冗長拘束id)を返す(拘束診断UI、Phase 35b-2)。
+ * PlaneGCSの`get_gcs_conflicting_constraints()`/`get_gcs_redundant_constraints()`をそのまま使うため
+ * (solveSketch()自体が行う「解いた後の残差再計算」による二重チェックは行わない簡易版)、旧ソルバには
+ * フォールバックを実装しない: GCS初期化前(isGcsReady()===false)はnullを返す(呼び出し側はバッジ非表示
+ * 等、診断情報が無い状態として扱う)。solveSketch()と同じくUIスレッドから同期的に呼べる想定
+ * (毎編集[doc変更]のたびにApp.tsx側が再計算する)。
+ */
+export function getSketchDiagnostics(
+  segments: readonly SketchSegment[],
+  constraints: readonly SketchConstraint[],
+  entities: readonly SketchEntity[],
+): SketchDiagnostics | null {
+  if (!gcsAdapter?.isGcsReady()) return null;
+  return gcsAdapter.getSketchDiagnostics(segments, constraints, entities);
 }
 
 /** solveDocumentSketches()が矛盾を検出したときの詳細。 */

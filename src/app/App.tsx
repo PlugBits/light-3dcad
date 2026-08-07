@@ -90,6 +90,7 @@ import { deserializeProject, serializeProject } from "../project/serialization";
 import { distanceBetweenPoints, distancePointToLine } from "../sketch/positionDimensions";
 import { worldOriginLocal } from "../sketch/originRef";
 import { rectangleFromCorners, regularPolygonVertices } from "../sketch/shapeFromPoints";
+import { getSketchDiagnostics } from "../sketch/solver";
 import { updateDocumentWithConflictRollback } from "../state/constraintUpdate";
 import { useCadStore } from "../state/store";
 import {
@@ -155,6 +156,17 @@ export default function App() {
   const retryAutosaveRestore = useCadStore((s) => s.retryAutosaveRestore);
   const selectedFeatureId = useCadStore((s) => s.selectedFeatureId);
   const selectedEntityId = useCadStore((s) => s.selectedEntityId);
+  const sketches = doc.features.filter((f) => f.type === "sketch");
+  const selectedFeature = selectedFeatureId ? findFeature(doc, selectedFeatureId) : undefined;
+  const selectedSketchFeature = selectedFeature?.type === "sketch" ? selectedFeature : null;
+  // 選択中スケッチの拘束診断(自由度[dof]・矛盾/冗長拘束id、拘束診断UI、Phase 35b-2)。solve後の
+  // 状態から都度取得する(GCS未初期化中はnull=診断バッジ・スケッチ線の定義状態別配色は非表示)。
+  // ビューア(setSketchOverlay、下のuseEffect)とSketchEditor(定義状態バッジ・拘束一覧の色分け)の
+  // 両方がこの値を参照する。
+  const selectedSketchDiagnostics = useMemo(() => {
+    if (!selectedSketchFeature) return null;
+    return getSketchDiagnostics(selectedSketchFeature.segments ?? [], selectedSketchFeature.constraints ?? [], selectedSketchFeature.entities);
+  }, [selectedSketchFeature]);
   const selectedFace = useCadStore((s) => s.selectedFace);
   const showSketches = useCadStore((s) => s.showSketches);
   const exporting = useCadStore((s) => s.exporting);
@@ -438,10 +450,21 @@ export default function App() {
     return overlays;
   }, [doc, sketchPlanes]);
 
-  // オーバーレイ入力・選択スケッチ・表示トグル・選択中エンティティが変わるたびにビューアへ反映する。
+  // 選択中スケッチの線の配色に使う定義状態(拘束診断UI、Phase 35b-2。SolidWorks流:
+  // 完全定義=黒っぽく/未定義=青系/矛盾=赤、対象は選択中スケッチ全体単位[要素単位のDOF色分けは
+  // スコープ外])。診断が無い(GCS未初期化・図形が無い)場合はnull(=従来通りの選択色[オレンジ])。
+  const selectedSketchDefinitionState: "conflicting" | "underDefined" | "fullyDefined" | null = (() => {
+    if (!selectedSketchDiagnostics || !selectedSketchFeature) return null;
+    const hasGeometry = (selectedSketchFeature.segments?.length ?? 0) > 0 || selectedSketchFeature.entities.length > 0;
+    if (!hasGeometry) return null;
+    if (selectedSketchDiagnostics.conflicting.length > 0) return "conflicting";
+    return selectedSketchDiagnostics.dof === 0 ? "fullyDefined" : "underDefined";
+  })();
+
+  // オーバーレイ入力・選択スケッチ・表示トグル・選択中エンティティ・定義状態が変わるたびにビューアへ反映する。
   useEffect(() => {
-    viewerRef.current?.setSketchOverlay(sketchOverlays, selectedFeatureId, showSketches, selectedEntityId);
-  }, [sketchOverlays, selectedFeatureId, showSketches, selectedEntityId]);
+    viewerRef.current?.setSketchOverlay(sketchOverlays, selectedFeatureId, showSketches, selectedEntityId, selectedSketchDefinitionState);
+  }, [sketchOverlays, selectedFeatureId, showSketches, selectedEntityId, selectedSketchDefinitionState]);
 
   // スケッチジオメトリのドラッグ編集(Phase 34): 既存の「スナップ」トグルの値をビューアへ同期する
   // (部品移動ツールと違い明示的なツール開始が無いため、都度startXxxTool()の引数として渡せない)。
@@ -610,8 +633,6 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  const sketches = doc.features.filter((f) => f.type === "sketch");
-  const selectedFeature = selectedFeatureId ? findFeature(doc, selectedFeatureId) : undefined;
   // 選択中フィーチャーがスケッチで、かつWorkerが平面基底を解決済みの場合のみ取得できる。
   // (未評価・面解決失敗中はundefinedになり、線描画・平面正対ボタンが無効化される)
   const selectedSketchPlane =
@@ -1565,9 +1586,13 @@ export default function App() {
           initialValue =
             entity?.kind === "rectangle" ? (target.kind === "entity-width" ? entity.width : entity.height) : 0;
         } else if (target.kind === "circle-distance-origin") {
+          // 円の中心↔原点の距離(頂点ベースの寸法指定と同じ考え方でX/Y距離にも対応、Phase 35b-2:
+          // Y距離拘束が付いた円をドラッグするとX方向のみ追従する挙動の土台)。
           titleLabel = "中心↔原点の距離 (mm)";
           const entity = entities.find((e) => e.id === target.entityId);
           initialValue = entity?.kind === "circle" ? distanceBetweenPoints(entity.center, originLocal) : 0;
+          axisOptions = true;
+          allowZero = true;
         } else if (target.kind === "point-distance-origin") {
           // セグメント端点↔原点の距離(追加項目: 原点ピック常時有効化。頂点ベースの寸法指定、
           // Phase 30でX/Y距離にも対応)。
@@ -1791,6 +1816,11 @@ export default function App() {
         if (!p) return null;
         return describeAxisDistanceConflict(p, originLocal ?? [0, 0], value, axis);
       }
+      if (target.kind === "circle-distance-origin") {
+        const entity = feature.entities.find((e) => e.id === target.entityId);
+        if (!entity || entity.kind !== "circle") return null;
+        return describeAxisDistanceConflict(entity.center, originLocal ?? [0, 0], value, axis);
+      }
       return null;
     };
 
@@ -1808,7 +1838,7 @@ export default function App() {
               : target.kind === "distance"
                 ? upsertDistanceConstraint(constraints, target.a, target.b, value, axis)
                 : target.kind === "circle-distance-origin"
-                  ? upsertDistanceEntityOriginConstraint(constraints, target.entityId, value, originLocal)
+                  ? upsertDistanceEntityOriginConstraint(constraints, target.entityId, value, originLocal, axis)
                   : target.kind === "point-distance-origin"
                     ? upsertDistancePointOriginConstraint(constraints, target.point, value, originLocal, axis)
                     : target.kind === "circle-distance-circle"
@@ -2760,7 +2790,9 @@ export default function App() {
 
           {selectedFeature && (
             <div style={{ borderTop: "1px solid #444", paddingTop: 12 }}>
-              {selectedFeature.type === "sketch" && <SketchEditor sketch={selectedFeature} onNotice={showTransientMessage} />}
+              {selectedFeature.type === "sketch" && (
+                <SketchEditor sketch={selectedFeature} onNotice={showTransientMessage} diagnostics={selectedSketchDiagnostics} />
+              )}
               {selectedFeature.type === "extrude" && <ExtrudeEditor extrude={selectedFeature} doc={doc} />}
               {selectedFeature.type === "fillet3d" && (
                 <Fillet3DEditor

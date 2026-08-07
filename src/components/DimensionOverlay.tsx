@@ -268,7 +268,12 @@ interface ConstraintEditingState {
  * (X/Y距離、寸法値の符号仕様の明確化、Phase 33)。
  */
 function isAxisDistanceDimensionKind(kind: ConstraintDimension["kind"]): boolean {
-  return kind === "entity-distance-entity" || kind === "seg-distance" || kind === "point-distance-origin";
+  return (
+    kind === "entity-distance-entity" ||
+    kind === "seg-distance" ||
+    kind === "point-distance-origin" ||
+    kind === "entity-distance-origin"
+  );
 }
 
 /**
@@ -441,6 +446,11 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
         if (!p) return null;
         return describeAxisDistanceConflict(p, dimension.origin, value, axis);
       }
+      if (dimension.kind === "entity-distance-origin") {
+        const entity = feature.entities.find((e) => e.id === dimension.entityId);
+        if (!entity || entity.kind !== "circle") return null;
+        return describeAxisDistanceConflict(entity.center, dimension.origin, value, axis);
+      }
       return null;
     };
     updateDocumentWithConflictRollback(
@@ -457,7 +467,7 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
               : dimension.kind === "seg-distance"
                 ? upsertDistanceConstraint(constraints, dimension.a, dimension.b, value, axis)
                 : dimension.kind === "entity-distance-origin"
-                  ? upsertDistanceEntityOriginConstraint(constraints, dimension.entityId, value, dimension.origin)
+                  ? upsertDistanceEntityOriginConstraint(constraints, dimension.entityId, value, dimension.origin, axis)
                   : dimension.kind === "point-distance-origin"
                     ? upsertDistancePointOriginConstraint(constraints, dimension.point, value, dimension.origin, axis)
                     : dimension.kind === "entity-distance-entity"

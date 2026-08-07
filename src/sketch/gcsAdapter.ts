@@ -54,7 +54,6 @@ const edgeLineId = (entityId: string, edgeIndex: number) => `EE:${entityId}:${ed
 const originPointId = (constraintId: string) => `OR:${constraintId}`;
 const refPointId = (constraintId: string, which: "p1" | "p2") => `RF:${constraintId}:${which}`;
 const refLineId = (constraintId: string) => `RL:${constraintId}`;
-const dragTargetPointId = (n: number) => `DT:${n}`;
 const gcsConstraintId = (constraintId: string, part = 0) => `K:${constraintId}#${part}`;
 /** gcsConstraintId()で作ったidから元のSketchConstraint.idを復元する(矛盾メッセージ用)。 */
 function originalConstraintId(gcsId: string): string | null {
@@ -209,6 +208,31 @@ function pushDifference(
     param2: { o_id: bPointId, prop: bProp },
     difference: value,
   } as SketchPrimitive);
+}
+
+/**
+ * 直線距離(p2p_distance、非0値)拘束を追加する直前に呼ぶ: 対象2点の初期座標が一致していると
+ * (例: 追加直後の円は既定で原点[0,0]、追加直後は距離拘束の対象がまだ動いていない等)、Euclid距離の
+ * 勾配が原点で不定形(0/0)になり、LM・DogLegどちらも解を進められず「距離0→非0への到達不能」という
+ * 偽の矛盾になることを実機確認した(distanceEntityOrigin/distancePointOrigin/distanceEntityEntity/
+ * distanceのdirect[非axis]モード全てで起こりうる。ドラッグ編集の一時拘束で見つかった同種の特異点
+ * [addDragConstraintsのコメント参照]と同じ根本原因)。value=0(=一致させたい)のときはこの特異点が
+ * そもそも正解[残差0]なので対象外。可動点(fixedでない方)の初期x座標をごくわずか(1e-3mm)ずらして
+ * 特異点から逃がすことで回避する(可視の形状には影響しない微小値。両方fixedなら動かせないため何もしない
+ * [別途fixEntity同士の矛盾として検出される])。
+ */
+const DEGENERATE_DISTANCE_NUDGE = 1e-3;
+function nudgeIfCoincidentForDirectDistance(ctx: BuildContext, idA: string, idB: string, value: number) {
+  if (value === 0) return;
+  const a = ctx.points.get(idA);
+  const b = ctx.points.get(idB);
+  if (!a || !b) return;
+  if (Math.hypot(a.x - b.x, a.y - b.y) > 1e-9) return;
+  if (!b.fixed) {
+    b.x += DEGENERATE_DISTANCE_NUDGE;
+  } else if (!a.fixed) {
+    a.x += DEGENERATE_DISTANCE_NUDGE;
+  }
 }
 
 /** LineRefを解決してGCSの"line"primitive idを返す(必要なら補助点・辺・固定スナップショット線を作る)。 */
@@ -377,6 +401,7 @@ function addConstraint(ctx: BuildContext, c: SketchConstraint) {
         const target = c.signed === true ? c.value : signOf(cur) * c.value;
         pushDifference(ctx, c.id, pointRefId(c.a), prop, pointRefId(c.b), prop, target);
       } else {
+        nudgeIfCoincidentForDirectDistance(ctx, pointRefId(c.a), pointRefId(c.b), c.value);
         ctx.constraints.push({
           id: gcsConstraintId(c.id),
           type: "p2p_distance",
@@ -411,7 +436,16 @@ function addConstraint(ctx: BuildContext, c: SketchConstraint) {
       const origin = c.originLocal ?? [0, 0];
       const oid = originPointId(c.id);
       addPoint(ctx, oid, origin[0], origin[1], true);
-      ctx.constraints.push({ id: gcsConstraintId(c.id), type: "p2p_distance", p1_id: entityRepId(c.entity), p2_id: oid, distance: c.value });
+      if (c.axis === "x" || c.axis === "y") {
+        const axisIdx = c.axis === "x" ? 0 : 1;
+        const prop = c.axis;
+        const cur = currentRep(ctx.entitiesById.get(c.entity.entityId)!)[axisIdx] - origin[axisIdx];
+        const target = c.signed === true ? c.value : signOf(cur) * c.value;
+        pushDifference(ctx, c.id, oid, prop, entityRepId(c.entity), prop, target);
+      } else {
+        nudgeIfCoincidentForDirectDistance(ctx, entityRepId(c.entity), oid, c.value);
+        ctx.constraints.push({ id: gcsConstraintId(c.id), type: "p2p_distance", p1_id: entityRepId(c.entity), p2_id: oid, distance: c.value });
+      }
       break;
     }
     case "distancePointOrigin": {
@@ -426,6 +460,7 @@ function addConstraint(ctx: BuildContext, c: SketchConstraint) {
         const target = c.signed === true ? c.value : signOf(cur) * c.value;
         pushDifference(ctx, c.id, oid, prop, pointRefId(c.point), prop, target);
       } else {
+        nudgeIfCoincidentForDirectDistance(ctx, pointRefId(c.point), oid, c.value);
         ctx.constraints.push({ id: gcsConstraintId(c.id), type: "p2p_distance", p1_id: pointRefId(c.point), p2_id: oid, distance: c.value });
       }
       break;
@@ -450,6 +485,7 @@ function addConstraint(ctx: BuildContext, c: SketchConstraint) {
         const target = c.signed === true ? c.value : signOf(cur) * c.value;
         pushDifference(ctx, c.id, entityRepId(c.a), prop, entityRepId(c.b), prop, target);
       } else {
+        nudgeIfCoincidentForDirectDistance(ctx, entityRepId(c.a), entityRepId(c.b), c.value);
         ctx.constraints.push({
           id: gcsConstraintId(c.id),
           type: "p2p_distance",
@@ -666,20 +702,34 @@ function maxCoordDelta(
   return m;
 }
 
-/** ドラッグ目標(Phase 34)に応じたtemporary p2p_distance拘束(=0)を積む。 */
+/**
+ * ドラッグ目標(Phase 34)に応じたtemporary coordinate_x/coordinate_y拘束を積む。
+ * 当初はtemporary p2p_distance(対象点↔ダミーの目標点)=0で実装していたが、Phase 35b-2の実機調査で
+ * 「本体ドラッグ(kind:"segment"、両端点を同時に引く)+lengthのような別のp2p_distance系拘束が
+ * 同時に存在する」組み合わせでPlaneGCSのDogLeg(temporary拘束経由でSQPに切り替わる)がNaNを返す
+ * バグを発見した(delta=0[目標=現在位置]でも再現するため、反復途中の収束ではなく初期のヤコビアン
+ * 評価自体が原因: p2p_distanceの残差はEuclid距離のsqrtで、目標点=対象点[距離0]のときの勾配が
+ * (p-target)/0という不定形になる。この特異点由来と見られる不具合が、同種のp2p_distance拘束
+ * [lengthなど]と組み合わさったときにSQPの内部で表面化する)。coordinate_x/coordinate_yは対象点の
+ * 片方の成分を直接目標値に等置する線形な拘束で、そのような特異性が原理的に存在しないため、
+ * これに置き換えて回避する(実機確認: 同じシナリオでNaNが解消し、旧実装と同じ「カーソル位置へ
+ * ソフトに引く」挙動を維持できることを確認済み)。
+ */
 function addDragConstraints(ctx: BuildContext, dragTarget: DragTarget) {
   const delta: Point2 = [dragTarget.target[0] - dragTarget.grabPoint[0], dragTarget.target[1] - dragTarget.grabPoint[1]];
-  let n = 0;
   const pull = (pointGcsId: string, desired: Point2) => {
-    const tId = dragTargetPointId(n);
-    n += 1;
-    addPoint(ctx, tId, desired[0], desired[1], true);
     ctx.constraints.push({
-      id: `DRAG:${n}`,
-      type: "p2p_distance",
-      p1_id: pointGcsId,
-      p2_id: tId,
-      distance: 0,
+      id: gcsConstraintId(`drag:${pointGcsId}`, 0),
+      type: "coordinate_x",
+      p_id: pointGcsId,
+      x: desired[0],
+      temporary: true,
+    });
+    ctx.constraints.push({
+      id: gcsConstraintId(`drag:${pointGcsId}`, 1),
+      type: "coordinate_y",
+      p_id: pointGcsId,
+      y: desired[1],
       temporary: true,
     });
   };
@@ -794,7 +844,13 @@ function evaluateResidual(
     case "distanceEntityOrigin": {
       const e = entitiesById.get(c.entity.entityId);
       if (!e) return 0;
-      return Math.abs(ptDist(repPointConcrete(e), c.originLocal ?? [0, 0]) - c.value);
+      const p = repPointConcrete(e);
+      const origin = c.originLocal ?? [0, 0];
+      if (c.axis === "x" || c.axis === "y") {
+        const i = c.axis === "x" ? 0 : 1;
+        return axisSignedOrAbs(p[i] - origin[i], c.value, c.signed);
+      }
+      return Math.abs(ptDist(p, origin) - c.value);
     }
     case "distancePointOrigin": {
       const p = segPoint(c.point);
@@ -1080,9 +1136,29 @@ export function getSketchDiagnostics(
     }
     return [...seen];
   };
+
+  // solveSketchGcs()の矛盾検出と同じ二重チェック(コメント参照): get_gcs_conflicting_constraints()
+  // だけでは冗長性由来の矛盾しか拾えず、三角不等式違反のような純粋な距離的矛盾(実機確認例:
+  // 円Aを固定して円Bとの中心間距離を指定した後、円Bの中心を直接編集の経路[拘束ツール等の
+  // 巻き戻しを経由しない編集]で全く離れた位置へ動かすと、この2拘束[fixEntity+distanceEntityEntity]は
+  // 幾何学的に両立しなくなるが、GCSの矛盾拘束id一覧は空のまま)を見逃すことがある。呼び出し時点の
+  // segments/entitiesの座標(直前のsolve結果、または矛盾検出でロールバックされず残った生の入力)
+  // そのものに対して各拘束の残差を再計算し、CONFLICT_TOLERANCEを超えるものを矛盾拘束とみなして
+  // GCS側の検出結果と合わせる(和集合)。
+  const segmentsById = new Map(segments.map((s) => [s.id, s]));
+  const entitiesById = new Map(entities.map((e) => [e.id, e]));
+  const residualConflictingIds = new Set<string>();
+  for (const c of constraints) {
+    if (evaluateResidual(c, segments, entities, segmentsById, entitiesById) > CONFLICT_TOLERANCE) {
+      residualConflictingIds.add(c.id);
+    }
+  }
+  const gcsConflictingIds = toOriginalIds(w.get_gcs_conflicting_constraints());
+  const conflicting = new Set([...residualConflictingIds, ...gcsConflictingIds]);
+
   return {
     dof: w.gcs.dof(),
-    conflicting: toOriginalIds(w.get_gcs_conflicting_constraints()),
+    conflicting: [...conflicting],
     redundant: toOriginalIds(w.get_gcs_redundant_constraints()),
   };
 }
