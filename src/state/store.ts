@@ -48,7 +48,7 @@ import type {
 import { deserializeProject, serializeProject } from "../project/serialization";
 import { updateOriginSnapshots } from "../sketch/originSnapshot";
 import { updateReferenceEdgeSnapshots } from "../sketch/referenceEdgeMatch";
-import { solveDocumentSketches } from "../sketch/solver";
+import { registerGcsAdapter, solveDocumentSketches } from "../sketch/solver";
 import { createHistoryState, pushHistory, redoHistory, undoHistory, type HistoryState } from "./history";
 
 /**
@@ -721,6 +721,15 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
     const { requestId, promise } = postRequest({ kind: "evaluate", doc: resolveEvaluationDocument(get().doc) });
     set({ status: "evaluating", latestEvaluateRequestId: requestId });
     promise.then((response) => applyEvaluated(set, get, requestId, response));
+
+    // PlaneGCSソルバの初期化(Phase 35b-1)。src/sketch/gcsAdapter.tsを動的importすることで、
+    // メインバンドルにはPlaneGCSのJSラッパー・WASMを含めない(npm run sizeの許容増分数KB以内、
+    // src/sketch/solver.tsのコメント参照)。完了までのsolveSketch()呼び出しは自動的に旧ソルバへ
+    // フォールバックする。
+    void import("../sketch/gcsAdapter").then((mod) => {
+      registerGcsAdapter(mod);
+      return mod.initGcs();
+    });
   },
 
   updateDocument: (updater) => {

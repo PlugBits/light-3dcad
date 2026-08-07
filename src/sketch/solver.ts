@@ -14,6 +14,18 @@
 import type { CadDocument, EntityRef, FeatureId, LineRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
 import { constraintFullLabel } from "./constraintLabels";
 import { polygonEdgePointsWithOffset, rectangleEdgePointsAtCenter, resolveLineRefPoints } from "./entityEdges";
+// gcsAdapter.tsは実行時コストの大きいPlaneGCS(WASM)を静的importするため、solver.ts自体からは
+// 型だけをimportし(erasedなのでバンドルに影響しない)、実体は呼び出し側(src/state/store.tsの
+// initialize())が動的importで取得してregisterGcsAdapter()に渡す(メインバンドル増を数KBに抑える、
+// Phase 35b-1)。Vitestはtests/sketch/solver.test.tsのbeforeAllで直接registerGcsAdapter()する。
+import type * as GcsAdapterModule from "./gcsAdapter";
+
+let gcsAdapter: typeof GcsAdapterModule | null = null;
+
+/** src/state/store.tsのinitialize()、またはテストのbeforeAllから、動的importしたgcsAdapter.tsを登録する。 */
+export function registerGcsAdapter(mod: typeof GcsAdapterModule): void {
+  gcsAdapter = mod;
+}
 
 export type Point2 = [number, number];
 
@@ -1328,8 +1340,12 @@ function runLevenbergMarquardt(buildResiduals: (x: number[]) => ResidualEq[], x0
  *   (呼び出し側が事前にsrc/model/validation.tsでバリデーション済みであることを前提とする防御的な扱い)。
  * - 収束後、拘束由来の残差(正則化を除く)の絶対値最大がCONFLICT_TOLERANCE(1e-4mm)を超えていれば
  *   矛盾(過拘束)とみなし ok:false, conflicting:true を返す。
+ *
+ * Phase 35b-1: PlaneGCS移行に伴い、この関数は「旧ソルバ」としてsrc/sketch/gcsAdapter.tsの初期化が
+ * 完了する前のフォールバック専用に残されている(下記solveSketch()参照)。以後の新規挙動追加は
+ * 原則gcsAdapter.ts側で行う想定(Phase 35cで旧ソルバの撤去を判断)。
  */
-export function solveSketch(
+function solveSketchLegacy(
   segments: readonly SketchSegment[],
   constraints: readonly SketchConstraint[] = [],
   entities: readonly SketchEntity[] = [],
@@ -1478,6 +1494,27 @@ export function solveSketch(
     segments: segmentsFromVars(segments, x, varIndex),
     entities: entitiesFromVars(entities, x, entityVarIdx),
   };
+}
+
+/**
+ * スケッチ拘束ソルバの公開エントリポイント(Phase 20a〜、Phase 35b-1でPlaneGCSへ移行)。
+ * 入出力シグネチャ(SolveSuccess/SolveFailure/conflictingメッセージ等)は移行前と完全互換。
+ *
+ * src/state/store.tsのinitialize()がアプリ起動時にgcsAdapter.initGcs()を呼び、WASM初期化を
+ * 開始する(非同期)。この関数自体は常に同期呼び出しのままにする必要がある
+ * (store.tsのupdateDocument()がsolveDocumentSketches()経由で同期的に呼ぶ前提のため)。
+ * 初期化が完了していれば(isGcsReady())GCSベースの実装(gcsAdapter.solveSketchGcs)を使い、
+ * 完了前(起動直後の一瞬、または何らかの理由でWASM初期化に失敗した場合)は自前実装の
+ * 旧ソルバ(solveSketchLegacy)にフォールバックする(Phase 35cで旧ソルバの撤去を判断するまで維持)。
+ */
+export function solveSketch(
+  segments: readonly SketchSegment[],
+  constraints: readonly SketchConstraint[] = [],
+  entities: readonly SketchEntity[] = [],
+  options: SolveOptions = {},
+): SolveResult {
+  if (gcsAdapter?.isGcsReady()) return gcsAdapter.solveSketchGcs(segments, constraints, entities, options);
+  return solveSketchLegacy(segments, constraints, entities, options);
 }
 
 /** solveDocumentSketches()が矛盾を検出したときの詳細。 */

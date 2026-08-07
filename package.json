@@ -13,6 +13,7 @@
     "size": "node scripts/check-bundle-size.mjs"
   },
   "dependencies": {
+    "@salusoft89/planegcs": "^1.2.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "replicad": "^0.23.1",
