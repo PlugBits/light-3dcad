@@ -912,6 +912,29 @@ function buildSnapMarkerObjects(basis: PlaneBasis, kind: SnapKind, local: [numbe
 }
 
 /**
+ * ビューポート背景(Phase 38b)。シーン全体を覆う単色ではなく、Canvas2Dで縦グラデーションを
+ * 焼き込んだCanvasTextureをscene.backgroundに使う(新規メッシュ・ポストプロセスなしで安価)。
+ * 既存の配色(白系の原点マーカー・オレンジ系グリッド・ライトグレーの既定ボディ色等)はいずれも
+ * 暗い背景を前提に調整済みのため、明るい背景への全面切替は既存コントラストを崩す。そのため
+ * 「現在のダークテーマを、より上質な縦グラデーションにする」方向でSolidWorks風の奥行き感を出す。
+ */
+function buildViewportBackgroundTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement("canvas");
+  canvas.width = 4;
+  canvas.height = 256;
+  const ctx = canvas.getContext("2d")!;
+  const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  gradient.addColorStop(0, "#333a4d");
+  gradient.addColorStop(0.55, "#20242f");
+  gradient.addColorStop(1, "#15171e");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
+/**
  * Three.jsシーンの命令的なラッパー。React stateにシーンを持たせず、
  * DOMコンテナに対して直接マウント/更新/破棄する。
  */
@@ -1062,6 +1085,14 @@ export class CadViewer {
    */
   private lengthInputEl: HTMLDivElement;
   private lengthInputActive = false;
+  /**
+   * 原点トライアド(Phase 38b): カメラの向きに追従する固定サイズのXYZ軸インジケータ(左下、常時表示)。
+   * 3D空間にジオメトリを置くのではなく、カメラのquaternionから軸方向を毎フレーム2D投影して
+   * SVGのline/text属性を書き換える方式にすることで、新規メッシュ・マテリアルを増やさず軽量に保つ。
+   */
+  private axisIndicatorEl: HTMLDivElement;
+  private axisIndicatorLineEls: Record<"x" | "y" | "z", SVGLineElement>;
+  private axisIndicatorLabelEls: Record<"x" | "y" | "z", SVGTextElement>;
   private lengthInputValue = "";
   /** 直近のマウス移動で解決した(スナップ・軸ロック適用後の)カーソルのローカル2D座標。数値長さ入力の方向決定に使う。 */
   private lastHoverLocal: [number, number] | null = null;
@@ -1325,7 +1356,7 @@ export class CadViewer {
     this.onSketchEntityPick = onSketchEntityPick;
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x222630);
+    this.scene.background = buildViewportBackgroundTexture();
 
     const { clientWidth, clientHeight } = container;
     this.camera = new THREE.PerspectiveCamera(
@@ -1426,6 +1457,62 @@ export class CadViewer {
     });
     container.appendChild(this.lengthInputEl);
 
+    // 原点トライアド(Phase 38b): 左下固定サイズのXYZ軸インジケータ。SVG要素はここで一度だけ
+    // 生成し、以後は毎フレームanimate()内のupdateAxisIndicator()でline/text属性のみ書き換える。
+    this.axisIndicatorEl = document.createElement("div");
+    this.axisIndicatorEl.setAttribute("data-testid", "viewport-axis-indicator");
+    Object.assign(this.axisIndicatorEl.style, {
+      position: "absolute",
+      left: "10px",
+      bottom: "10px",
+      width: "56px",
+      height: "56px",
+      pointerEvents: "none",
+      zIndex: "4",
+    });
+    const AXIS_LABEL: Record<"x" | "y" | "z", { color: string }> = {
+      x: { color: "#ff6b6b" },
+      y: { color: "#66bb6a" },
+      z: { color: "#4fc3f7" },
+    };
+    const svgNs = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(svgNs, "svg");
+    svg.setAttribute("width", "56");
+    svg.setAttribute("height", "56");
+    svg.setAttribute("viewBox", "0 0 56 56");
+    const lineEls = {} as Record<"x" | "y" | "z", SVGLineElement>;
+    const labelEls = {} as Record<"x" | "y" | "z", SVGTextElement>;
+    (["x", "y", "z"] as const).forEach((key) => {
+      const line = document.createElementNS(svgNs, "line");
+      line.setAttribute("x1", "28");
+      line.setAttribute("y1", "28");
+      line.setAttribute("x2", "28");
+      line.setAttribute("y2", "28");
+      line.setAttribute("stroke", AXIS_LABEL[key].color);
+      line.setAttribute("stroke-width", "2");
+      line.setAttribute("stroke-linecap", "round");
+      svg.appendChild(line);
+      lineEls[key] = line;
+    });
+    (["x", "y", "z"] as const).forEach((key) => {
+      const text = document.createElementNS(svgNs, "text");
+      text.textContent = key.toUpperCase();
+      text.setAttribute("x", "28");
+      text.setAttribute("y", "28");
+      text.setAttribute("fill", AXIS_LABEL[key].color);
+      text.setAttribute("font-size", "10");
+      text.setAttribute("font-family", "sans-serif");
+      text.setAttribute("font-weight", "600");
+      text.setAttribute("text-anchor", "middle");
+      text.setAttribute("dominant-baseline", "middle");
+      svg.appendChild(text);
+      labelEls[key] = text;
+    });
+    this.axisIndicatorLineEls = lineEls;
+    this.axisIndicatorLabelEls = labelEls;
+    this.axisIndicatorEl.appendChild(svg);
+    container.appendChild(this.axisIndicatorEl);
+
     this.renderer.domElement.addEventListener("click", this.handleClick);
     this.renderer.domElement.addEventListener("dblclick", this.handleSegmentDoubleClick);
     this.renderer.domElement.addEventListener("mousemove", this.handleDrawingMouseMove);
@@ -1457,10 +1544,41 @@ export class CadViewer {
     this.animationFrameId = requestAnimationFrame(this.animate);
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
+    this.updateAxisIndicator();
     // render()内でcamera.matrixWorldが最新化されるため、その後にフレームコールバックを呼ぶ
     // (寸法ラベルのprojectPoint()等が常に最新のカメラ状態を参照できるようにするため)。
     this.frameCallbacks.forEach((callback) => callback());
   };
+
+  /**
+   * 原点トライアド(Phase 38b)の毎フレーム更新。ワールドのX/Y/Z単位ベクトルをカメラのquaternionの
+   * 逆回転でカメラローカル空間へ変換し、そのxy成分をそのまま2D画面オフセットとして使う
+   * (視点合わせの簡易ギズモの定番手法。パースは無視するため計算はベクトル回転3回のみで軽量)。
+   */
+  private updateAxisIndicator() {
+    const R = 20;
+    const center = 28;
+    const invQuat = this.camera.quaternion.clone().invert();
+    const axisVectors: Record<"x" | "y" | "z", THREE.Vector3> = {
+      x: new THREE.Vector3(1, 0, 0),
+      y: new THREE.Vector3(0, 1, 0),
+      z: new THREE.Vector3(0, 0, 1),
+    };
+    (["x", "y", "z"] as const).forEach((key) => {
+      const local = axisVectors[key].applyQuaternion(invQuat);
+      const x = center + local.x * R;
+      const y = center - local.y * R;
+      const line = this.axisIndicatorLineEls[key];
+      line.setAttribute("x2", x.toFixed(1));
+      line.setAttribute("y2", y.toFixed(1));
+      // 奥行き(local.z)が負=カメラに背を向けている軸は少し薄くして手前の軸と見分けやすくする。
+      line.setAttribute("opacity", local.z < 0 ? "0.45" : "1");
+      const label = this.axisIndicatorLabelEls[key];
+      label.setAttribute("x", (center + local.x * (R + 8)).toFixed(1));
+      label.setAttribute("y", (center - local.y * (R + 8)).toFixed(1));
+      label.setAttribute("opacity", local.z < 0 ? "0.45" : "1");
+    });
+  }
 
   /**
    * 毎フレーム(render後)呼ばれるコールバックを登録する。寸法ラベル等、カメラ変更(orbit操作等)
@@ -6082,6 +6200,8 @@ export class CadViewer {
     }
     this.container.removeChild(this.coordOverlayEl);
     this.container.removeChild(this.lengthInputEl);
+    this.container.removeChild(this.axisIndicatorEl);
+    (this.scene.background as THREE.Texture | null)?.dispose?.();
     this.renderer.dispose();
     this.container.removeChild(this.renderer.domElement);
   }
