@@ -15,6 +15,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.116.0",
     "@salusoft89/planegcs": "^1.2.0",
+    "openai": "^7.4.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "replicad": "^0.23.1",
