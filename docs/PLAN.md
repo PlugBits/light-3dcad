@@ -999,3 +999,15 @@ openai SDKは別チャンク35.6KB)、E2E 40→41件全通過(`npx playwright te
 `openRibbonTab()`(新設、`e2e/helpers.ts`)での明示切替が必要だった(`e2e/mate.spec.ts`1箇所)。
 gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 517件全通過、`vite build`+`npm run size`で
 メインバンドルgzip 257.6KB→259.8KB(+2.2KB、アイコンSVG分)、E2E 41件全通過(2分割でBash同期実行)。
+
+## Phase 38b: FeatureManagerツリー刷新+ビューポート polish
+
+`FeatureTree.tsx`をSolidWorks風に刷新した(部品アイコン+「部品1」ヘッダー、行アイコン[`ToolIcon`の
+既存セット流用]、~26px行・選択時アクセント左帯・ホバー時のみのアクション、ロールバックバーを
+太い掴みバー風に再スキン、ダブルクリックでの名前インライン編集[新設`renameFeature()`、
+`model/document.ts`])。既存のtestid・クリック/選択・ロールバック挙動・警告アイコンは全て維持した。
+ビューポートはヘッズアップビュークラスタ(フィット/正対/標準ビュー、testid・ハンドラ不変)を
+リボンからキャンバス上部中央の半透明フローティングバーへ移設し、`CadViewer.ts`に背景を
+グラデーションテクスチャ化+左下固定の毎フレーム更新XYZ軸インジケータを追加した(新規npm依存なし)。
+gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 517件全通過、`vite build`+`npm run size`で
+メインバンドルgzip 259.8KB→261.0KB(+1.2KB)、E2E 41件全通過(2分割でBash同期実行)。
