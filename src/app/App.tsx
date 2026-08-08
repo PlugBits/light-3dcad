@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 
 import { DimensionOverlay } from "../components/DimensionOverlay";
 import { DimensionToolPopup } from "../components/DimensionToolPopup";
@@ -12,6 +12,10 @@ import { ShellEditor } from "../components/ShellEditor";
 import { SketchEditor } from "../components/SketchEditor";
 import { ThreadEditor } from "../components/ThreadEditor";
 import { worldDirectionToLocal, worldPointToLocal } from "../assembly/mateSolver";
+
+// AIモデル生成パネル(Phase 37)。@anthropic-ai/sdkを含む重い依存(src/ai/generate.ts経由で
+// さらに動的import)をメインバンドルから分離するため、React.lazy()で遅延読み込みする。
+const AiGeneratePanel = lazy(() => import("../components/AiGeneratePanel"));
 import { downloadBlob } from "../export/downloadBlob";
 import { downloadStl } from "../export/downloadStl";
 import {
@@ -213,6 +217,8 @@ export default function App() {
   const [openProjectError, setOpenProjectError] = useState<string | null>(null);
   // 「部品を配置」で選んだ.l3dcadファイルの読み込みに失敗したときのエラーメッセージ(Phase 27b)。未発生はnull。
   const [openPartError, setOpenPartError] = useState<string | null>(null);
+  // AI生成パネル(Phase 37)の開閉状態。
+  const [aiPanelOpen, setAiPanelOpen] = useState(false);
   // 「スケッチ追加」ボタンで使う平面選択(Phase 13)。基準平面クリックと同等の機能をUIからも操作できるようにする。
   const [newSketchPlane, setNewSketchPlane] = useState<"XY" | "XZ" | "YZ">("XY");
   // 現在アクティブなフィレット/面取りツール(未選択はnull、Phase 18)。
@@ -736,6 +742,24 @@ export default function App() {
     } catch (err) {
       setOpenProjectError(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  /** 「AI生成」ボタン(Phase 37): 隠しfile inputではなくパネルを開く。 */
+  function handleOpenAiPanel() {
+    setAiPanelOpen(true);
+  }
+
+  /**
+   * AI生成パネル(生成 or JSON貼り付け)から得られたCadDocumentを読み込む(Phase 37)。
+   * 「開く」と同じ責務分担: 確認ダイアログ→fitToView予約→loadDocument()。生成された/貼り付けられた
+   * モデルは既に何らかの作業内容を上書きするため、「新規」ボタンと同様に確認する。
+   */
+  function handleLoadAiGeneratedDocument(generatedDoc: CadDocument) {
+    const ok = window.confirm("現在の作業内容を破棄してAIが生成したモデルを読み込みますか?(自動保存には現在の内容が残っています)");
+    if (!ok) return;
+    viewerRef.current?.requestFitOnNextMesh();
+    loadDocument(generatedDoc);
+    setAiPanelOpen(false);
   }
 
   /**
@@ -2053,6 +2077,14 @@ export default function App() {
               style={{ display: "none" }}
               onChange={handleAddPartFile}
             />
+            <button
+              type="button"
+              data-testid="btn-ai-generate"
+              onClick={handleOpenAiPanel}
+              title="自然言語のプロンプト(またはJSON貼り付け)からモデルを生成します"
+            >
+              AI生成
+            </button>
             <select
               data-testid="new-sketch-plane-select"
               value={newSketchPlane}
@@ -3066,6 +3098,11 @@ export default function App() {
           )}
         </main>
       </div>
+      {aiPanelOpen && (
+        <Suspense fallback={null}>
+          <AiGeneratePanel onClose={() => setAiPanelOpen(false)} onLoad={handleLoadAiGeneratedDocument} />
+        </Suspense>
+      )}
     </div>
   );
 }

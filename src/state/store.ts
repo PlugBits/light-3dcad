@@ -545,6 +545,15 @@ interface CadStoreState {
    * (呼び出し側=UIで確認ダイアログを出してから呼ぶ想定)。
    */
   newProject: () => void;
+
+  /**
+   * ドキュメントを評価キューへ送り、応答をそのまま返すだけの「ドライラン」評価(Phase 37、
+   * AIモデル生成の検証用)。loadDocument()と異なりストアの状態(doc/status/history等)は
+   * 一切変更しない副作用フリーな評価で、Worker(既存のensureWorker()/postRequest()、
+   * タイムアウト・カーネルクラッシュ処理も含めて共通)を再利用する。呼び出し側
+   * (src/ai/generate.ts)がAI生成結果を実際に読み込む前の妥当性確認に使う。
+   */
+  dryRunEvaluate: (doc: CadDocument) => Promise<WorkerResponse>;
 }
 
 /**
@@ -1053,6 +1062,11 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   newProject: () => {
     clearAutosave();
     get().loadDocument(createEmptyDocument());
+  },
+
+  dryRunEvaluate: (doc) => {
+    const { promise } = postRequest({ kind: "evaluate", doc: resolveEvaluationDocument(doc) });
+    return promise;
   },
 
   previewFeatureContext: (featureId) => {
