@@ -1,9 +1,10 @@
-// src/sketch/regions.ts の単体テスト(純粋TS、WASM不要、Phase 19a)。
+// src/sketch/regions.ts の単体テスト(純粋TS、WASM不要、Phase 19a。Phase 36でギャップ許容の頂点結合を追加)。
 import { describe, expect, it } from "vitest";
 
-import { createArcSegment, createLineSegment } from "../../src/model";
+import { createArcSegment, createCircleEntity, createLineSegment } from "../../src/model";
 import type { SketchSegment } from "../../src/model/types";
-import { findClosedRegions, type Loop } from "../../src/sketch/regions";
+import { classifySketchEntities } from "../../src/sketch/containment";
+import { findClosedRegions, loopPolyline, type Loop } from "../../src/sketch/regions";
 
 /** ループ(セグメント列)の符号付き面積(シューレース。円弧は直線近似で概算)。テスト内の向き検証専用。 */
 function loopShoelaceArea(loop: Loop): number {
@@ -172,5 +173,62 @@ describe("findClosedRegions", () => {
     const regions = findClosedRegions([top, bottom]);
     expect(regions).toHaveLength(1);
     expect(regions[0].outer).toHaveLength(2);
+  });
+
+  describe("REGION_JOIN_EPS(Phase 36: entityトリム由来の断片がソルバ再実行でµmずれても外枠が閉じる)", () => {
+    /**
+     * ほぼ矩形の4線分ループを作るが、1つの角(20,10)だけ隣接する2線分の端点をgapだけずらす
+     * (実機報告の再現: トリムで生じた断片同士の一致拘束が無いままソルバが再実行され、
+     * 端点が数µm〜数十µmドリフトするケースに相当)。
+     */
+    function nearRectSegments(gap: number): SketchSegment[] {
+      const top = createLineSegment({ p1: [0, 10], p2: [20, 10 + gap] }); // 右上角がgapだけy方向にずれた端点
+      const right = createLineSegment({ p1: [20, 10], p2: [20, 0] }); // 右上角はずれていない元の座標
+      const bottom = createLineSegment({ p1: [20, 0], p2: [0, 0] });
+      const left = createLineSegment({ p1: [0, 0], p2: [0, 10] });
+      return [top, right, bottom, left];
+    }
+
+    it("6e-3mmのギャップ(REGION_JOIN_EPS=0.01mm以内)は結合され、外枠1領域として検出される", () => {
+      const segments = nearRectSegments(6e-3);
+      const regions = findClosedRegions(segments);
+      expect(regions).toHaveLength(1);
+      expect(regions[0].holes).toHaveLength(0);
+      const area = loopShoelaceArea(regions[0].outer);
+      expect(Math.abs(area - 200)).toBeLessThan(0.1); // ギャップ由来の微小な面積誤差(<0.01mm^2オーダー)を許容する。
+    });
+
+    it("0.05mmのギャップ(REGION_JOIN_EPS=0.01mmを超える)は結合されず、領域は検出されない", () => {
+      const segments = nearRectSegments(0.05);
+      const regions = findClosedRegions(segments);
+      expect(regions).toHaveLength(0);
+    });
+
+    it("6e-3mmギャップの外枠+内側の円entityは、classifySketchEntitiesでouter+holeに分類される(evaluatorのbuildDrawingPartsと同じ経路)", () => {
+      const segments = nearRectSegments(6e-3);
+      const regions = findClosedRegions(segments);
+      expect(regions).toHaveLength(1);
+
+      const circle = createCircleEntity({ center: [10, 5], radius: 2 });
+      const regionProxy = { kind: "polygon" as const, id: "__region_outer__0", points: loopPolyline(regions[0].outer) };
+      const { outers, holes } = classifySketchEntities([circle, regionProxy]);
+
+      expect(outers).toHaveLength(1);
+      expect(outers[0].id).toBe(regionProxy.id);
+      expect(holes).toHaveLength(1);
+      expect(holes[0].id).toBe(circle.id);
+    });
+
+    it("結合されたクラスタ内の端点はすべて同一座標にスナップされ、ループが厳密に閉じる(p2===次のp1)", () => {
+      const segments = nearRectSegments(6e-3);
+      const regions = findClosedRegions(segments);
+      expect(regions).toHaveLength(1);
+      const loop = regions[0].outer;
+      for (let i = 0; i < loop.length; i += 1) {
+        const next = loop[(i + 1) % loop.length];
+        expect(loop[i].p2[0]).toBeCloseTo(next.p1[0], 9);
+        expect(loop[i].p2[1]).toBeCloseTo(next.p1[1], 9);
+      }
+    });
   });
 });

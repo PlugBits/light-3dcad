@@ -4,7 +4,8 @@
 //
 // アルゴリズム概要(モジュール冒頭のdocs/PLAN.md記載の手順どおり):
 //   1. 全セグメント対の交点(src/sketch/intersections.ts)でセグメントを分割し、
-//      分割点をEPS許容でマージした頂点を持つ平面グラフ(半エッジ構造)を構築する。
+//      分割点をREGION_JOIN_EPS許容(0.01mm、intersections.EPSより緩い、Phase 36)でマージした
+//      頂点を持つ平面グラフ(半エッジ構造)を構築する。
 //   2. 各無向エッジを両方向のハーフエッジにし、各頂点で出て行くハーフエッジを
 //      角度(円弧は端点での接線方向)でソートする。「twin(逆方向エッジ)の直前
 //      (角度昇順で1つ前、周回)」を次のハーフエッジとする規則(標準的な平面グラフの
@@ -23,7 +24,7 @@
 // (p1/p2入れ替え・円弧はbulge符号反転)を逆順に並べたもの)。
 import type { SketchSegment } from "../model/types";
 import { arcGeometryFromBulge, bulgeArcPoints } from "./bulge";
-import { arcArcIntersection, lineArcIntersection, lineLineIntersection, splitSegmentAt, EPS, type SegIntersection } from "./intersections";
+import { arcArcIntersection, lineArcIntersection, lineLineIntersection, splitSegmentAt, type SegIntersection } from "./intersections";
 
 export type Point2 = [number, number];
 
@@ -38,6 +39,19 @@ export interface Region {
 
 /** 面積がこれ以下(mm^2)の面はノイズ/退化面として無視する。 */
 const AREA_EPS = 1e-7;
+
+/**
+ * 頂点クラスタリング(平面グラフ構築時に「同じ頂点」とみなす距離許容、mm、Phase 36)。
+ * intersections.ts の EPS(1e-6、交点計算・分割の数値許容)とは別の、ギャップ許容の緩い定数。
+ * ユーザー報告バグの根本原因: entityトリム(src/sketch/trim.ts)が生む断片や、複数回のソルバ実行を
+ * 経た端点は、本来一致すべき隣接セグメント同士の端点がμmオーダーでずれることがある(実測: 約6µm)。
+ * intersections.EPS(1e-6mm)ではこの程度のずれを「別頂点」と誤判定し、外枠ループが閉じなくなる
+ * (=領域が検出されず、押し出しからその外形が消える)。この定数はそのギャップを許容してループを
+ * 閉じるための「頂点マージ専用」の緩い許容(0.01mm)であり、intersections.EPSはセグメント同士の
+ * 交点計算・分割の数値許容のままそれ以上緩めない(意図的な線引き。src/sketch/trim.tsのFix2で
+ * トリム断点に一致拘束を自動付与するため、通常は6µm程度のずれで収まる前提)。
+ */
+const REGION_JOIN_EPS = 1e-2;
 
 function dist(a: Point2, b: Point2): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1]);
@@ -189,11 +203,15 @@ function buildHalfEdgeGraph(segments: SketchSegment[]): { halfEdges: HalfEdge[];
     subSegments.push(...parts);
   }
 
-  // 頂点クラスタリング(EPS許容でマージ)。
+  // 頂点クラスタリング(REGION_JOIN_EPS許容でマージ。intersections.EPSより緩い、Phase 36)。
+  // クラスタの代表点は「そのクラスタに最初に到達した点」に固定する(1点目のみ登録、以後は
+  // 距離判定に使うだけで座標を更新しない)。これにより、あるクラスタに属する全セグメントの
+  // 端点は最終的に同一座標(=代表点)へスナップされ、ループのp2→次のp1連続性(モジュール冒頭の
+  // Loop型のコメント参照)が数µm〜数十µmのズレがあっても厳密に保たれる。
   const vertexPoints: Point2[] = [];
   const vertexIdFor = (p: Point2): number => {
     for (let k = 0; k < vertexPoints.length; k += 1) {
-      if (dist(vertexPoints[k], p) <= EPS) return k;
+      if (dist(vertexPoints[k], p) <= REGION_JOIN_EPS) return k;
     }
     vertexPoints.push(p);
     return vertexPoints.length - 1;
@@ -203,10 +221,12 @@ function buildHalfEdgeGraph(segments: SketchSegment[]): { halfEdges: HalfEdge[];
   for (const seg of subSegments) {
     const v1 = vertexIdFor(seg.p1);
     const v2 = vertexIdFor(seg.p2);
+    // 端点をクラスタの代表点へスナップしてから半エッジを作る(上記コメント参照)。
+    const snapped: SketchSegment = { ...seg, p1: vertexPoints[v1], p2: vertexPoints[v2] };
     const fwdIndex = halfEdges.length;
     const revIndex = fwdIndex + 1;
-    halfEdges.push({ from: v1, to: v2, seg, angle: departureAngle(seg), twinIndex: revIndex, visited: false });
-    const reversed = reverseSegment(seg, ":r");
+    halfEdges.push({ from: v1, to: v2, seg: snapped, angle: departureAngle(snapped), twinIndex: revIndex, visited: false });
+    const reversed = reverseSegment(snapped, ":r");
     halfEdges.push({ from: v2, to: v1, seg: reversed, angle: departureAngle(reversed), twinIndex: fwdIndex, visited: false });
   }
 
