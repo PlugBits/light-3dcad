@@ -941,3 +941,21 @@ PlaneGCS(`gcsAdapter.ts`)経由で解くようにした。`src/assembly/mateSolv
 gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 466件全通過、`vite build`+
 `npm run size`でUIバンドル260.5KB→256.9KB gzip(約3.6KB減、上限350KB)、E2E 38件全通過
 (`npx playwright test`をBashで同期実行)。
+
+## Phase 36: 領域結合許容0.01mm+トリム断点への一致拘束自動付与(実機報告)
+
+実機報告バグ(線分5本+entityトリム由来の円弧1本のプロファイル+別の円entityを押し出すと、外形が
+消えて円entityのディスクだけになる)の根本原因は、entityトリム(`trimEntityAtPoint`)が生む断片に
+隣接セグメントへの一致拘束が一切付かず、ソルバ再実行のたびに断点が数µmドリフトして
+`src/sketch/regions.ts`の頂点マージ(旧: intersections.EPS=1e-6と共用)が「別頂点」と誤判定し、
+外枠ループが閉じなくなることだった。2点修正: (1) `regions.ts`に頂点マージ専用の緩い許容
+`REGION_JOIN_EPS`(0.01mm、intersections.EPSとは別定数のまま)を導入し、クラスタの代表点へ
+セグメント端点をスナップしてループの連続性を厳密に保つ。(2) `trim.ts`にトリム断点の自動一致拘束
+付与(`coincidentsForCutPoints`、マッチング許容1e-4mm)を追加し、segment自己トリム・entityトリム
+の両経路で、新しく生じた断片端点と座標一致する他セグメント端点(entity分解片同士の隣接も含む)に
+coincidentを自動付与する(既存と同等の拘束があれば追加しない、point-on-curveはスコープ外で
+サイレントスキップ)。`trimEntityAtPoint()`の戻り値にconstraintsを追加し、`document.ts`の
+`trimSketchEntityAtPoint()`経由でsketch.constraintsへ反映されるようにした。
+gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 466→475件全通過、`vite build`+
+`npm run size`でUIバンドルgzip 257.1KB(上限350KB)、E2E 38件全通過(`npx playwright test`を
+Bashで同期実行)。

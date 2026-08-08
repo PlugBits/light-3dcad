@@ -23,8 +23,71 @@ export type Point2 = [number, number];
 /** 端点座標の一致判定に使う許容誤差(mm、src/sketch/intersections.tsのEPSと同じ)。 */
 const TRIM_POINT_EPS = 1e-6;
 
+/**
+ * トリムで生じた断点(cut point)同士の一致拘束(coincident)を自動付与する際のマッチング許容
+ * (mm、Phase 36)。TRIM_POINT_EPS(1e-6、旧端点への拘束"付け替え"の厳密な座標一致判定)より
+ * 意図的に緩い: ユーザー報告バグの根本原因は、entityトリム(trimEntityAtPoint)が生む断片
+ * (例: 円entityをトリムして生じる円弧)に隣接セグメントとの一致拘束が一切付かず、後続の
+ * ソルバ実行のたびに数µmオーダーでドリフトし、src/sketch/regions.tsの頂点マージ(当時はEPS=
+ * 1e-6)で「別頂点」と誤判定されて外枠ループが閉じなくなり、押し出しからその外形が消えることに
+ * あった。この定数はトリム直後(まだドリフトしていない、断点は理論上厳密に一致する)の断点同士を
+ * 拾うためのもので、1e-6では僅かな浮動小数点誤差(交点計算の丸め等)を取りこぼす可能性があるため
+ * 少し緩め、かつ通常のスケッチ寸法感覚(0.1mm未満の意図的な近接配置)からは十分小さい1e-4mmとする。
+ */
+const CUT_MATCH_EPS = 1e-4;
+
 function distPts(a: Point2, b: Point2): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1]);
+}
+
+/** セグメント端点1つを指すPointRefと、その実座標のペア(cut point一致拘束の自動付与に使う)。 */
+interface EndpointCandidate {
+  ref: PointRef;
+  point: Point2;
+}
+
+/** セグメント配列の全端点(p1・p2の両方)をEndpointCandidate配列に展開する。 */
+function endpointCandidates(segs: SketchSegment[]): EndpointCandidate[] {
+  return segs.flatMap((s) => [
+    { ref: { segmentId: s.id, end: "p1" as const }, point: s.p1 },
+    { ref: { segmentId: s.id, end: "p2" as const }, point: s.p2 },
+  ]);
+}
+
+function refsEqual(a: PointRef, b: PointRef): boolean {
+  return a.segmentId === b.segmentId && a.end === b.end;
+}
+
+/** a↔b(順不同)のcoincident拘束がlist内に既に存在するか。 */
+function hasCoincidentBetween(a: PointRef, b: PointRef, list: SketchConstraint[]): boolean {
+  return list.some(
+    (c) => c.kind === "coincident" && ((refsEqual(c.a, a) && refsEqual(c.b, b)) || (refsEqual(c.a, b) && refsEqual(c.b, a))),
+  );
+}
+
+/**
+ * トリムで新しく生じた断片の端点(cutPoints)それぞれについて、poolCandidates(トリム後に実在する
+ * 全端点。cutPoints自身を含んでよい)の中からCUT_MATCH_EPS以内で座標が一致するものを探し、
+ * まだ存在しない(existing、および今回追加した分の両方をチェックして重複を避ける)coincident拘束を
+ * 追加する(Phase 36、上記CUT_MATCH_EPSのコメント参照)。自分自身(同一のPointRef)とは組まない。
+ * 1つの断点に複数の一致があれば(3本以上が同一点に集まる等)すべて追加する。line↔lineの端点同士の
+ * みを対象とし、point-on-curve(端点が相手セグメントの内部に接する場合)は対象外(スコープ外)。
+ */
+function coincidentsForCutPoints(
+  cutPoints: EndpointCandidate[],
+  poolCandidates: EndpointCandidate[],
+  existing: SketchConstraint[],
+): SketchConstraint[] {
+  const added: SketchConstraint[] = [];
+  for (const cp of cutPoints) {
+    for (const other of poolCandidates) {
+      if (refsEqual(cp.ref, other.ref)) continue;
+      if (distPts(cp.point, other.point) > CUT_MATCH_EPS) continue;
+      if (hasCoincidentBetween(cp.ref, other.ref, existing) || hasCoincidentBetween(cp.ref, other.ref, added)) continue;
+      added.push({ id: generateId("constraint"), kind: "coincident", a: cp.ref, b: other.ref });
+    }
+  }
+  return added;
 }
 
 function isArcWithBulge(seg: SketchSegment): boolean {
@@ -314,6 +377,21 @@ export function trimSegmentWithConstraints(
     nextConstraints.push(c);
   }
 
+  // Fix2(Phase 36): トリムで新しく生じた断点(interior split boundary。元のtarget.p1/p2そのものは
+  // 対象外)それぞれに、座標一致する他の端点(残った断片自身の別の端も含む。他の断片・others両方)が
+  // あればcoincident拘束を自動付与する(reassignPointによる「既存拘束の付け替え」とは独立の処理: こちらは
+  // 元々存在しなかった新規のcoincidentを追加する)。keptPiecesはpiecesのうちremoveIndexを除いた順序を
+  // 保つため、元のインデックス(origIndex)と対応付けて「区間境界(0でもlength-1でもない側)」を判定する。
+  const keptOriginalIndexes = pieces.map((_, i) => i).filter((i) => i !== removeIndex);
+  const cutPoints: EndpointCandidate[] = [];
+  keptPieces.forEach((piece, k) => {
+    const origIndex = keptOriginalIndexes[k];
+    if (origIndex > 0) cutPoints.push({ ref: { segmentId: piece.id, end: "p1" }, point: piece.p1 });
+    if (origIndex < pieces.length - 1) cutPoints.push({ ref: { segmentId: piece.id, end: "p2" }, point: piece.p2 });
+  });
+  const poolCandidates = [...endpointCandidates(keptPieces), ...endpointCandidates(others)];
+  nextConstraints.push(...coincidentsForCutPoints(cutPoints, poolCandidates, nextConstraints));
+
   return { segments: nextSegments, constraints: nextConstraints, removedLengthConstraintCount: removedLength };
 }
 
@@ -388,9 +466,10 @@ export function trimEntityAtPoint(
   entityId: string,
   segments: SketchSegment[],
   clickPoint: Point2,
-): { entities: SketchEntity[]; segments: SketchSegment[] } {
+  constraints: SketchConstraint[] = [],
+): { entities: SketchEntity[]; segments: SketchSegment[]; constraints: SketchConstraint[] } {
   const groups = explodeEntityIntoPieceGroups(entities, entityId, segments);
-  if (!groups) return { entities, segments };
+  if (!groups) return { entities, segments, constraints };
   let removeGroupIndex = -1;
   let removePieceIndex = -1;
   let bestDist = Infinity;
@@ -412,5 +491,17 @@ export function trimEntityAtPoint(
     });
   });
   const nextEntities = entities.filter((e) => e.id !== entityId);
-  return { entities: nextEntities, segments: [...segments, ...kept] };
+  const nextSegments = [...segments, ...kept];
+
+  // Fix2(Phase 36、ユーザー報告バグの根本原因の修正): entity(円等)は丸ごと新規の自由セグメント
+  // 群(kept)に置き換わるため、kept の全端点が「トリムで新しく生じた断点」に相当する
+  // (explodeEntity()の分解片同士が接する境界、および他セグメントとの交点の両方を含む)。
+  // 既存segments(元からある自由な線分・円弧)の端点、およびkept同士の端点をプールとして
+  // CUT_MATCH_EPS以内の座標一致を探し、無ければ何もしない(他方の曲線が通過するだけの交点=
+  // point-on-curveはスコープ外)、あればcoincident拘束を自動付与する(重複は追加しない)。
+  const cutPoints = endpointCandidates(kept);
+  const poolCandidates = [...cutPoints, ...endpointCandidates(segments)];
+  const nextConstraints = [...constraints, ...coincidentsForCutPoints(cutPoints, poolCandidates, constraints)];
+
+  return { entities: nextEntities, segments: nextSegments, constraints: nextConstraints };
 }

@@ -541,11 +541,13 @@ export function applySegmentCornerToSketch(
  * mm)に最も近い区間だけ削除した上でsegmentsへ分解する(トリムツールのentity対応、Phase 24)。
  * 実際の幾何計算は src/sketch/trim.ts の trimEntityAtPoint()。entities・segmentsの置き換えを
  * 1回のフィーチャー更新にまとめることで、undo1回で元に戻せるようにする。
+ * Phase 36: trimEntityAtPoint() がトリム断点に自動付与するcoincident拘束(実機報告バグの根本原因
+ * 修正)を反映するため、sketch.constraintsを渡し、戻り値のconstraintsで置き換える。
  */
 export function trimSketchEntityAtPoint(doc: CadDocument, sketchId: FeatureId, entityId: string, clickPoint: Point2): CadDocument {
   return updateFeature<SketchFeature>(doc, sketchId, (sketch) => {
-    const result = trimEntityAtPoint(sketch.entities, entityId, sketch.segments ?? [], clickPoint);
-    return { ...sketch, entities: result.entities, segments: result.segments };
+    const result = trimEntityAtPoint(sketch.entities, entityId, sketch.segments ?? [], clickPoint, sketch.constraints ?? []);
+    return { ...sketch, entities: result.entities, segments: result.segments, constraints: result.constraints };
   });
 }
 

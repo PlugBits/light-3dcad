@@ -1430,8 +1430,11 @@ export default function App() {
    * 渡すコールバックのため、最新のドキュメントはgetState()から読む)。
    * 自由な線分・円弧(isEntity:false)のトリムはtrimSketchSegmentAtPoint()(実機報告対応、Phase 31a)を
    * 使う。断片へのID引き継ぎ・拘束の付け替えを行った上で、意味が変わるlength拘束を削除した場合は
-   * 一時トーストで件数を知らせる。entity輪郭のトリム(isEntity:true)は従来通り
-   * trimSketchEntityAtPoint()(拘束引き継ぎ非対応、既知の制限のまま)。
+   * 一時トーストで件数を知らせる。entity輪郭のトリム(isEntity:true)はtrimSketchEntityAtPoint()。
+   * どちらも断片化で生じた断点(cut point)には、隣接する他セグメントの端点とCUT_MATCH_EPS(1e-4mm)
+   * 以内で座標が一致すればcoincident拘束を自動付与する(src/sketch/trim.tsのcoincidentsForCutPoints、
+   * Phase 36。断片同士が一致拘束を持たないままソルバ再実行のたびにドリフトし、領域検出が外枠を
+   * 見失う実機報告バグの根本原因の修正)。
    */
   function handleStartTrimTool() {
     if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
