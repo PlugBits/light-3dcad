@@ -1,9 +1,12 @@
-// AIモデル生成(Phase 37)のE2E。2ケース:
+// AIモデル生成(Phase 37/37b)のE2E。3ケース:
 // (a) 貼り付けモード: AI生成パネルを開き、小さな有効なアウソリングJSONを貼り付けて読み込み、
 //     フィーチャーツリーにsketch+extrudeが現れ、ビューアに形状が表示されることを確認する。
-// (b) 生成パス: page.route()で https://api.anthropic.com/** をインターセプトし、
+// (b) 生成パス(Anthropic): page.route()で https://api.anthropic.com/** をインターセプトし、
 //     有効なアウソリングJSONをテキストブロックに含む(stop_reason: end_turn の)Messages API
 //     ストリーミング応答を模擬する。実際のAPIには一切アクセスしない。
+// (c) 生成パス(OpenAI): page.route()で https://api.openai.com/** をインターセプトし、
+//     有効なアウソリングJSONをoutput_textに含むResponses API応答を模擬する。実際のAPIには
+//     一切アクセスしない。
 import { expect, test, type Page } from "@playwright/test";
 
 import { collectPageErrors, gotoApp, waitForReady } from "./helpers";
@@ -122,6 +125,75 @@ test("AI生成: 生成パス(Anthropic APIをインターセプト)で得たJSON
   const sentBody = request.postDataJSON() as { model?: string; stream?: boolean };
   expect(sentBody.model).toBe("claude-opus-5");
   expect(sentBody.stream).toBe(true);
+
+  await expect(page.getByTestId("ai-generate-panel")).toHaveCount(0, { timeout: 30_000 });
+  await waitForReady(page);
+  await expect(page.getByTestId("eval-error")).toHaveCount(0);
+  await expect(page.getByTestId("feature-item-Sketch1")).toBeVisible();
+  await expect(page.getByTestId("feature-item-Extrude1")).toBeVisible();
+
+  expect(pageErrors).toEqual([]);
+});
+
+/** OpenAI Responses API(非ストリーミング)の応答を模擬するJSONボディを組み立てる。 */
+function buildFakeResponsesApiBody(jsonText: string): unknown {
+  return {
+    id: "resp_e2e_fake",
+    object: "response",
+    created_at: Math.floor(Date.now() / 1000),
+    status: "completed",
+    error: null,
+    incomplete_details: null,
+    instructions: null,
+    metadata: {},
+    model: "gpt-5.5",
+    output: [
+      {
+        id: "msg_e2e_fake",
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: jsonText, annotations: [] }],
+      },
+    ],
+    output_text: jsonText,
+    parallel_tool_calls: true,
+    temperature: 1,
+    tool_choice: "auto",
+    tools: [],
+    top_p: 1,
+    usage: { input_tokens: 100, output_tokens: 200, total_tokens: 300 },
+  };
+}
+
+test("AI生成: 生成パス(OpenAI APIをインターセプト)で得たJSONが読み込まれる", async ({ page }) => {
+  const pageErrors = collectPageErrors(page);
+  page.on("dialog", (dialog) => dialog.accept());
+
+  await page.route("https://api.openai.com/**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(buildFakeResponsesApiBody(JSON.stringify(VALID_AUTHORING_JSON))),
+    });
+  });
+  const requestPromise = page.waitForRequest((req) => req.url().startsWith("https://api.openai.com/"));
+
+  await gotoApp(page);
+  await waitForReady(page);
+
+  await page.getByTestId("btn-ai-generate").click();
+  await expect(page.getByTestId("ai-generate-panel")).toBeVisible();
+  await page.getByTestId("ai-provider-select").selectOption("openai");
+  await page.getByTestId("ai-api-key-input").fill("sk-e2e-test-fake-key");
+  await page.getByTestId("ai-prompt-textarea").fill("幅80 高さ40の板の中央にφ16の穴");
+  await page.getByTestId("btn-ai-generate-submit").click();
+
+  const request = await requestPromise;
+  const sentBody = request.postDataJSON() as { model?: string; text?: { format?: { type?: string; strict?: boolean } } };
+  expect(sentBody.model).toBe("gpt-5.5");
+  expect(sentBody.text?.format?.type).toBe("json_schema");
+  expect(sentBody.text?.format?.strict).toBe(true);
 
   await expect(page.getByTestId("ai-generate-panel")).toHaveCount(0, { timeout: 30_000 });
   await waitForReady(page);
