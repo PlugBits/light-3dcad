@@ -11,6 +11,7 @@ import { RevolveEditor } from "../components/RevolveEditor";
 import { ShellEditor } from "../components/ShellEditor";
 import { SketchEditor } from "../components/SketchEditor";
 import { ThreadEditor } from "../components/ThreadEditor";
+import { ToolIcon, type ToolIconName } from "../components/ToolIcon";
 import { worldDirectionToLocal, worldPointToLocal } from "../assembly/mateSolver";
 
 // AIモデル生成パネル(Phase 37)。@anthropic-ai/sdkを含む重い依存(src/ai/generate.ts経由で
@@ -120,21 +121,32 @@ import type { StandardView } from "../viewer/standardViews";
 type DrawingTool = "rect" | "circle" | "slot" | "regularPolygon" | "segment" | null;
 
 /**
- * ツールバーの標準ビューボタン(正面/背面/左/右/上/下/等角、Phase 16)。
- * UI改善(ツールバー整理)で主要3つ(正面/上/等角)だけをボタンで常設し、残り4つ(背面/左/右/下)は
- * コンパクトなセレクトにまとめる。
+ * CommandManagerリボン(Phase 38a)のタブ。"sketch"=スケッチ、"feature"=フィーチャー、
+ * "assembly"=アセンブリ、"view"=表示。スケッチの選択状態が変化した境界(入る/出る)で
+ * 自動的にsketch⇄featureへ切り替わる(App本体のuseEffect参照)。手動クリックはいつでも優先される。
  */
-const STANDARD_VIEW_BUTTONS: { view: StandardView; label: string; title: string }[] = [
-  { view: "front", label: "正面", title: "正面(-Y側)から見る" },
-  { view: "back", label: "背面", title: "背面(+Y側)から見る" },
-  { view: "left", label: "左", title: "左側面(-X側)から見る" },
-  { view: "right", label: "右", title: "右側面(+X側)から見る" },
-  { view: "top", label: "上", title: "上面(+Z側)から見る" },
-  { view: "bottom", label: "下", title: "下面(-Z側)から見る" },
-  { view: "iso", label: "等角", title: "等角(アイソメトリック)ビュー" },
+type RibbonTab = "sketch" | "feature" | "assembly" | "view";
+const RIBBON_TABS: { id: RibbonTab; label: string }[] = [
+  { id: "sketch", label: "スケッチ" },
+  { id: "feature", label: "フィーチャー" },
+  { id: "assembly", label: "アセンブリ" },
+  { id: "view", label: "表示" },
 ];
-const PRIMARY_STANDARD_VIEWS: StandardView[] = ["front", "top", "iso"];
-const MORE_STANDARD_VIEWS = STANDARD_VIEW_BUTTONS.filter((b) => !PRIMARY_STANDARD_VIEWS.includes(b.view));
+
+/**
+ * ツールバーの標準ビューボタン(正面/背面/左/右/上/下/等角、Phase 16)。
+ * Phase 38aでリボン化: 「他のビュー」セレクトは廃止し、7つすべてをボタンとして常設
+ * ヘッズアップビュークラスタ(タブに関わらず常時表示)+表示タブの両方に並べる。
+ */
+const STANDARD_VIEW_BUTTONS: { view: StandardView; label: string; title: string; icon: ToolIconName }[] = [
+  { view: "front", label: "正面", title: "正面(-Y側)から見る", icon: "viewFront" },
+  { view: "back", label: "背面", title: "背面(+Y側)から見る", icon: "viewBack" },
+  { view: "left", label: "左", title: "左側面(-X側)から見る", icon: "viewLeft" },
+  { view: "right", label: "右", title: "右側面(+X側)から見る", icon: "viewRight" },
+  { view: "top", label: "上", title: "上面(+Z側)から見る", icon: "viewTop" },
+  { view: "bottom", label: "下", title: "下面(-Z側)から見る", icon: "viewBottom" },
+  { view: "iso", label: "等角", title: "等角(アイソメトリック)ビュー", icon: "viewIso" },
+];
 
 export default function App() {
   const viewerContainerRef = useRef<HTMLDivElement | null>(null);
@@ -206,6 +218,8 @@ export default function App() {
   const canUndo = useCadStore((s) => s.history.past.length > 0);
   const canRedo = useCadStore((s) => s.history.future.length > 0);
 
+  // CommandManagerリボン(Phase 38a)のアクティブタブ。既定は「フィーチャー」。
+  const [ribbonTab, setRibbonTab] = useState<RibbonTab>("feature");
   // 現在アクティブな作図ツール(line/rect/circle、未選択はnull)。実体(頂点列・プレビュー)はCadViewerが持つ。
   const [activeTool, setActiveTool] = useState<DrawingTool>(null);
   // 描画モード開始時点で対象だったスケッチID。選択が他に移ったら自動キャンセルするために使う
@@ -652,6 +666,18 @@ export default function App() {
   const bodyCount = doc.features.filter(
     (f) => f.type === "partInstance" || ((f.type === "extrude" || f.type === "revolve") && f.operation === "newBody"),
   ).length;
+
+  // CommandManagerリボン(Phase 38a): スケッチの選択状態が変化した境界(入る/出る)で
+  // 自動的にタブを切り替える(スケッチ選択→「スケッチ」タブ、スケッチ選択解除→「フィーチャー」タブ)。
+  // アセンブリ/表示タブへは自動遷移しない(手動クリックのみ)ため、ユーザーの明示的なタブ選択は
+  // スケッチへの出入り以外では維持される。
+  const isInSketchMode = selectedFeature?.type === "sketch";
+  const wasInSketchModeRef = useRef(isInSketchMode);
+  useEffect(() => {
+    if (isInSketchMode && !wasInSketchModeRef.current) setRibbonTab("sketch");
+    else if (!isInSketchMode && wasInSketchModeRef.current) setRibbonTab("feature");
+    wasInSketchModeRef.current = isInSketchMode;
+  }, [isInSketchMode]);
 
   const busy = status === "initializing" || status === "evaluating";
   // WASM初期化は"evaluate"リクエストの中で行われる(initialize()参照)ため、
@@ -2009,49 +2035,38 @@ export default function App() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", fontFamily: "sans-serif" }}>
-      <header
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          borderBottom: "1px solid #444",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            alignItems: "center",
-            rowGap: 6,
-            padding: "6px 12px",
-          }}
-        >
-          <h1 style={{ fontSize: 14, margin: "0 12px 0 0" }}>light-3dcad</h1>
+      <header className="ribbon">
+        {/* 第1行: アプリ名+ファイル操作+Undo/Redo+トグル+状態(常時表示、Phase 38a CommandManagerリボン化)。 */}
+        <div className="ribbon-topbar">
+          <h1 className="ribbon-app-name">light-3dcad</h1>
 
-          <div className="toolbar-group">
-            <span className="toolbar-group-label">ファイル</span>
+          <div className="ribbon-cluster">
             <button
               type="button"
+              className="ribbon-file-btn"
               data-testid="btn-new-project"
               onClick={handleNewProject}
               title="現在の作業内容を破棄して新規プロジェクトを開始します(自動保存も消去します)"
             >
-              新規
+              <ToolIcon name="new" /> 新規
             </button>
             <button
               type="button"
+              className="ribbon-file-btn"
               data-testid="btn-save-project"
               onClick={handleSaveProject}
               title="現在のドキュメントを.l3dcadファイルとして保存します"
             >
-              保存
+              <ToolIcon name="save" /> 保存
             </button>
             <button
               type="button"
+              className="ribbon-file-btn"
               data-testid="btn-open-project"
               onClick={handleOpenProjectClick}
               title=".l3dcadファイルを開いてドキュメントを差し替えます(アンドゥ履歴はクリアされます)"
             >
-              開く
+              <ToolIcon name="open" /> 開く
             </button>
             <input
               ref={openProjectInputRef}
@@ -2063,11 +2078,12 @@ export default function App() {
             />
             <button
               type="button"
+              className="ribbon-file-btn"
               data-testid="btn-add-part-instance"
               onClick={handleAddPartClick}
               title=".l3dcadファイルを部品として原点に配置します(簡易アセンブリ)"
             >
-              部品を配置
+              <ToolIcon name="addPart" /> 部品を配置
             </button>
             <input
               ref={openPartInputRef}
@@ -2079,480 +2095,61 @@ export default function App() {
             />
             <button
               type="button"
+              className="ribbon-file-btn"
               data-testid="btn-ai-generate"
               onClick={handleOpenAiPanel}
               title="自然言語のプロンプト(またはJSON貼り付け)からモデルを生成します"
             >
-              AI生成
-            </button>
-            <select
-              data-testid="new-sketch-plane-select"
-              value={newSketchPlane}
-              onChange={(e) => setNewSketchPlane(e.target.value as "XY" | "XZ" | "YZ")}
-              title="新規スケッチを作成する基準平面(基準平面クリックと同等)"
-            >
-              <option value="XY">XY</option>
-              <option value="XZ">XZ</option>
-              <option value="YZ">YZ</option>
-            </select>
-            <button type="button" data-testid="btn-add-sketch" onClick={() => addSketch(newSketchPlane)}>
-              スケッチ
+              <ToolIcon name="aiGenerate" /> AI生成
             </button>
             <button
               type="button"
-              data-testid="btn-add-extrude"
-              onClick={handleAddExtrude}
-              disabled={sketches.length === 0}
-              title="選択中(なければ最後)のスケッチを押し出します"
-            >
-              押し出し
-            </button>
-            <button
-              type="button"
-              data-testid="btn-add-revolve"
-              onClick={handleAddRevolve}
-              disabled={sketches.length === 0}
-              title="選択中(なければ最後)のスケッチをスケッチ原点を通るX/Y軸周りに回転させます"
-            >
-              回転体
-            </button>
-            <button
-              type="button"
-              data-testid="btn-add-face-sketch"
-              onClick={addFaceSketch}
-              disabled={!selectedFace?.isPlanar}
-              title="選択中の平面上にスケッチを追加します"
-            >
-              面にスケッチ
-            </button>
-            <button
-              type="button"
+              className="ribbon-file-btn"
               data-testid="btn-download-stl"
               onClick={handleDownloadStl}
               disabled={busy || exporting}
               title="現在のモデルをSTLファイルとしてダウンロードします"
             >
-              {exporting ? "出力中…" : "STL"}
+              <ToolIcon name="exportStl" /> {exporting ? "出力中…" : "STL"}
             </button>
             <button
               type="button"
+              className="ribbon-file-btn"
               data-testid="btn-download-step"
               onClick={handleDownloadStep}
               disabled={busy || exporting || !hasBody}
               title="現在のモデルをSTEPファイルとしてダウンロードします"
             >
-              {exporting ? "出力中…" : "STEP"}
+              <ToolIcon name="exportStep" /> {exporting ? "出力中…" : "STEP"}
             </button>
           </div>
 
-          <div className="toolbar-group">
-            <span className="toolbar-group-label">ビュー</span>
+          <div className="ribbon-cluster" style={{ marginLeft: "auto" }}>
             <button
               type="button"
-              data-testid="btn-fit-view"
-              onClick={() => viewerRef.current?.fitToView()}
-              title="モデル全体が画面に収まるようにカメラを調整します"
+              className="ribbon-icon-btn"
+              data-testid="btn-undo"
+              onClick={undo}
+              disabled={!canUndo}
+              title="元に戻す (Ctrl+Z)"
             >
-              フィット
+              <ToolIcon name="undo" />
             </button>
             <button
               type="button"
-              data-testid="btn-align-to-plane"
-              onClick={handleAlignToPlane}
-              disabled={!selectedSketchPlane}
-              title="選択中スケッチの平面に正対する視点へカメラを移動します"
+              className="ribbon-icon-btn"
+              data-testid="btn-redo"
+              onClick={redo}
+              disabled={!canRedo}
+              title="やり直す (Ctrl+Shift+Z)"
             >
-              正対
-            </button>
-            {STANDARD_VIEW_BUTTONS.filter((b) => PRIMARY_STANDARD_VIEWS.includes(b.view)).map(({ view, label, title }) => (
-              <button
-                key={view}
-                type="button"
-                data-testid={`btn-view-${view}`}
-                onClick={() => viewerRef.current?.setStandardView(view)}
-                title={title}
-                style={{ fontSize: 11, padding: "2px 6px" }}
-              >
-                {label}
-              </button>
-            ))}
-            <select
-              data-testid="view-more-select"
-              value=""
-              onChange={(e) => {
-                if (e.target.value) viewerRef.current?.setStandardView(e.target.value as StandardView);
-                e.target.value = "";
-              }}
-              title="その他の標準ビュー(背面/左/右/下)"
-              style={{ fontSize: 11 }}
-            >
-              <option value="">他のビュー…</option>
-              {MORE_STANDARD_VIEWS.map(({ view, label }) => (
-                <option key={view} value={view}>
-                  {label}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="toolbar-group">
-            <span className="toolbar-group-label">作図</span>
-            <button
-              type="button"
-              data-testid="btn-draw-segment"
-              className={activeTool === "segment" ? "toolbar-btn-active" : undefined}
-              onClick={activeTool === "segment" ? handleCancelDrawing : handleStartSegmentDrawing}
-              disabled={isToolDisabled("segment")}
-              title="クリックで頂点を連結して線分・円弧のチェーンを描きます(Enter/ダブルクリックで確定、始点付近クリックで閉チェーン、Escでキャンセル)"
-            >
-              {activeTool === "segment" ? "線分キャンセル(Esc)" : "線分"}
-            </button>
-            {activeTool === "segment" && (
-              <button
-                type="button"
-                data-testid="btn-toggle-arc-mode"
-                className={arcModeActive ? "toolbar-btn-active" : undefined}
-                onClick={handleToggleArcMode}
-                title="次のセグメントを円弧(3点円弧)にします(Aキーでも切替)"
-              >
-                {arcModeActive ? "円弧セグメント中(A)" : "円弧(A)"}
-              </button>
-            )}
-            <button
-              type="button"
-              data-testid="btn-draw-rect"
-              className={activeTool === "rect" ? "toolbar-btn-active" : undefined}
-              onClick={activeTool === "rect" ? handleCancelDrawing : handleStartRectDrawing}
-              disabled={isToolDisabled("rect")}
-              title="2クリックで矩形を描きます(1点目=コーナー、2点目=対角コーナー。Escでキャンセル)"
-            >
-              {activeTool === "rect" ? "矩形キャンセル(Esc)" : "矩形"}
-            </button>
-            <button
-              type="button"
-              data-testid="btn-draw-circle"
-              className={activeTool === "circle" ? "toolbar-btn-active" : undefined}
-              onClick={activeTool === "circle" ? handleCancelDrawing : handleStartCircleDrawing}
-              disabled={isToolDisabled("circle")}
-              title="2クリックで円を描きます(1点目=中心、2点目=円周上の点。Escでキャンセル)"
-            >
-              {activeTool === "circle" ? "円キャンセル(Esc)" : "円"}
-            </button>
-            <button
-              type="button"
-              data-testid="btn-draw-slot"
-              className={activeTool === "slot" ? "toolbar-btn-active" : undefined}
-              onClick={activeTool === "slot" ? handleCancelDrawing : handleStartSlotDrawing}
-              disabled={isToolDisabled("slot")}
-              title="3クリックでスロット(長円)を描きます(始点→終点→幅。Escでキャンセル)"
-            >
-              {activeTool === "slot" ? "スロットキャンセル(Esc)" : "スロット"}
-            </button>
-            <button
-              type="button"
-              data-testid="btn-draw-polygon"
-              className={activeTool === "regularPolygon" ? "toolbar-btn-active" : undefined}
-              onClick={activeTool === "regularPolygon" ? handleCancelDrawing : handleStartRegularPolygonDrawing}
-              disabled={isToolDisabled("regularPolygon")}
-              title="2クリックで正多角形を描きます(中心→頂点。辺数は右のセレクタ。Escでキャンセル)"
-            >
-              {activeTool === "regularPolygon" ? "多角形キャンセル(Esc)" : "多角形"}
-            </button>
-            <select
-              data-testid="polygon-sides-select"
-              value={polygonSides}
-              disabled={activeTool === "regularPolygon"}
-              onChange={(e) => setPolygonSides(Number(e.target.value))}
-              title="多角形の辺数"
-            >
-              {[3, 4, 5, 6, 8].map((n) => (
-                <option key={n} value={n}>
-                  {n}辺
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              data-testid="btn-extend"
-              className={extendTool ? "toolbar-btn-active" : undefined}
-              onClick={extendTool ? handleCancelExtendTool : handleStartExtendTool}
-              disabled={isExtendToolDisabled()}
-              title="直線セグメントの近い側の端点をホバーし、最初に交わる相手まで延長します(緑色プレビューが延長区間、Escで終了)"
-            >
-              {extendTool ? "延長キャンセル(Esc)" : "延長"}
+              <ToolIcon name="redo" />
             </button>
           </div>
 
-          <div className="toolbar-group">
-            <span className="toolbar-group-label">編集</span>
-            <button
-              type="button"
-              data-testid="btn-corner-fillet"
-              className={cornerTool === "fillet" ? "toolbar-btn-active" : undefined}
-              onClick={cornerTool === "fillet" ? handleCancelCornerTool : () => handleStartCornerTool("fillet")}
-              disabled={isCornerToolDisabled("fillet")}
-              title="頂点付近をクリックしてフィレット(丸め)を適用します(適用済みをクリックで解除、Escで終了)"
-            >
-              {cornerTool === "fillet" ? "フィレットキャンセル(Esc)" : "フィレット"}
-            </button>
-            <button
-              type="button"
-              data-testid="btn-corner-chamfer"
-              className={cornerTool === "chamfer" ? "toolbar-btn-active" : undefined}
-              onClick={cornerTool === "chamfer" ? handleCancelCornerTool : () => handleStartCornerTool("chamfer")}
-              disabled={isCornerToolDisabled("chamfer")}
-              title="頂点付近をクリックして面取りを適用します(適用済みをクリックで解除、Escで終了)"
-            >
-              {cornerTool === "chamfer" ? "面取りキャンセル(Esc)" : "面取り"}
-            </button>
-            {cornerTool && (
-              <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }} title="頂点クリックで適用するサイズ(mm)">
-                <input
-                  type="number"
-                  data-testid="corner-tool-size"
-                  value={cornerSize}
-                  min={0.1}
-                  step="any"
-                  onChange={(e) => {
-                    const v = Number(e.target.value);
-                    if (Number.isFinite(v) && v > 0) setCornerSize(v);
-                  }}
-                  style={{ width: 50 }}
-                />
-                mm
-              </label>
-            )}
-            <button
-              type="button"
-              data-testid="btn-trim"
-              className={trimTool ? "toolbar-btn-active" : undefined}
-              onClick={trimTool ? handleCancelTrimTool : handleStartTrimTool}
-              disabled={isTrimToolDisabled()}
-              title="セグメントの区間をクリックして削除します(赤色プレビューが削除対象、Escで終了)"
-            >
-              {trimTool ? "トリムキャンセル(Esc)" : "トリム"}
-            </button>
-            <button
-              type="button"
-              data-testid="btn-dimension"
-              className={dimensionTool ? "toolbar-btn-active" : undefined}
-              onClick={dimensionTool ? handleCancelDimensionTool : handleStartDimensionTool}
-              disabled={isDimensionToolDisabled()}
-              title="クリックで長さ/半径/距離の拘束を作成・編集します(Escで終了)"
-            >
-              {dimensionTool ? "寸法キャンセル(Esc)" : "寸法"}
-            </button>
-            <button
-              type="button"
-              data-testid="btn-constraint"
-              className={constraintTool ? "toolbar-btn-active" : undefined}
-              onClick={constraintTool ? handleCancelConstraintTool : handleStartConstraintTool}
-              disabled={isConstraintToolDisabled()}
-              title="線分/円を2つ順にクリックして垂直・同心・接線の拘束を作成します(Escで終了)"
-            >
-              {constraintTool ? "拘束キャンセル(Esc)" : "拘束"}
-            </button>
-            <button
-              type="button"
-              data-testid="btn-edge-fillet"
-              className={edgeTool === "fillet" ? "toolbar-btn-active" : undefined}
-              onClick={edgeTool === "fillet" ? handleCancelEdgeTool : () => handleStartEdgeTool("fillet")}
-              disabled={isEdgeToolDisabled("fillet")}
-              title="ボディのエッジをクリックして選択し、3Dフィレット(丸め)を適用します(Escで終了)"
-            >
-              {edgeTool === "fillet" ? "3Dフィレットキャンセル(Esc)" : "3Dフィレット"}
-            </button>
-            <button
-              type="button"
-              data-testid="btn-edge-chamfer"
-              className={edgeTool === "chamfer" ? "toolbar-btn-active" : undefined}
-              onClick={edgeTool === "chamfer" ? handleCancelEdgeTool : () => handleStartEdgeTool("chamfer")}
-              disabled={isEdgeToolDisabled("chamfer")}
-              title="ボディのエッジをクリックして選択し、3D面取りを適用します(Escで終了)"
-            >
-              {edgeTool === "chamfer" ? "3D面取りキャンセル(Esc)" : "3D面取り"}
-            </button>
-            {edgeTool && (
-              <>
-                <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }} title="適用するサイズ(mm)">
-                  <input
-                    type="number"
-                    data-testid="edge-tool-size"
-                    value={edgeToolSize}
-                    min={0.1}
-                    step="any"
-                    onChange={(e) => {
-                      const v = Number(e.target.value);
-                      if (Number.isFinite(v) && v > 0) setEdgeToolSize(v);
-                    }}
-                    style={{ width: 50 }}
-                  />
-                  mm
-                </label>
-                <button
-                  type="button"
-                  data-testid="btn-edge-tool-apply"
-                  onClick={handleApplyEdgeTool}
-                  disabled={edgeSelection.length === 0}
-                  title="選択したエッジにフィレット/面取りを適用してフィーチャーを追加します"
-                >
-                  適用({edgeSelection.length})
-                </button>
-              </>
-            )}
-            <button
-              type="button"
-              data-testid="btn-shell"
-              className={shellTool ? "toolbar-btn-active" : undefined}
-              onClick={shellTool ? handleCancelShellTool : handleStartShellTool}
-              disabled={isShellToolDisabled()}
-              title="ボディの面をクリックして選択し(複数可)、シェル(中抜き)を適用します(Escで終了)"
-            >
-              {shellTool ? "シェルキャンセル(Esc)" : "シェル"}
-            </button>
-            {shellTool && (
-              <>
-                <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }} title="適用する肉厚(mm)">
-                  <input
-                    type="number"
-                    data-testid="shell-tool-thickness"
-                    value={shellToolThickness}
-                    min={0.1}
-                    step="any"
-                    onChange={(e) => {
-                      const v = Number(e.target.value);
-                      if (Number.isFinite(v) && v > 0) setShellToolThickness(v);
-                    }}
-                    style={{ width: 50 }}
-                  />
-                  mm
-                </label>
-                <button
-                  type="button"
-                  data-testid="btn-shell-tool-apply"
-                  onClick={handleApplyShellTool}
-                  disabled={shellSelection.length === 0}
-                  title="選択した面を開口してシェルフィーチャーを追加します"
-                >
-                  適用({shellSelection.length})
-                </button>
-              </>
-            )}
-            <button
-              type="button"
-              data-testid="btn-thread"
-              className={threadTool ? "toolbar-btn-active" : undefined}
-              onClick={threadTool ? handleCancelThreadTool : handleStartThreadTool}
-              disabled={isThreadToolDisabled()}
-              title="プリセット・雄/雌・長さを選び、平面をクリックしてねじフィーチャーを配置します(Escで終了)"
-            >
-              {threadTool ? "ねじキャンセル(Esc)" : "ねじ"}
-            </button>
-            {threadTool && (
-              <>
-                <select
-                  data-testid="thread-tool-preset"
-                  value={threadPreset}
-                  onChange={(e) => setThreadPreset(e.target.value as ThreadPreset)}
-                  title="呼び径"
-                >
-                  {THREAD_PRESET_LIST.map((p) => (
-                    <option key={p} value={p}>
-                      {p}
-                    </option>
-                  ))}
-                </select>
-                <label style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 12 }}>
-                  <input
-                    type="radio"
-                    name="thread-tool-hand"
-                    data-testid="thread-tool-hand-male"
-                    checked={threadHand === "male"}
-                    onChange={() => setThreadHand("male")}
-                  />
-                  雄
-                </label>
-                <label style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 12 }}>
-                  <input
-                    type="radio"
-                    name="thread-tool-hand"
-                    data-testid="thread-tool-hand-female"
-                    checked={threadHand === "female"}
-                    onChange={() => setThreadHand("female")}
-                  />
-                  雌
-                </label>
-                <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }} title="長さ(mm)">
-                  <input
-                    type="number"
-                    data-testid="thread-tool-length"
-                    value={threadLength}
-                    min={0.1}
-                    max={threadHand === "male" ? MALE_THREAD_MAX_LENGTH : undefined}
-                    step="any"
-                    onChange={(e) => {
-                      const v = Number(e.target.value);
-                      if (!Number.isFinite(v) || v <= 0) return;
-                      if (threadHand === "male" && v > MALE_THREAD_MAX_LENGTH) return;
-                      setThreadLength(v);
-                    }}
-                    style={{ width: 50 }}
-                  />
-                  mm
-                </label>
-                <span style={{ fontSize: 12, opacity: 0.8 }}>平面をクリックして配置</span>
-              </>
-            )}
-            <button
-              type="button"
-              data-testid="btn-part-drag"
-              className={partDragTool ? "toolbar-btn-active" : undefined}
-              onClick={partDragTool ? handleCancelPartDragTool : handleStartPartDragTool}
-              disabled={isPartDragToolDisabled()}
-              title="部品のボディをドラッグして位置を動かします(Shift+ドラッグで上下、Escで終了)"
-            >
-              {partDragTool ? "部品移動キャンセル(Esc)" : "部品移動"}
-            </button>
-            <button
-              type="button"
-              data-testid="btn-mate"
-              className={mateTool ? "toolbar-btn-active" : undefined}
-              onClick={mateTool ? handleCancelMateTool : handleStartMateTool}
-              disabled={isMateToolDisabled()}
-              title="面(平面/円筒面)を2つ順にクリックして合致(一致/距離/同軸)を作成します(Escで終了)"
-            >
-              {mateTool ? "合致キャンセル(Esc)" : "合致"}
-            </button>
-            <button
-              type="button"
-              data-testid="btn-check-interference"
-              onClick={handleCheckInterference}
-              disabled={isInterferenceCheckDisabled() || interferenceChecking}
-              title="全ボディ(部品配置を含む)をペアごとに交差判定し、干渉(重なり)があれば一覧と赤ハイライトで表示します"
-            >
-              {interferenceChecking ? "干渉チェック中…" : "干渉チェック"}
-            </button>
-            {interferenceResult && (
-              <button
-                type="button"
-                data-testid="btn-clear-interference"
-                onClick={clearInterference}
-                title="干渉チェックの結果(赤ハイライト・一覧)を消去します"
-              >
-                クリア
-              </button>
-            )}
-          </div>
-
-          <div className="toolbar-group" style={{ marginLeft: "auto" }}>
-            <button type="button" data-testid="btn-undo" onClick={undo} disabled={!canUndo} title="元に戻す (Ctrl+Z)">
-              ↶
-            </button>
-            <button type="button" data-testid="btn-redo" onClick={redo} disabled={!canRedo} title="やり直す (Ctrl+Shift+Z)">
-              ↷
-            </button>
+          <div className="ribbon-cluster">
             <label
-              style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}
+              className="ribbon-toggle"
               title="頂点・中心・中点・原点・グリッドへのスナップ、水平/垂直の軸ロックをまとめてON/OFFします(1mmグリッド)"
             >
               <input
@@ -2563,7 +2160,7 @@ export default function App() {
               />
               スナップ
             </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+            <label className="ribbon-toggle">
               <input
                 type="checkbox"
                 data-testid="toggle-sketch-visibility"
@@ -2573,83 +2170,641 @@ export default function App() {
               スケッチ表示
             </label>
           </div>
-        </div>
 
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            padding: "2px 12px 6px",
-            minHeight: 16,
-          }}
-        >
-          {activeTool && (
-            <span data-testid="drawing-shift-hint" style={{ fontSize: 11, opacity: 0.7 }}>
-              Shift押下中はスナップ・軸ロックを一時無効化
-            </span>
-          )}
-          {cornerTool && (
-            <span data-testid="corner-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
-              頂点付近をクリックして適用/解除
-            </span>
-          )}
-          {trimTool && (
-            <span data-testid="trim-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
-              削除したい区間をクリック
-            </span>
-          )}
-          {extendTool && (
-            <span data-testid="extend-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
-              延長したい線分の端点付近をクリック(緑色プレビューが延長区間)
-            </span>
-          )}
-          {dimensionTool && (
-            <span data-testid="dimension-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
-              クリックで長さ/半径/距離を指定
-            </span>
-          )}
-          {dimensionTool && dimensionPendingLabel && (
-            <span
-              data-testid="dimension-pending-status"
-              style={{ fontSize: 11, fontWeight: "bold", color: "#ffb74d" }}
-            >
-              {dimensionPendingLabel}
-            </span>
-          )}
-          {constraintTool && (
-            <span data-testid="constraint-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
-              線分/円をクリックして垂直・同心・接線を指定
-            </span>
-          )}
-          {constraintTool && constraintPendingLabel && (
-            <span
-              data-testid="constraint-pending-status"
-              style={{ fontSize: 11, fontWeight: "bold", color: "#ffb74d" }}
-            >
-              {constraintPendingLabel}
-            </span>
-          )}
-          {edgeTool && (
-            <span data-testid="edge-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
-              エッジをクリックして選択(複数可)、サイズを入力して「適用」
-            </span>
-          )}
-          {mateTool && (
-            <span data-testid="mate-tool-hint" style={{ fontSize: 11, opacity: 0.7 }}>
-              面(平面/円筒面)をクリックして一致・距離・同軸を指定
-            </span>
-          )}
-          {mateTool && matePendingLabel && (
-            <span data-testid="mate-pending-status" style={{ fontSize: 11, fontWeight: "bold", color: "#ffb74d" }}>
-              {matePendingLabel}
-            </span>
-          )}
-          <span data-testid="status-text" style={{ fontSize: 12, opacity: 0.8, marginLeft: "auto" }}>
+          <span data-testid="status-text" className="ribbon-status">
             状態: {status}
             {status === "initializing" && " (WASM初期化中…)"}
             {status === "evaluating" && " (形状計算中…)"}
           </span>
+        </div>
+
+        {/* 第2行: タブストリップ(スケッチ/フィーチャー/アセンブリ/表示)+ 常設ヘッズアップビュークラスタ。
+            ビュー操作(フィット・正対・標準ビュー)は本家SolidWorksのHeads-Up Viewツールバーと同様、
+            アクティブなタブに関わらず常時表示する(スケッチ編集中やツール実行中の視点変更など、
+            タブを跨いだ利用が非常に多いため)。表示タブ自体は下のツール行にも同じ操作を
+            ラベル付きボタンとして並べる(タブの内容として一覧できるように)。 */}
+        <div className="ribbon-tabstrip-row">
+          <div className="ribbon-tabs" role="tablist">
+            {RIBBON_TABS.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={ribbonTab === tab.id}
+                className={`ribbon-tab${ribbonTab === tab.id ? " is-active" : ""}`}
+                data-testid={`ribbon-tab-${tab.id}`}
+                onClick={() => setRibbonTab(tab.id)}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+          <div className="ribbon-headsup">
+            <button
+              type="button"
+              className="ribbon-icon-btn"
+              data-testid="btn-fit-view"
+              onClick={() => viewerRef.current?.fitToView()}
+              title="フィット: モデル全体が画面に収まるようにカメラを調整します"
+            >
+              <ToolIcon name="fit" size={17} />
+            </button>
+            <button
+              type="button"
+              className="ribbon-icon-btn"
+              data-testid="btn-align-to-plane"
+              onClick={handleAlignToPlane}
+              disabled={!selectedSketchPlane}
+              title="正対: 選択中スケッチの平面に正対する視点へカメラを移動します"
+            >
+              <ToolIcon name="normalTo" size={17} />
+            </button>
+            {STANDARD_VIEW_BUTTONS.map(({ view, label, title, icon }) => (
+              <button
+                key={view}
+                type="button"
+                className="ribbon-icon-btn"
+                data-testid={`btn-view-${view}`}
+                onClick={() => viewerRef.current?.setStandardView(view)}
+                title={`${label}: ${title}`}
+              >
+                <ToolIcon name={icon} size={17} />
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* 第3行: アクティブタブのツール群。 */}
+        <div className="ribbon-toolrow">
+          {ribbonTab === "sketch" && (
+            <>
+              <div className="ribbon-group">
+                <button
+                  type="button"
+                  className={`ribbon-tool${activeTool === "segment" ? " is-active" : ""}`}
+                  data-testid="btn-draw-segment"
+                  onClick={activeTool === "segment" ? handleCancelDrawing : handleStartSegmentDrawing}
+                  disabled={isToolDisabled("segment")}
+                  title="クリックで頂点を連結して線分・円弧のチェーンを描きます(Enter/ダブルクリックで確定、始点付近クリックで閉チェーン、Escでキャンセル)"
+                >
+                  <ToolIcon name="line" />
+                  <span className="ribbon-tool-label">{activeTool === "segment" ? "線分キャンセル(Esc)" : "線分"}</span>
+                </button>
+                {activeTool === "segment" && (
+                  <button
+                    type="button"
+                    className={`ribbon-tool-mini${arcModeActive ? " is-active" : ""}`}
+                    data-testid="btn-toggle-arc-mode"
+                    onClick={handleToggleArcMode}
+                    title="次のセグメントを円弧(3点円弧)にします(Aキーでも切替)"
+                  >
+                    <ToolIcon name="arc" size={16} /> {arcModeActive ? "円弧セグメント中(A)" : "円弧(A)"}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className={`ribbon-tool${activeTool === "rect" ? " is-active" : ""}`}
+                  data-testid="btn-draw-rect"
+                  onClick={activeTool === "rect" ? handleCancelDrawing : handleStartRectDrawing}
+                  disabled={isToolDisabled("rect")}
+                  title="2クリックで矩形を描きます(1点目=コーナー、2点目=対角コーナー。Escでキャンセル)"
+                >
+                  <ToolIcon name="rect" />
+                  <span className="ribbon-tool-label">{activeTool === "rect" ? "矩形キャンセル(Esc)" : "矩形"}</span>
+                </button>
+                <button
+                  type="button"
+                  className={`ribbon-tool${activeTool === "circle" ? " is-active" : ""}`}
+                  data-testid="btn-draw-circle"
+                  onClick={activeTool === "circle" ? handleCancelDrawing : handleStartCircleDrawing}
+                  disabled={isToolDisabled("circle")}
+                  title="2クリックで円を描きます(1点目=中心、2点目=円周上の点。Escでキャンセル)"
+                >
+                  <ToolIcon name="circle" />
+                  <span className="ribbon-tool-label">{activeTool === "circle" ? "円キャンセル(Esc)" : "円"}</span>
+                </button>
+                <button
+                  type="button"
+                  className={`ribbon-tool${activeTool === "slot" ? " is-active" : ""}`}
+                  data-testid="btn-draw-slot"
+                  onClick={activeTool === "slot" ? handleCancelDrawing : handleStartSlotDrawing}
+                  disabled={isToolDisabled("slot")}
+                  title="3クリックでスロット(長円)を描きます(始点→終点→幅。Escでキャンセル)"
+                >
+                  <ToolIcon name="slot" />
+                  <span className="ribbon-tool-label">{activeTool === "slot" ? "スロットキャンセル(Esc)" : "スロット"}</span>
+                </button>
+                <button
+                  type="button"
+                  className={`ribbon-tool${activeTool === "regularPolygon" ? " is-active" : ""}`}
+                  data-testid="btn-draw-polygon"
+                  onClick={activeTool === "regularPolygon" ? handleCancelDrawing : handleStartRegularPolygonDrawing}
+                  disabled={isToolDisabled("regularPolygon")}
+                  title="2クリックで正多角形を描きます(中心→頂点。辺数は右のセレクタ。Escでキャンセル)"
+                >
+                  <ToolIcon name="polygon" />
+                  <span className="ribbon-tool-label">{activeTool === "regularPolygon" ? "多角形キャンセル(Esc)" : "多角形"}</span>
+                </button>
+                <select
+                  data-testid="polygon-sides-select"
+                  className="ribbon-plane-select"
+                  value={polygonSides}
+                  disabled={activeTool === "regularPolygon"}
+                  onChange={(e) => setPolygonSides(Number(e.target.value))}
+                  title="多角形の辺数"
+                >
+                  {[3, 4, 5, 6, 8].map((n) => (
+                    <option key={n} value={n}>
+                      {n}辺
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className={`ribbon-tool${extendTool ? " is-active" : ""}`}
+                  data-testid="btn-extend"
+                  onClick={extendTool ? handleCancelExtendTool : handleStartExtendTool}
+                  disabled={isExtendToolDisabled()}
+                  title="直線セグメントの近い側の端点をホバーし、最初に交わる相手まで延長します(緑色プレビューが延長区間、Escで終了)"
+                >
+                  <ToolIcon name="extend" />
+                  <span className="ribbon-tool-label">{extendTool ? "延長キャンセル(Esc)" : "延長"}</span>
+                </button>
+              </div>
+
+              <div className="ribbon-group">
+                <button
+                  type="button"
+                  className={`ribbon-tool${cornerTool === "fillet" ? " is-active" : ""}`}
+                  data-testid="btn-corner-fillet"
+                  onClick={cornerTool === "fillet" ? handleCancelCornerTool : () => handleStartCornerTool("fillet")}
+                  disabled={isCornerToolDisabled("fillet")}
+                  title="頂点付近をクリックしてフィレット(丸め)を適用します(適用済みをクリックで解除、Escで終了)"
+                >
+                  <ToolIcon name="fillet" />
+                  <span className="ribbon-tool-label">{cornerTool === "fillet" ? "フィレットキャンセル(Esc)" : "フィレット"}</span>
+                </button>
+                <button
+                  type="button"
+                  className={`ribbon-tool${cornerTool === "chamfer" ? " is-active" : ""}`}
+                  data-testid="btn-corner-chamfer"
+                  onClick={cornerTool === "chamfer" ? handleCancelCornerTool : () => handleStartCornerTool("chamfer")}
+                  disabled={isCornerToolDisabled("chamfer")}
+                  title="頂点付近をクリックして面取りを適用します(適用済みをクリックで解除、Escで終了)"
+                >
+                  <ToolIcon name="chamfer" />
+                  <span className="ribbon-tool-label">{cornerTool === "chamfer" ? "面取りキャンセル(Esc)" : "面取り"}</span>
+                </button>
+                {cornerTool && (
+                  <label className="ribbon-mini-form" title="頂点クリックで適用するサイズ(mm)">
+                    <input
+                      type="number"
+                      data-testid="corner-tool-size"
+                      value={cornerSize}
+                      min={0.1}
+                      step="any"
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        if (Number.isFinite(v) && v > 0) setCornerSize(v);
+                      }}
+                    />
+                    mm
+                  </label>
+                )}
+                <button
+                  type="button"
+                  className={`ribbon-tool${trimTool ? " is-active" : ""}`}
+                  data-testid="btn-trim"
+                  onClick={trimTool ? handleCancelTrimTool : handleStartTrimTool}
+                  disabled={isTrimToolDisabled()}
+                  title="セグメントの区間をクリックして削除します(赤色プレビューが削除対象、Escで終了)"
+                >
+                  <ToolIcon name="trim" />
+                  <span className="ribbon-tool-label">{trimTool ? "トリムキャンセル(Esc)" : "トリム"}</span>
+                </button>
+              </div>
+
+              <div className="ribbon-group">
+                <button
+                  type="button"
+                  className={`ribbon-tool${dimensionTool ? " is-active" : ""}`}
+                  data-testid="btn-dimension"
+                  onClick={dimensionTool ? handleCancelDimensionTool : handleStartDimensionTool}
+                  disabled={isDimensionToolDisabled()}
+                  title="クリックで長さ/半径/距離の拘束を作成・編集します(Escで終了)"
+                >
+                  <ToolIcon name="dimension" />
+                  <span className="ribbon-tool-label">{dimensionTool ? "寸法キャンセル(Esc)" : "寸法"}</span>
+                </button>
+                <button
+                  type="button"
+                  className={`ribbon-tool${constraintTool ? " is-active" : ""}`}
+                  data-testid="btn-constraint"
+                  onClick={constraintTool ? handleCancelConstraintTool : handleStartConstraintTool}
+                  disabled={isConstraintToolDisabled()}
+                  title="線分/円を2つ順にクリックして垂直・同心・接線の拘束を作成します(Escで終了)"
+                >
+                  <ToolIcon name="constraint" />
+                  <span className="ribbon-tool-label">{constraintTool ? "拘束キャンセル(Esc)" : "拘束"}</span>
+                </button>
+              </div>
+
+              {/* スケッチ編集中でも押し出し・回転体を直接実行できるようにする(フィーチャータブと
+                  同じボタン・ハンドラを再掲。SolidWorksの「スケッチ終了」に相当する、
+                  スケッチ→フィーチャー化への自然な導線として右端に独立表示する)。 */}
+              <div className="ribbon-group ribbon-group-push">
+                <button
+                  type="button"
+                  className="ribbon-tool"
+                  data-testid="btn-add-extrude"
+                  onClick={handleAddExtrude}
+                  disabled={sketches.length === 0}
+                  title="選択中(なければ最後)のスケッチを押し出します"
+                >
+                  <ToolIcon name="extrude" />
+                  <span className="ribbon-tool-label">押し出し</span>
+                </button>
+                <button
+                  type="button"
+                  className="ribbon-tool"
+                  data-testid="btn-add-revolve"
+                  onClick={handleAddRevolve}
+                  disabled={sketches.length === 0}
+                  title="選択中(なければ最後)のスケッチをスケッチ原点を通るX/Y軸周りに回転させます"
+                >
+                  <ToolIcon name="revolve" />
+                  <span className="ribbon-tool-label">回転体</span>
+                </button>
+              </div>
+            </>
+          )}
+
+          {ribbonTab === "feature" && (
+            <>
+              <div className="ribbon-group">
+                <select
+                  data-testid="new-sketch-plane-select"
+                  className="ribbon-plane-select"
+                  value={newSketchPlane}
+                  onChange={(e) => setNewSketchPlane(e.target.value as "XY" | "XZ" | "YZ")}
+                  title="新規スケッチを作成する基準平面(基準平面クリックと同等)"
+                >
+                  <option value="XY">XY</option>
+                  <option value="XZ">XZ</option>
+                  <option value="YZ">YZ</option>
+                </select>
+                <button type="button" className="ribbon-tool" data-testid="btn-add-sketch" onClick={() => addSketch(newSketchPlane)}>
+                  <ToolIcon name="sketchStart" />
+                  <span className="ribbon-tool-label">スケッチ</span>
+                </button>
+                <button
+                  type="button"
+                  className="ribbon-tool"
+                  data-testid="btn-add-face-sketch"
+                  onClick={addFaceSketch}
+                  disabled={!selectedFace?.isPlanar}
+                  title="選択中の平面上にスケッチを追加します"
+                >
+                  <ToolIcon name="faceSketch" />
+                  <span className="ribbon-tool-label">面にスケッチ</span>
+                </button>
+                <button
+                  type="button"
+                  className="ribbon-tool"
+                  data-testid="btn-add-extrude"
+                  onClick={handleAddExtrude}
+                  disabled={sketches.length === 0}
+                  title="選択中(なければ最後)のスケッチを押し出します"
+                >
+                  <ToolIcon name="extrude" />
+                  <span className="ribbon-tool-label">押し出し</span>
+                </button>
+                <button
+                  type="button"
+                  className="ribbon-tool"
+                  data-testid="btn-add-revolve"
+                  onClick={handleAddRevolve}
+                  disabled={sketches.length === 0}
+                  title="選択中(なければ最後)のスケッチをスケッチ原点を通るX/Y軸周りに回転させます"
+                >
+                  <ToolIcon name="revolve" />
+                  <span className="ribbon-tool-label">回転体</span>
+                </button>
+              </div>
+
+              <div className="ribbon-group">
+                <button
+                  type="button"
+                  className={`ribbon-tool${edgeTool === "fillet" ? " is-active" : ""}`}
+                  data-testid="btn-edge-fillet"
+                  onClick={edgeTool === "fillet" ? handleCancelEdgeTool : () => handleStartEdgeTool("fillet")}
+                  disabled={isEdgeToolDisabled("fillet")}
+                  title="ボディのエッジをクリックして選択し、3Dフィレット(丸め)を適用します(Escで終了)"
+                >
+                  <ToolIcon name="fillet3d" />
+                  <span className="ribbon-tool-label">{edgeTool === "fillet" ? "3Dフィレットキャンセル(Esc)" : "3Dフィレット"}</span>
+                </button>
+                <button
+                  type="button"
+                  className={`ribbon-tool${edgeTool === "chamfer" ? " is-active" : ""}`}
+                  data-testid="btn-edge-chamfer"
+                  onClick={edgeTool === "chamfer" ? handleCancelEdgeTool : () => handleStartEdgeTool("chamfer")}
+                  disabled={isEdgeToolDisabled("chamfer")}
+                  title="ボディのエッジをクリックして選択し、3D面取りを適用します(Escで終了)"
+                >
+                  <ToolIcon name="chamfer3d" />
+                  <span className="ribbon-tool-label">{edgeTool === "chamfer" ? "3D面取りキャンセル(Esc)" : "3D面取り"}</span>
+                </button>
+                {edgeTool && (
+                  <>
+                    <label className="ribbon-mini-form" title="適用するサイズ(mm)">
+                      <input
+                        type="number"
+                        data-testid="edge-tool-size"
+                        value={edgeToolSize}
+                        min={0.1}
+                        step="any"
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          if (Number.isFinite(v) && v > 0) setEdgeToolSize(v);
+                        }}
+                      />
+                      mm
+                    </label>
+                    <button
+                      type="button"
+                      data-testid="btn-edge-tool-apply"
+                      onClick={handleApplyEdgeTool}
+                      disabled={edgeSelection.length === 0}
+                      title="選択したエッジにフィレット/面取りを適用してフィーチャーを追加します"
+                    >
+                      適用({edgeSelection.length})
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  className={`ribbon-tool${shellTool ? " is-active" : ""}`}
+                  data-testid="btn-shell"
+                  onClick={shellTool ? handleCancelShellTool : handleStartShellTool}
+                  disabled={isShellToolDisabled()}
+                  title="ボディの面をクリックして選択し(複数可)、シェル(中抜き)を適用します(Escで終了)"
+                >
+                  <ToolIcon name="shell" />
+                  <span className="ribbon-tool-label">{shellTool ? "シェルキャンセル(Esc)" : "シェル"}</span>
+                </button>
+                {shellTool && (
+                  <>
+                    <label className="ribbon-mini-form" title="適用する肉厚(mm)">
+                      <input
+                        type="number"
+                        data-testid="shell-tool-thickness"
+                        value={shellToolThickness}
+                        min={0.1}
+                        step="any"
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          if (Number.isFinite(v) && v > 0) setShellToolThickness(v);
+                        }}
+                      />
+                      mm
+                    </label>
+                    <button
+                      type="button"
+                      data-testid="btn-shell-tool-apply"
+                      onClick={handleApplyShellTool}
+                      disabled={shellSelection.length === 0}
+                      title="選択した面を開口してシェルフィーチャーを追加します"
+                    >
+                      適用({shellSelection.length})
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  className={`ribbon-tool${threadTool ? " is-active" : ""}`}
+                  data-testid="btn-thread"
+                  onClick={threadTool ? handleCancelThreadTool : handleStartThreadTool}
+                  disabled={isThreadToolDisabled()}
+                  title="プリセット・雄/雌・長さを選び、平面をクリックしてねじフィーチャーを配置します(Escで終了)"
+                >
+                  <ToolIcon name="thread" />
+                  <span className="ribbon-tool-label">{threadTool ? "ねじキャンセル(Esc)" : "ねじ"}</span>
+                </button>
+                {threadTool && (
+                  <>
+                    <select
+                      data-testid="thread-tool-preset"
+                      className="ribbon-plane-select"
+                      value={threadPreset}
+                      onChange={(e) => setThreadPreset(e.target.value as ThreadPreset)}
+                      title="呼び径"
+                    >
+                      {THREAD_PRESET_LIST.map((p) => (
+                        <option key={p} value={p}>
+                          {p}
+                        </option>
+                      ))}
+                    </select>
+                    <label className="ribbon-mini-form">
+                      <input
+                        type="radio"
+                        name="thread-tool-hand"
+                        data-testid="thread-tool-hand-male"
+                        checked={threadHand === "male"}
+                        onChange={() => setThreadHand("male")}
+                      />
+                      雄
+                    </label>
+                    <label className="ribbon-mini-form">
+                      <input
+                        type="radio"
+                        name="thread-tool-hand"
+                        data-testid="thread-tool-hand-female"
+                        checked={threadHand === "female"}
+                        onChange={() => setThreadHand("female")}
+                      />
+                      雌
+                    </label>
+                    <label className="ribbon-mini-form" title="長さ(mm)">
+                      <input
+                        type="number"
+                        data-testid="thread-tool-length"
+                        value={threadLength}
+                        min={0.1}
+                        max={threadHand === "male" ? MALE_THREAD_MAX_LENGTH : undefined}
+                        step="any"
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          if (!Number.isFinite(v) || v <= 0) return;
+                          if (threadHand === "male" && v > MALE_THREAD_MAX_LENGTH) return;
+                          setThreadLength(v);
+                        }}
+                      />
+                      mm
+                    </label>
+                    <span style={{ fontSize: 11, color: "var(--cad-text-muted)" }}>平面をクリックして配置</span>
+                  </>
+                )}
+              </div>
+            </>
+          )}
+
+          {ribbonTab === "assembly" && (
+            <div className="ribbon-group">
+              <button
+                type="button"
+                className="ribbon-tool"
+                data-testid="ribbon-assembly-add-part"
+                onClick={handleAddPartClick}
+                title=".l3dcadファイルを部品として原点に配置します(簡易アセンブリ)"
+              >
+                <ToolIcon name="addPart" />
+                <span className="ribbon-tool-label">部品を配置</span>
+              </button>
+              <button
+                type="button"
+                className={`ribbon-tool${partDragTool ? " is-active" : ""}`}
+                data-testid="btn-part-drag"
+                onClick={partDragTool ? handleCancelPartDragTool : handleStartPartDragTool}
+                disabled={isPartDragToolDisabled()}
+                title="部品のボディをドラッグして位置を動かします(Shift+ドラッグで上下、Escで終了)"
+              >
+                <ToolIcon name="partDrag" />
+                <span className="ribbon-tool-label">{partDragTool ? "部品移動キャンセル(Esc)" : "部品移動"}</span>
+              </button>
+              <button
+                type="button"
+                className={`ribbon-tool${mateTool ? " is-active" : ""}`}
+                data-testid="btn-mate"
+                onClick={mateTool ? handleCancelMateTool : handleStartMateTool}
+                disabled={isMateToolDisabled()}
+                title="面(平面/円筒面)を2つ順にクリックして合致(一致/距離/同軸)を作成します(Escで終了)"
+              >
+                <ToolIcon name="mate" />
+                <span className="ribbon-tool-label">{mateTool ? "合致キャンセル(Esc)" : "合致"}</span>
+              </button>
+              <button
+                type="button"
+                className="ribbon-tool"
+                data-testid="btn-check-interference"
+                onClick={handleCheckInterference}
+                disabled={isInterferenceCheckDisabled() || interferenceChecking}
+                title="全ボディ(部品配置を含む)をペアごとに交差判定し、干渉(重なり)があれば一覧と赤ハイライトで表示します"
+              >
+                <ToolIcon name="interference" />
+                <span className="ribbon-tool-label">{interferenceChecking ? "干渉チェック中…" : "干渉チェック"}</span>
+              </button>
+              {interferenceResult && (
+                <button
+                  type="button"
+                  data-testid="btn-clear-interference"
+                  onClick={clearInterference}
+                  title="干渉チェックの結果(赤ハイライト・一覧)を消去します"
+                >
+                  クリア
+                </button>
+              )}
+            </div>
+          )}
+
+          {ribbonTab === "view" && (
+            <div className="ribbon-group">
+              <button
+                type="button"
+                className="ribbon-tool"
+                data-testid="ribbon-view-fit"
+                onClick={() => viewerRef.current?.fitToView()}
+                title="モデル全体が画面に収まるようにカメラを調整します"
+              >
+                <ToolIcon name="fit" />
+                <span className="ribbon-tool-label">フィット</span>
+              </button>
+              <button
+                type="button"
+                className="ribbon-tool"
+                data-testid="ribbon-view-normal-to"
+                onClick={handleAlignToPlane}
+                disabled={!selectedSketchPlane}
+                title="選択中スケッチの平面に正対する視点へカメラを移動します"
+              >
+                <ToolIcon name="normalTo" />
+                <span className="ribbon-tool-label">正対</span>
+              </button>
+              {STANDARD_VIEW_BUTTONS.map(({ view, label, title, icon }) => (
+                <button
+                  key={view}
+                  type="button"
+                  className="ribbon-tool"
+                  data-testid={`ribbon-view-${view}`}
+                  onClick={() => viewerRef.current?.setStandardView(view)}
+                  title={title}
+                >
+                  <ToolIcon name={icon} />
+                  <span className="ribbon-tool-label">{label}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 第4行: ツール実行中のヒント(既存仕様を維持)。 */}
+        <div className="ribbon-hintrow">
+          {activeTool && (
+            <span data-testid="drawing-shift-hint" style={{ opacity: 0.75 }}>
+              Shift押下中はスナップ・軸ロックを一時無効化
+            </span>
+          )}
+          {cornerTool && (
+            <span data-testid="corner-tool-hint" style={{ opacity: 0.75 }}>
+              頂点付近をクリックして適用/解除
+            </span>
+          )}
+          {trimTool && (
+            <span data-testid="trim-tool-hint" style={{ opacity: 0.75 }}>
+              削除したい区間をクリック
+            </span>
+          )}
+          {extendTool && (
+            <span data-testid="extend-tool-hint" style={{ opacity: 0.75 }}>
+              延長したい線分の端点付近をクリック(緑色プレビューが延長区間)
+            </span>
+          )}
+          {dimensionTool && (
+            <span data-testid="dimension-tool-hint" style={{ opacity: 0.75 }}>
+              クリックで長さ/半径/距離を指定
+            </span>
+          )}
+          {dimensionTool && dimensionPendingLabel && (
+            <span data-testid="dimension-pending-status" style={{ fontWeight: "bold", color: "var(--cad-warning)" }}>
+              {dimensionPendingLabel}
+            </span>
+          )}
+          {constraintTool && (
+            <span data-testid="constraint-tool-hint" style={{ opacity: 0.75 }}>
+              線分/円をクリックして垂直・同心・接線を指定
+            </span>
+          )}
+          {constraintTool && constraintPendingLabel && (
+            <span data-testid="constraint-pending-status" style={{ fontWeight: "bold", color: "var(--cad-warning)" }}>
+              {constraintPendingLabel}
+            </span>
+          )}
+          {edgeTool && (
+            <span data-testid="edge-tool-hint" style={{ opacity: 0.75 }}>
+              エッジをクリックして選択(複数可)、サイズを入力して「適用」
+            </span>
+          )}
+          {mateTool && (
+            <span data-testid="mate-tool-hint" style={{ opacity: 0.75 }}>
+              面(平面/円筒面)をクリックして一致・距離・同軸を指定
+            </span>
+          )}
+          {mateTool && matePendingLabel && (
+            <span data-testid="mate-pending-status" style={{ fontWeight: "bold", color: "var(--cad-warning)" }}>
+              {matePendingLabel}
+            </span>
+          )}
         </div>
       </header>
 
