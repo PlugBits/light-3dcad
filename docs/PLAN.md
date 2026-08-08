@@ -959,3 +959,17 @@ coincidentを自動付与する(既存と同等の拘束があれば追加しな
 gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 466→475件全通過、`vite build`+
 `npm run size`でUIバンドルgzip 257.1KB(上限350KB)、E2E 38件全通過(`npx playwright test`を
 Bashで同期実行)。
+
+## Phase 37: AI自然言語モデル生成(`src/ai/`)
+
+ユーザーの日本語プロンプトからCadDocumentを生成する機能を追加した。LLMは内部`CadDocument`
+(幾何スナップショットを含み生成不可)ではなく、専用の「アウソリングJSON」(`authoringSchema.ts`、
+sketches/entities/segments/constraints/features)を出力し、`compile.ts`が意味検証(ID参照・
+cut前提のボディ存在・寸法の正値性)を経て内部形式へ変換する。`generate.ts`が
+`@anthropic-ai/sdk`(動的import、メインバンドル非同梱)で構造化出力を要求し、コンパイル→
+スケッチ拘束求解→Worker経由のドライラン評価のいずれかが失敗すれば最大3回まで自己修復する。
+UI(`AiGeneratePanel.tsx`)はReact.lazy()で遅延読み込みし、APIキー無しでも使えるJSON貼り付け
+経路も備える。gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 475→503件全通過、
+`vite build`+`npm run size`でUIバンドルgzip 257.1KB→257.6KB(SDKは別チャンク43.1KB、
+AI生成パネルは別チャンク11.0KB、いずれもメインバンドル対象外)、E2E 38→40件全通過
+(`npx playwright test`をBashで同期実行)。

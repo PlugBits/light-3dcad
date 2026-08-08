@@ -35,6 +35,16 @@ Phase 28a〜cでアセンブリ機能を強化しました。部品のボディ�
 
 Phase 35b-1では、スケッチ拘束ソルバ(Phase 20で導入した自前実装のLevenberg-Marquardt法)を、FreeCADのSketcherが使う実績のある2D幾何拘束ソルバ[PlaneGCS](https://github.com/Salusoft89/planegcs)(WASM移植版、LGPL-2.1-or-later)へ置き換えました。全拘束種別を移植し、以前は自前ソルバが局所解に迷い込んで誤って「矛盾」判定していた複合ケース(一致チェーンで繋がった線分群が円に接するまで剛体的に動く必要があるケース等)も解けるようになっています。PlaneGCSはメインバンドルには含めず動的importで別チャンク化しているため、初回表示の読み込みサイズへの影響はごくわずかです。Phase 35cで自前実装のLevenberg-Marquardt法(旧ソルバ)を完全に撤去し、以後スケッチ拘束solveは常にPlaneGCS経由です。アプリ起動時にバックグラウンドで初期化を開始し、完了前の(アプリ起動直後のごく短い)ウィンドウにドキュメント更新が発生した場合は初期化完了を待ってから解きます。
 
+## AIモデル生成
+
+ツールバーの「AI生成」ボタンから、自然言語のプロンプト(例:「幅100 高さ50 厚み10の板の中央にφ20の穴」)でモデルを生成できます。ブラウザから[Anthropic API](https://console.anthropic.com/)を直接呼び出す方式(BYOK、Bring Your Own Key)で、サーバー側の仲介は一切ありません。
+
+- **APIキーが必要です**。[Anthropic Console](https://console.anthropic.com/)で取得したAPIキーをパネルに入力してください。キーはこの端末のlocalStorageにのみ保存され、Anthropic API以外には送信されません。
+- **APIコストはユーザー負担です**(BYOKのため)。生成1回あたりのコストは選択したモデル・プロンプトの長さ・自己修復リトライ回数(最大3回)により変動します。既定モデルはClaude Opus 5です(Claude Sonnet 5 / Claude Haiku 4.5も選択可)。
+- **APIキー無しでも使えます**。「詳細」から「プロンプト仕様をコピー」して外部のAIチャット(ChatGPT等)に貼り付け、返ってきたJSONを本アプリに貼り付けて読み込む経路も用意しています。
+- 生成されたモデルは通常のフィーチャーツリーとして読み込まれ、以降は数値編集・寸法駆動編集など既存の機能でそのまま編集できます。
+- LLMが出力する形式は内部の`CadDocument`ではなく、専用の「アウソリングJSON」(`src/ai/authoringSchema.ts`)です。生成→検証(`src/ai/compile.ts`)→スケッチ拘束求解→評価のいずれかに失敗した場合、エラー内容をAIへ伝えて自動的に再生成します(最大3回)。
+
 ## 技術スタック
 
 - **React + TypeScript + Vite** — UIとビルド
@@ -42,6 +52,7 @@ Phase 35b-1では、スケッチ拘束ソルバ(Phase 20で導入した自前実
 - **Replicad + opencascade.js(WASM)** — B-Rep形状の生成・ブーリアン演算。Web Worker内でのみ実行し、UIスレッドをブロックしない
 - **PlaneGCS**(`@salusoft89/planegcs`、WASM、**LGPL-2.1-or-later**) — 2Dスケッチの拘束ソルバ。動的importでメインバンドルから分離しています。ライセンス条文は`node_modules/@salusoft89/planegcs/LICENSE`を参照してください
 - **Zustand** — ドキュメント状態(フィーチャー列)とUI状態の管理
+- **@anthropic-ai/sdk** — AIモデル生成(BYOK)。動的importでメインバンドルから分離しており、AI生成パネルを開かない限り読み込まれません
 - **Vitest** — 単体・統合テスト
 - **Playwright** — E2E動作検証(サブパス配信検証等。リポジトリには常設のE2Eスイートとしてはコミットしていません)
 
@@ -51,8 +62,9 @@ Phase 35b-1では、スケッチ拘束ソルバ(Phase 20で導入した自前実
 
 ```
 src/
+├── ai/           # AIモデル生成(アウソリングJSONスキーマ・コンパイラ・生成ループ、純粋TS+動的import)
 ├── app/          # Reactシェル(レイアウト・ツールバー)
-├── components/   # フィーチャーツリー、スケッチ/押し出し編集パネル
+├── components/   # フィーチャーツリー、スケッチ/押し出し編集パネル、AI生成パネル
 ├── model/        # 正本。フィーチャーデータの型と操作(純粋TS)
 ├── project/      # プロジェクトファイル(.l3dcad)のserialize/deserialize(純粋TS)
 ├── sketch/       # スナップ・軸ロック・寸法駆動編集・コーナー幾何等の純粋TSロジック
