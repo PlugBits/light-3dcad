@@ -973,3 +973,14 @@ UI(`AiGeneratePanel.tsx`)はReact.lazy()で遅延読み込みし、APIキー無�
 `vite build`+`npm run size`でUIバンドルgzip 257.1KB→257.6KB(SDKは別チャンク43.1KB、
 AI生成パネルは別チャンク11.0KB、いずれもメインバンドル対象外)、E2E 38→40件全通過
 (`npx playwright test`をBashで同期実行)。
+
+## Phase 37b: AIモデル生成にOpenAIプロバイダを追加(`src/ai/openaiClient.ts`, `src/ai/provider.ts`)
+
+第2のLLMプロバイダとしてOpenAIを追加した。`openaiClient.ts`がopenai SDK(動的import、メイン
+バンドル非同梱)のResponses API(`text.format:{type:"json_schema",strict:true}`)で
+AUTHORING_JSON_SCHEMAをそのまま構造化出力に使い(strictモード要件を既に満たしていたためスキーマ
+アダプタ不要)、`provider.ts`が`Provider`("anthropic"|"openai")からcallModel実装への橋渡しを担う。
+`AiGeneratePanel.tsx`にプロバイダ選択・プロバイダ別APIキー/モデル欄(Anthropicは既存キー名を
+継続、OpenAIは既定候補+自由入力)を追加。gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、
+Vitest 503→517件全通過、`vite build`+`npm run size`でメインバンドルgzip 257.6KB(変化なし、
+openai SDKは別チャンク35.6KB)、E2E 40→41件全通過(`npx playwright test`を2分割でBash同期実行)。

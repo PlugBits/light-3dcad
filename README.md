@@ -37,13 +37,13 @@ Phase 35b-1では、スケッチ拘束ソルバ(Phase 20で導入した自前実
 
 ## AIモデル生成
 
-ツールバーの「AI生成」ボタンから、自然言語のプロンプト(例:「幅100 高さ50 厚み10の板の中央にφ20の穴」)でモデルを生成できます。ブラウザから[Anthropic API](https://console.anthropic.com/)を直接呼び出す方式(BYOK、Bring Your Own Key)で、サーバー側の仲介は一切ありません。
+ツールバーの「AI生成」ボタンから、自然言語のプロンプト(例:「幅100 高さ50 厚み10の板の中央にφ20の穴」)でモデルを生成できます。ブラウザから[Anthropic API](https://console.anthropic.com/)または[OpenAI API](https://platform.openai.com/)を直接呼び出す方式(BYOK、Bring Your Own Key)で、サーバー側の仲介は一切ありません。プロバイダはパネル上部のドロップダウンでAnthropic(Claude)/OpenAI(GPT)から選べます。
 
-- **APIキーが必要です**。[Anthropic Console](https://console.anthropic.com/)で取得したAPIキーをパネルに入力してください。キーはこの端末のlocalStorageにのみ保存され、Anthropic API以外には送信されません。
-- **APIコストはユーザー負担です**(BYOKのため)。生成1回あたりのコストは選択したモデル・プロンプトの長さ・自己修復リトライ回数(最大3回)により変動します。既定モデルはClaude Opus 5です(Claude Sonnet 5 / Claude Haiku 4.5も選択可)。
+- **APIキーが必要です**。プロバイダごとに[Anthropic Console](https://console.anthropic.com/)または[OpenAI Platform](https://platform.openai.com/)で取得したAPIキーをパネルに入力してください。キーはこの端末のlocalStorageに(プロバイダごとに別々のキーとして)保存され、選択中のプロバイダのAPI以外には送信されません。
+- **APIコストはユーザー負担です**(BYOKのため)。生成1回あたりのコストは選択したモデル・プロンプトの長さ・自己修復リトライ回数(最大3回)により変動します。既定モデルはAnthropicがClaude Opus 5(Claude Sonnet 5 / Claude Haiku 4.5も選択可)、OpenAIがGPT-5.5(GPT-5.4 / GPT-5.4 miniも選択可、またはテキスト欄への直接入力で任意のモデルIDを指定可能)です。
 - **APIキー無しでも使えます**。「詳細」から「プロンプト仕様をコピー」して外部のAIチャット(ChatGPT等)に貼り付け、返ってきたJSONを本アプリに貼り付けて読み込む経路も用意しています。
 - 生成されたモデルは通常のフィーチャーツリーとして読み込まれ、以降は数値編集・寸法駆動編集など既存の機能でそのまま編集できます。
-- LLMが出力する形式は内部の`CadDocument`ではなく、専用の「アウソリングJSON」(`src/ai/authoringSchema.ts`)です。生成→検証(`src/ai/compile.ts`)→スケッチ拘束求解→評価のいずれかに失敗した場合、エラー内容をAIへ伝えて自動的に再生成します(最大3回)。
+- LLMが出力する形式は内部の`CadDocument`ではなく、専用の「アウソリングJSON」(`src/ai/authoringSchema.ts`)です。生成→検証(`src/ai/compile.ts`)→スケッチ拘束求解→評価のいずれかに失敗した場合、エラー内容をAIへ伝えて自動的に再生成します(最大3回)。両プロバイダとも構造化出力(JSON Schema)でこのスキーマに従ったJSONを強制します。
 
 ## 技術スタック
 
@@ -52,7 +52,7 @@ Phase 35b-1では、スケッチ拘束ソルバ(Phase 20で導入した自前実
 - **Replicad + opencascade.js(WASM)** — B-Rep形状の生成・ブーリアン演算。Web Worker内でのみ実行し、UIスレッドをブロックしない
 - **PlaneGCS**(`@salusoft89/planegcs`、WASM、**LGPL-2.1-or-later**) — 2Dスケッチの拘束ソルバ。動的importでメインバンドルから分離しています。ライセンス条文は`node_modules/@salusoft89/planegcs/LICENSE`を参照してください
 - **Zustand** — ドキュメント状態(フィーチャー列)とUI状態の管理
-- **@anthropic-ai/sdk** — AIモデル生成(BYOK)。動的importでメインバンドルから分離しており、AI生成パネルを開かない限り読み込まれません
+- **@anthropic-ai/sdk / openai** — AIモデル生成(BYOK、Anthropic/OpenAIの2プロバイダ対応)。いずれも動的importでメインバンドルから分離しており、AI生成パネルを開かない限り読み込まれません
 - **Vitest** — 単体・統合テスト
 - **Playwright** — E2E動作検証(サブパス配信検証等。リポジトリには常設のE2Eスイートとしてはコミットしていません)
 
