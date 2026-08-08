@@ -1,21 +1,36 @@
-// フィーチャーツリーパネル。doc.features を順序どおり一覧表示し、選択/削除を行う。
+// フィーチャーツリーパネル(SolidWorks風FeatureManager、Phase 38b)。doc.features を順序どおり
+// 一覧表示し、選択/削除/インライン改名を行う。
 // SolidWorks風ロールバックバー(Phase 25): 各フィーチャー行の間+末尾に常時クリック可能な
 // 挿入スロットを表示し、クリックでバーをその位置へ移動する(ドラッグはサポートしない)。
 // バー以降(index >= 有効フィーチャー数)のフィーチャーはグレーアウト表示にし、選択不可にする。
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CadDocument, Feature, FeatureId, MateFeature } from "../model/types";
 import { effectiveFeatureCount, mateHasSubsequentBodyEdit } from "../model/document";
+import { ToolIcon, type ToolIconName } from "./ToolIcon";
 
-const ICONS: Record<Feature["type"], string> = {
-  sketch: "▢", // □
-  extrude: "⬆", // ⬆
-  fillet3d: "◠", // 3Dフィレット/面取り(Phase 25a)
-  shell: "▨", // シェル(中抜き、Phase 25b)
-  revolve: "◍", // 回転体(Phase 25b)
-  thread: "⚙", // ねじ(Phase 25c)
-  partInstance: "▣", // 部品配置(簡易アセンブリ、Phase 27b)
-  mate: "⛓", // 合致(メイト、Phase 28c)
-};
+/** フィーチャー種別ごとの行アイコン(ToolIconの共有SVGを再利用、Phase 38b)。 */
+function iconFor(feature: Feature): ToolIconName {
+  switch (feature.type) {
+    case "sketch":
+      return feature.plane.kind === "face" ? "faceSketch" : "sketchStart";
+    case "extrude":
+      return "extrude";
+    case "revolve":
+      return "revolve";
+    case "fillet3d":
+      return feature.kind === "fillet" ? "fillet3d" : "chamfer3d";
+    case "shell":
+      return "shell";
+    case "thread":
+      return "thread";
+    case "partInstance":
+      return "addPart";
+    case "mate":
+      return "mate";
+    default:
+      return "sketchStart";
+  }
+}
 
 const TYPE_LABEL: Record<Feature["type"], string> = {
   sketch: "スケッチ",
@@ -64,12 +79,14 @@ interface FeatureTreeProps {
   onDelete: (featureId: FeatureId) => void;
   /** ロールバックバーの移動。indexはfeatures先頭からの有効フィーチャー数(末尾はnull)。 */
   onSetRollback: (index: number | null) => void;
+  /** インライン改名(名前ダブルクリック→編集確定、Phase 38b)。 */
+  onRename: (featureId: FeatureId, name: string) => void;
 }
 
 /**
  * ロールバックバーの挿入スロット。slotIndexは「このスロットにバーを置いたときの有効フィーチャー数」。
- * activeCountと一致する場合は実際のバー(横線)として表示し、それ以外は薄い当たり判定のみのバーとして
- * ホバー時に見える細い線を表示する。
+ * activeCountと一致する場合は実際のバー(グラブバー)として表示し、それ以外は薄い当たり判定のみの
+ * バーとして、ホバー時に見えるプレビュー線を表示する。
  */
 function RollbackSlot({
   slotIndex,
@@ -91,105 +108,176 @@ function RollbackSlot({
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       title="ロールバックバーをここに移動"
-      style={{
-        height: 8,
-        margin: "1px 0",
-        cursor: "pointer",
-        display: "flex",
-        alignItems: "center",
-      }}
+      className="rollback-slot"
     >
       <div
         data-testid={isBarHere ? "rollback-bar" : undefined}
-        style={{
-          height: isBarHere ? 3 : 1,
-          width: "100%",
-          borderRadius: 2,
-          background: isBarHere ? "#3b82f6" : hovered ? "rgba(150,170,255,0.5)" : "transparent",
-          transition: "background 0.1s",
-        }}
-      />
+        className={`rollback-line${isBarHere ? " is-active" : ""}${hovered ? " is-hovered" : ""}`}
+      >
+        {isBarHere && <span className="rollback-grip" aria-hidden="true" />}
+      </div>
     </div>
   );
 }
 
-export function FeatureTree({ doc, selectedFeatureId, errorFeatureId, onSelect, onDelete, onSetRollback }: FeatureTreeProps) {
-  if (doc.features.length === 0) {
-    return <p style={{ fontSize: 13, opacity: 0.7 }}>フィーチャーがありません。</p>;
+/** フィーチャー行1件。インライン改名(ダブルクリック)・ホバー時のみ表示するアクション群を持つ。 */
+function FeatureRow({
+  feature,
+  isActive,
+  selected,
+  hasError,
+  showMateOrderWarning,
+  onSelect,
+  onDelete,
+  onRename,
+}: {
+  feature: Feature;
+  isActive: boolean;
+  selected: boolean;
+  hasError: boolean;
+  showMateOrderWarning: boolean;
+  onSelect: () => void;
+  onDelete: () => void;
+  onRename: (name: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(feature.name);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (editing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [editing]);
+
+  function startEdit() {
+    if (!isActive) return;
+    setDraft(feature.name);
+    setEditing(true);
   }
 
+  function commit() {
+    const trimmed = draft.trim();
+    if (trimmed && trimmed !== feature.name) onRename(trimmed);
+    setEditing(false);
+  }
+
+  function cancel() {
+    setDraft(feature.name);
+    setEditing(false);
+  }
+
+  const displayName = feature.type === "partInstance" ? `部品: ${feature.name}` : feature.name;
+
+  return (
+    <div
+      data-testid={`feature-item-${feature.name}`}
+      onClick={isActive ? onSelect : undefined}
+      className={`feature-row${isActive ? "" : " is-suppressed"}${selected ? " is-selected" : ""}${hasError ? " has-error" : ""}`}
+    >
+      <span className="feature-row-icon" aria-hidden="true">
+        <ToolIcon name={iconFor(feature)} size={15} />
+      </span>
+      {editing ? (
+        <input
+          ref={inputRef}
+          type="text"
+          className="feature-row-rename-input"
+          data-testid={`feature-rename-input-${feature.id}`}
+          value={draft}
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commit();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              cancel();
+            }
+          }}
+        />
+      ) : (
+        <span className="feature-row-name" onDoubleClick={startEdit} title="ダブルクリックで名前を変更">
+          {displayName}
+          {feature.type !== "partInstance" && <span className="feature-row-type-label"> ({typeLabel(feature)})</span>}
+        </span>
+      )}
+      {hasError && (
+        <span className="feature-row-warning" title="評価エラーがあります" aria-hidden="true">
+          ⚠
+        </span>
+      )}
+      {!hasError && showMateOrderWarning && (
+        <span
+          data-testid={`mate-order-warning-${feature.name}`}
+          className="feature-row-warning feature-row-warning-soft"
+          title="この合致より後ろに押し出し/回転体のカット・追加があります。合致は全フィーチャー評価後にまとめて解決されるため、それらの操作は合致で解決される前の配置を基準に行われます。"
+        >
+          ⚠
+        </span>
+      )}
+      <span className="feature-row-actions">
+        <button
+          type="button"
+          title="削除"
+          data-testid={`feature-delete-${feature.name}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+          }}
+          className="feature-row-action-btn"
+        >
+          ✕
+        </button>
+      </span>
+    </div>
+  );
+}
+
+export function FeatureTree({ doc, selectedFeatureId, errorFeatureId, onSelect, onDelete, onSetRollback, onRename }: FeatureTreeProps) {
   const total = doc.features.length;
   const activeCount = effectiveFeatureCount(doc);
 
   return (
-    <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 0 }}>
-      {doc.features.map((feature, index) => {
-        const selected = feature.id === selectedFeatureId;
-        const hasError = feature.id === errorFeatureId;
-        const isActive = index < activeCount;
-        return (
-          <li key={feature.id}>
-            <RollbackSlot slotIndex={index} activeCount={activeCount} total={total} onSetRollback={onSetRollback} />
-            <div
-              data-testid={`feature-item-${feature.name}`}
-              onClick={isActive ? () => onSelect(feature.id) : undefined}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                padding: "6px 8px",
-                borderRadius: 4,
-                cursor: isActive ? "pointer" : "default",
-                opacity: isActive ? 1 : 0.45,
-                fontStyle: isActive ? "normal" : "italic",
-                background: selected ? "rgba(100, 150, 255, 0.25)" : "transparent",
-                border: hasError ? "1px solid #ff6b6b" : "1px solid transparent",
-              }}
-            >
-              <span aria-hidden="true">{ICONS[feature.type]}</span>
-              <span style={{ flex: 1, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {feature.type === "partInstance" ? (
-                  `部品: ${feature.name}`
-                ) : (
-                  <>
-                    {feature.name}
-                    <span style={{ opacity: 0.6 }}> ({typeLabel(feature)})</span>
-                  </>
-                )}
-              </span>
-              {hasError && (
-                <span title="評価エラーがあります" style={{ color: "#ff6b6b" }}>
-                  ⚠
-                </span>
-              )}
-              {!hasError && feature.type === "mate" && mateHasSubsequentBodyEdit(doc, feature.id) && (
-                <span
-                  data-testid={`mate-order-warning-${feature.name}`}
-                  title="この合致より後ろに押し出し/回転体のカット・追加があります。合致は全フィーチャー評価後にまとめて解決されるため、それらの操作は合致で解決される前の配置を基準に行われます。"
-                  style={{ color: "#ffb74d" }}
-                >
-                  ⚠
-                </span>
-              )}
-              <button
-                type="button"
-                title="削除"
-                data-testid={`feature-delete-${feature.name}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDelete(feature.id);
-                }}
-                style={{ fontSize: 11, lineHeight: 1, padding: "2px 6px" }}
-              >
-                ✕
-              </button>
-            </div>
+    <div className="feature-tree">
+      <div className="feature-tree-header" data-testid="feature-tree-header">
+        <span className="feature-tree-header-icon" aria-hidden="true">
+          <ToolIcon name="addPart" size={16} />
+        </span>
+        <span className="feature-tree-header-name">部品1</span>
+      </div>
+      {total === 0 ? (
+        <p className="feature-tree-empty">フィーチャーがありません。</p>
+      ) : (
+        <ul className="feature-tree-list">
+          {doc.features.map((feature, index) => {
+            const selected = feature.id === selectedFeatureId;
+            const hasError = feature.id === errorFeatureId;
+            const isActive = index < activeCount;
+            return (
+              <li key={feature.id}>
+                <RollbackSlot slotIndex={index} activeCount={activeCount} total={total} onSetRollback={onSetRollback} />
+                <FeatureRow
+                  feature={feature}
+                  isActive={isActive}
+                  selected={selected}
+                  hasError={hasError}
+                  showMateOrderWarning={feature.type === "mate" && mateHasSubsequentBodyEdit(doc, feature.id)}
+                  onSelect={() => onSelect(feature.id)}
+                  onDelete={() => onDelete(feature.id)}
+                  onRename={(name) => onRename(feature.id, name)}
+                />
+              </li>
+            );
+          })}
+          <li>
+            <RollbackSlot slotIndex={total} activeCount={activeCount} total={total} onSetRollback={onSetRollback} />
           </li>
-        );
-      })}
-      <li>
-        <RollbackSlot slotIndex={total} activeCount={activeCount} total={total} onSetRollback={onSetRollback} />
-      </li>
-    </ul>
+        </ul>
+      )}
+    </div>
   );
 }

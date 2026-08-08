@@ -29,6 +29,7 @@ import {
   getDependentFeatureIds,
   patchPartInstanceFeature,
   removeSketchElementCascade,
+  renameFeature,
   replaceFillet3DEdges,
   replaceMateFaces,
   replaceShellFaces,
@@ -2178,11 +2179,11 @@ export default function App() {
           </span>
         </div>
 
-        {/* 第2行: タブストリップ(スケッチ/フィーチャー/アセンブリ/表示)+ 常設ヘッズアップビュークラスタ。
-            ビュー操作(フィット・正対・標準ビュー)は本家SolidWorksのHeads-Up Viewツールバーと同様、
-            アクティブなタブに関わらず常時表示する(スケッチ編集中やツール実行中の視点変更など、
-            タブを跨いだ利用が非常に多いため)。表示タブ自体は下のツール行にも同じ操作を
-            ラベル付きボタンとして並べる(タブの内容として一覧できるように)。 */}
+        {/* 第2行: タブストリップ(スケッチ/フィーチャー/アセンブリ/表示)。
+            ビュー操作(フィット・正対・標準ビュー)は本家SolidWorksのHeads-Up Viewツールバーと同様
+            キャンバス上に浮かせたフローティングツールバー(下記<main>内、Phase 38bでリボンから
+            ビューポートへ移設)としてタブに関わらず常時表示する。表示タブ自体は下のツール行にも
+            同じ操作をラベル付きボタンとして並べる(タブの内容として一覧できるように)。 */}
         <div className="ribbon-tabstrip-row">
           <div className="ribbon-tabs" role="tablist">
             {RIBBON_TABS.map((tab) => (
@@ -2196,39 +2197,6 @@ export default function App() {
                 onClick={() => setRibbonTab(tab.id)}
               >
                 {tab.label}
-              </button>
-            ))}
-          </div>
-          <div className="ribbon-headsup">
-            <button
-              type="button"
-              className="ribbon-icon-btn"
-              data-testid="btn-fit-view"
-              onClick={() => viewerRef.current?.fitToView()}
-              title="フィット: モデル全体が画面に収まるようにカメラを調整します"
-            >
-              <ToolIcon name="fit" size={17} />
-            </button>
-            <button
-              type="button"
-              className="ribbon-icon-btn"
-              data-testid="btn-align-to-plane"
-              onClick={handleAlignToPlane}
-              disabled={!selectedSketchPlane}
-              title="正対: 選択中スケッチの平面に正対する視点へカメラを移動します"
-            >
-              <ToolIcon name="normalTo" size={17} />
-            </button>
-            {STANDARD_VIEW_BUTTONS.map(({ view, label, title, icon }) => (
-              <button
-                key={view}
-                type="button"
-                className="ribbon-icon-btn"
-                data-testid={`btn-view-${view}`}
-                onClick={() => viewerRef.current?.setStandardView(view)}
-                title={`${label}: ${title}`}
-              >
-                <ToolIcon name={icon} size={17} />
               </button>
             ))}
           </div>
@@ -2863,30 +2831,28 @@ export default function App() {
           style={{
             width: 320,
             padding: 16,
-            borderRight: "1px solid #444",
+            borderRight: "1px solid var(--cad-border)",
             display: "flex",
             flexDirection: "column",
             gap: 12,
             overflowY: "auto",
           }}
         >
-          <div>
-            <h2 style={{ fontSize: 13, margin: "0 0 8px", opacity: 0.8 }}>フィーチャーツリー</h2>
-            <FeatureTree
-              doc={doc}
-              selectedFeatureId={selectedFeatureId}
-              errorFeatureId={errorFeatureId}
-              onSelect={selectFeature}
-              onDelete={handleDelete}
-              onSetRollback={setRollbackIndex}
-            />
-          </div>
+          <FeatureTree
+            doc={doc}
+            selectedFeatureId={selectedFeatureId}
+            errorFeatureId={errorFeatureId}
+            onSelect={selectFeature}
+            onDelete={handleDelete}
+            onSetRollback={setRollbackIndex}
+            onRename={(featureId, name) => updateDocument((d) => renameFeature(d, featureId, name))}
+          />
 
           {selectedFace && (
             <div
               data-testid="selected-face-panel"
               style={{
-                borderTop: "1px solid #444",
+                borderTop: "1px solid var(--cad-border)",
                 paddingTop: 12,
                 fontSize: 12,
                 display: "flex",
@@ -2913,7 +2879,7 @@ export default function App() {
             <div
               data-testid="interference-panel"
               style={{
-                borderTop: "1px solid #444",
+                borderTop: "1px solid var(--cad-border)",
                 paddingTop: 12,
                 fontSize: 12,
                 display: "flex",
@@ -2979,7 +2945,7 @@ export default function App() {
           )}
 
           {selectedFeature && (
-            <div style={{ borderTop: "1px solid #444", paddingTop: 12 }}>
+            <div style={{ borderTop: "1px solid var(--cad-border)", paddingTop: 12 }}>
               {selectedFeature.type === "sketch" && (
                 <SketchEditor sketch={selectedFeature} onNotice={showTransientMessage} diagnostics={selectedSketchDiagnostics} />
               )}
@@ -3038,6 +3004,42 @@ export default function App() {
 
         <main style={{ flex: 1, position: "relative" }}>
           <div ref={viewerContainerRef} data-testid="viewer-container" style={{ width: "100%", height: "100%" }} />
+          {/* ヘッズアップビュークラスタ(Phase 38b): SolidWorks同様、キャンバス上部中央に浮かべる
+              半透明ツールバー。ボタン・testid・ハンドラは旧リボン第2行のものをそのまま移設した
+              (バーの外側はpointer-eventsを持たずスケッチクリックの邪魔をしない)。 */}
+          <div className="viewport-headsup">
+            <button
+              type="button"
+              className="ribbon-icon-btn"
+              data-testid="btn-fit-view"
+              onClick={() => viewerRef.current?.fitToView()}
+              title="フィット: モデル全体が画面に収まるようにカメラを調整します"
+            >
+              <ToolIcon name="fit" size={17} />
+            </button>
+            <button
+              type="button"
+              className="ribbon-icon-btn"
+              data-testid="btn-align-to-plane"
+              onClick={handleAlignToPlane}
+              disabled={!selectedSketchPlane}
+              title="正対: 選択中スケッチの平面に正対する視点へカメラを移動します"
+            >
+              <ToolIcon name="normalTo" size={17} />
+            </button>
+            {STANDARD_VIEW_BUTTONS.map(({ view, label, title, icon }) => (
+              <button
+                key={view}
+                type="button"
+                className="ribbon-icon-btn"
+                data-testid={`btn-view-${view}`}
+                onClick={() => viewerRef.current?.setStandardView(view)}
+                title={`${label}: ${title}`}
+              >
+                <ToolIcon name={icon} size={17} />
+              </button>
+            ))}
+          </div>
           {selectedFeature?.type === "sketch" && selectedSketchPlane && (
             <DimensionOverlay
               sketch={selectedFeature}

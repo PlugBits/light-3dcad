@@ -406,6 +406,225 @@ h3 {
   font-weight: bold;
 }
 
+/* ============================================================
+   FeatureManagerツリー(Phase 38b): SolidWorks風の部品ツリー再スキン。
+   ============================================================ */
+.feature-tree {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--cad-border);
+  border-radius: var(--cad-radius-md);
+  background: var(--cad-panel);
+  overflow: hidden;
+}
+.feature-tree-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: var(--cad-space-3) var(--cad-space-4);
+  background: var(--cad-panel-alt);
+  border-bottom: 1px solid var(--cad-border);
+}
+.feature-tree-header-icon {
+  display: flex;
+  color: var(--cad-accent);
+}
+.feature-tree-header-name {
+  font-size: var(--cad-fs-md);
+  font-weight: 700;
+  color: var(--cad-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.feature-tree-empty {
+  margin: 0;
+  padding: var(--cad-space-5) var(--cad-space-4);
+  font-size: var(--cad-fs-sm);
+  color: var(--cad-text-faint);
+}
+.feature-tree-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--cad-space-2) 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* ロールバックバー挿入スロット(常時当たり判定+ホバー/選択時に見える線)。 */
+.rollback-slot {
+  height: 7px;
+  margin: 0 var(--cad-space-2);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+.rollback-line {
+  position: relative;
+  height: 1px;
+  width: 100%;
+  border-radius: 2px;
+  background: transparent;
+  transition: background-color 0.12s ease, height 0.12s ease;
+}
+.rollback-line.is-hovered:not(.is-active) {
+  height: 2px;
+  background: var(--cad-accent-soft);
+}
+/* 実際のロールバックバー: SolidWorksの「掴める」水平グラブバーを模した太い青線+中央グリップ。 */
+.rollback-line.is-active {
+  height: 3px;
+  background: var(--cad-accent);
+  box-shadow: 0 0 0 1px var(--cad-panel);
+}
+.rollback-grip {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 22px;
+  height: 5px;
+  transform: translate(-50%, -50%);
+  border-radius: 3px;
+  background: var(--cad-accent-hover);
+}
+
+/* フィーチャー行(~28px、アイコン+名前+警告+ホバー時のみのアクション)。 */
+.feature-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  padding: 1px var(--cad-space-4);
+  margin: 0 var(--cad-space-2);
+  border-radius: var(--cad-radius-sm);
+  cursor: pointer;
+  border-left: 3px solid transparent;
+}
+.feature-row:hover:not(.is-suppressed) {
+  background: var(--cad-hover);
+}
+.feature-row.is-selected {
+  background: var(--cad-accent-soft);
+  border-left-color: var(--cad-accent);
+}
+.feature-row.is-suppressed {
+  opacity: 0.45;
+  font-style: italic;
+  cursor: default;
+}
+.feature-row.has-error {
+  outline: 1px solid var(--cad-danger);
+  outline-offset: -1px;
+}
+.feature-row-icon {
+  display: flex;
+  flex-shrink: 0;
+  color: var(--cad-text-muted);
+}
+.feature-row.is-selected .feature-row-icon {
+  color: var(--cad-accent-hover);
+}
+.feature-row-name {
+  flex: 1;
+  font-size: var(--cad-fs-md);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.feature-row-type-label {
+  color: var(--cad-text-faint);
+}
+.feature-row-rename-input {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--cad-fs-md);
+  padding: 1px 4px;
+}
+.feature-row-warning {
+  flex-shrink: 0;
+  font-size: var(--cad-fs-sm);
+  color: var(--cad-danger);
+  line-height: 1;
+}
+.feature-row-warning-soft {
+  color: var(--cad-warning);
+}
+.feature-row-actions {
+  flex-shrink: 0;
+  display: flex;
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+.feature-row:hover .feature-row-actions,
+.feature-row.is-selected .feature-row-actions {
+  opacity: 1;
+}
+.feature-row-action-btn {
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 5px;
+  color: var(--cad-text-muted);
+}
+.feature-row-action-btn:hover {
+  color: var(--cad-danger);
+  border-color: var(--cad-danger);
+}
+
+/* ============================================================
+   サイドパネル(フィーチャー編集エディタ)の軽い統一パス(Phase 38b)。
+   既存の各エディタはインラインstyleで余白・文字サイズを個別指定しているため構造は変えず、
+   見出し・入力欄・区切り線まわりの共通トーンだけをここで揃える。
+   ============================================================ */
+aside h2,
+aside h3 {
+  font-weight: 700;
+  color: var(--cad-text);
+  letter-spacing: 0.01em;
+  padding-bottom: var(--cad-space-2);
+  border-bottom: 1px solid var(--cad-border);
+}
+aside label {
+  color: var(--cad-text-muted);
+}
+aside input[type="text"],
+aside input[type="number"],
+aside select {
+  width: 100%;
+}
+
+/* ============================================================
+   ビューポートのフローティングヘッズアップツールバー(Phase 38b)。
+   キャンバス中央上部に半透明の丸みを帯びたバーとして重ね、フィット・正対・標準ビューを
+   タブに関わらず操作できるようにする(旧: リボン第2行の常設クラスタを移設)。
+   ============================================================ */
+.viewport-headsup {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 3px;
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--cad-border);
+  border-radius: var(--cad-radius-lg);
+  box-shadow: var(--cad-shadow-md);
+  pointer-events: auto;
+  z-index: 5;
+}
+.viewport-headsup .ribbon-icon-btn {
+  border-color: transparent;
+  background: transparent;
+}
+.viewport-headsup .ribbon-icon-btn:hover:not(:disabled) {
+  background: var(--cad-hover);
+  border-color: var(--cad-border);
+}
+
 @keyframes cad-spin {
   to {
     transform: rotate(360deg);

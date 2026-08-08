@@ -372,6 +372,15 @@ export function updateFeature<T extends Feature>(
   return { ...doc, features };
 }
 
+/**
+ * 任意のフィーチャーの表示名を変更する(FeatureTreeのインライン名称編集、Phase 38b)。
+ * すべてのFeatureバリアントがnameフィールドを持つため、型別のpatchXxxFeature()を経由せず
+ * ここで一括対応する。
+ */
+export function renameFeature(doc: CadDocument, featureId: FeatureId, name: string): CadDocument {
+  return updateFeature<Feature>(doc, featureId, (f) => ({ ...f, name }));
+}
+
 /** extrude フィーチャーの一部フィールドを更新する。 */
 export function patchExtrudeFeature(
   doc: CadDocument,
