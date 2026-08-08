@@ -984,3 +984,18 @@ AUTHORING_JSON_SCHEMAをそのまま構造化出力に使い(strictモード要�
 継続、OpenAIは既定候補+自由入力)を追加。gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、
 Vitest 503→517件全通過、`vite build`+`npm run size`でメインバンドルgzip 257.6KB(変化なし、
 openai SDKは別チャンク35.6KB)、E2E 40→41件全通過(`npx playwright test`を2分割でBash同期実行)。
+
+## Phase 38a: CommandManagerリボン+デザイントークン基盤
+
+フラットな約40ボタンの1行ツールバーを廃止し、SolidWorks風のCommandManagerリボン
+(スケッチ/フィーチャー/アセンブリ/表示の4タブ、アイコン[`src/components/ToolIcon.tsx`、
+新規npm依存なしの共有インラインSVG]+ラベルのタブ内ツール群)へ置き換えた。`src/index.css`に
+ニュートラルなライトテーマのデザイントークン(色・スペーシング・フォント・角丸・影のCSS変数)を
+追加し、リボンとaside/入力/ボタン等の既存パネルへ共通適用した。フィット・正対・標準ビューは
+本家同様タブを跨いで常時表示するヘッズアップクラスタに置き(表示タブにも同内容をラベル付きで
+再掲)、押し出し・回転体はフィーチャー/スケッチ両タブに配置してスケッチ編集中でも直接実行できる
+ようにした。スケッチの選択状態が変化した境界でタブが自動切替する(スケッチ選択→スケッチタブ、
+解除→フィーチャータブ)ため、既存E2Eの操作順はほぼ無改修で成立し、アセンブリタブのみ`合致`実行前に
+`openRibbonTab()`(新設、`e2e/helpers.ts`)での明示切替が必要だった(`e2e/mate.spec.ts`1箇所)。
+gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 517件全通過、`vite build`+`npm run size`で
+メインバンドルgzip 257.6KB→259.8KB(+2.2KB、アイコンSVG分)、E2E 41件全通過(2分割でBash同期実行)。
