@@ -30,7 +30,7 @@
 // 文字列の完全一致ではなく数値許容誤差(0.05mm)で行う。
 import { expect, test, type Page } from "@playwright/test";
 
-import { collectPageErrors, gotoApp, screenPointForWorld, waitForReady } from "./helpers";
+import { collectPageErrors, gotoApp, openRibbonTab, screenPointForWorld, waitForReady } from "./helpers";
 
 const MATE_PART_FILE = JSON.stringify({
   format: "l3dcad",
@@ -93,12 +93,13 @@ test("合致: 部品配置→面を2つ選んで一致→スナップ→ドラ�
   await waitForReady(page);
   await expect(page.getByTestId("eval-error")).toHaveCount(0);
 
-  // ② 合致ツールを開始する。
+  // ② 合致ツールを開始する(Phase 38a: 合致・部品移動はCommandManagerリボンの「アセンブリ」タブ)。
+  await openRibbonTab(page, "アセンブリ");
   await page.getByTestId("btn-mate").click();
   await expect(page.getByTestId("mate-tool-hint")).toBeVisible();
 
   // 部品の底面(下向き、-Z)をクリックする。既定のiso視点では自己遮蔽で見えないため「下」ビューに切り替える。
-  await page.getByTestId("view-more-select").selectOption("bottom");
+  await page.getByTestId("btn-view-bottom").click();
   await page.waitForTimeout(300);
   const partBottomScreen = await screenPointForWorld(page, [60, 0, 40]);
   await page.mouse.click(partBottomScreen.x, partBottomScreen.y);

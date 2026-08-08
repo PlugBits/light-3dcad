@@ -17,6 +17,24 @@ export async function gotoApp(page: Page, path = "/") {
   await page.goto(path);
 }
 
+/**
+ * CommandManagerリボン(Phase 38a)のタブを明示的に切り替える。
+ * アプリはスケッチの選択状態が変化した境界(入る/出る)で自動的に「スケッチ」⇄「フィーチャー」
+ * タブへ切り替わるため、既存のE2Eフローの大半はこの関数を呼ばなくても成立する
+ * (押し出し・回転体はスケッチ/フィーチャー両タブに重複配置されている)。
+ * 「アセンブリ」「表示」タブへは自動遷移しないため、部品移動・合致・干渉チェック等を
+ * 操作する前には明示的にこの関数でタブを切り替えること。
+ */
+export async function openRibbonTab(page: Page, tab: "スケッチ" | "フィーチャー" | "アセンブリ" | "表示") {
+  const idByLabel: Record<string, string> = {
+    スケッチ: "sketch",
+    フィーチャー: "feature",
+    アセンブリ: "assembly",
+    表示: "view",
+  };
+  await page.getByTestId(`ribbon-tab-${idByLabel[tab]}`).click();
+}
+
 /** status-text が指定の状態文字列を含むまで待つ。 */
 export async function waitForStatus(page: Page, status: string, timeout = 120_000) {
   await expect(page.getByTestId("status-text")).toContainText(`状態: ${status}`, { timeout });
