@@ -1,57 +1,108 @@
-// Phase 37: AIモデル生成パネル(自然言語プロンプト→アウソリングJSON→CadDocument)。
-// src/app/App.tsx から React.lazy() 経由でのみ読み込まれる(@anthropic-ai/sdkはこのチャンクからも
-// 直接importせず、src/ai/generate.tsの中でさらに動的importする。メインバンドルには一切含まれない)。
+// Phase 37/37b: AIモデル生成パネル(自然言語プロンプト→アウソリングJSON→CadDocument)。
+// src/app/App.tsx から React.lazy() 経由でのみ読み込まれる(@anthropic-ai/sdk・openaiはこのチャンクからも
+// 直接importせず、src/ai/generate.ts・src/ai/openaiClient.tsの中でさらに動的importする。
+// メインバンドルには一切含まれない)。
 import { useEffect, useState } from "react";
 
 import { compileAuthoringModel } from "../ai/compile";
 import { generateCadDocument, type GenerateProgress } from "../ai/generate";
 import { AUTHORING_SYSTEM_PROMPT } from "../ai/promptSpec";
+import { getCallModelForProvider, PROVIDER_LABEL, PROVIDERS, type Provider } from "../ai/provider";
 import type { CadDocument } from "../model/types";
 
-/** APIキーのlocalStorage保存キー(この端末のみに保存し、Anthropic API以外へは送信しない)。 */
-const API_KEY_STORAGE_KEY = "light-3dcad:ai:apiKey:v1";
-const MODEL_STORAGE_KEY = "light-3dcad:ai:model:v1";
+/**
+ * APIキー/モデルのlocalStorage保存キー(この端末のみに保存し、対応するAPI以外へは送信しない)。
+ * Anthropicのキーは既存ユーザーの保存値を引き継ぐため、Phase 37時点のキー名のまま変更しない。
+ */
+const PROVIDER_STORAGE_KEY = "light-3dcad:ai:provider:v1";
+const API_KEY_STORAGE_KEYS: Record<Provider, string> = {
+  anthropic: "light-3dcad:ai:apiKey:v1",
+  openai: "light-3dcad:ai:apiKey:openai:v1",
+};
+const MODEL_STORAGE_KEYS: Record<Provider, string> = {
+  anthropic: "light-3dcad:ai:model:v1",
+  openai: "light-3dcad:ai:model:openai:v1",
+};
 
-const MODEL_OPTIONS: { value: string; label: string }[] = [
+const ANTHROPIC_MODEL_OPTIONS: { value: string; label: string }[] = [
   { value: "claude-opus-5", label: "Claude Opus 5(既定・高精度)" },
   { value: "claude-sonnet-5", label: "Claude Sonnet 5(バランス)" },
   { value: "claude-haiku-4-5", label: "Claude Haiku 4.5(高速・低コスト)" },
 ];
 
-const DEFAULT_MODEL = "claude-opus-5";
+const OPENAI_MODEL_OPTIONS: { value: string; label: string }[] = [
+  { value: "gpt-5.5", label: "GPT-5.5(既定・高精度)" },
+  { value: "gpt-5.4", label: "GPT-5.4(バランス)" },
+  { value: "gpt-5.4-mini", label: "GPT-5.4 mini(高速・低コスト)" },
+];
 
-function loadStoredApiKey(): string {
+const DEFAULT_MODEL: Record<Provider, string> = {
+  anthropic: "claude-opus-5",
+  openai: "gpt-5.5",
+};
+
+const DEFAULT_PROVIDER: Provider = "anthropic";
+
+const API_KEY_PLACEHOLDER: Record<Provider, string> = {
+  anthropic: "sk-ant-...",
+  openai: "sk-...",
+};
+
+function isProvider(value: string | null): value is Provider {
+  return value === "anthropic" || value === "openai";
+}
+
+function loadStoredProvider(): Provider {
+  if (typeof localStorage === "undefined") return DEFAULT_PROVIDER;
+  try {
+    const value = localStorage.getItem(PROVIDER_STORAGE_KEY);
+    return isProvider(value) ? value : DEFAULT_PROVIDER;
+  } catch {
+    return DEFAULT_PROVIDER;
+  }
+}
+
+function saveProvider(value: Provider) {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(PROVIDER_STORAGE_KEY, value);
+  } catch {
+    // ignore
+  }
+}
+
+function loadStoredApiKey(provider: Provider): string {
   if (typeof localStorage === "undefined") return "";
   try {
-    return localStorage.getItem(API_KEY_STORAGE_KEY) ?? "";
+    return localStorage.getItem(API_KEY_STORAGE_KEYS[provider]) ?? "";
   } catch {
     return "";
   }
 }
 
-function loadStoredModel(): string {
-  if (typeof localStorage === "undefined") return DEFAULT_MODEL;
+function loadStoredModel(provider: Provider): string {
+  if (typeof localStorage === "undefined") return DEFAULT_MODEL[provider];
   try {
-    return localStorage.getItem(MODEL_STORAGE_KEY) ?? DEFAULT_MODEL;
+    return localStorage.getItem(MODEL_STORAGE_KEYS[provider]) ?? DEFAULT_MODEL[provider];
   } catch {
-    return DEFAULT_MODEL;
+    return DEFAULT_MODEL[provider];
   }
 }
 
-function saveApiKey(value: string) {
+function saveApiKey(provider: Provider, value: string) {
   if (typeof localStorage === "undefined") return;
   try {
-    if (value) localStorage.setItem(API_KEY_STORAGE_KEY, value);
-    else localStorage.removeItem(API_KEY_STORAGE_KEY);
+    if (value) localStorage.setItem(API_KEY_STORAGE_KEYS[provider], value);
+    else localStorage.removeItem(API_KEY_STORAGE_KEYS[provider]);
   } catch {
     // 容量超過・プライベートブラウジング等は諦める(保存は補助機能)。
   }
 }
 
-function saveModel(value: string) {
+function saveModel(provider: Provider, value: string) {
   if (typeof localStorage === "undefined") return;
   try {
-    localStorage.setItem(MODEL_STORAGE_KEY, value);
+    localStorage.setItem(MODEL_STORAGE_KEYS[provider], value);
   } catch {
     // ignore
   }
@@ -76,8 +127,9 @@ export interface AiGeneratePanelProps {
 
 /** AI生成パネル(トップレベル、default export。App.tsxからReact.lazy()で読み込む)。 */
 export default function AiGeneratePanel({ onClose, onLoad }: AiGeneratePanelProps) {
-  const [apiKey, setApiKey] = useState<string>(loadStoredApiKey);
-  const [model, setModel] = useState<string>(loadStoredModel);
+  const [provider, setProvider] = useState<Provider>(loadStoredProvider);
+  const [apiKey, setApiKey] = useState<string>(() => loadStoredApiKey(loadStoredProvider()));
+  const [model, setModel] = useState<string>(() => loadStoredModel(loadStoredProvider()));
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<GenerateProgress | null>(null);
@@ -94,14 +146,21 @@ export default function AiGeneratePanel({ onClose, onLoad }: AiGeneratePanelProp
     return () => clearTimeout(timer);
   }, [copyNotice]);
 
+  function handleProviderChange(value: Provider) {
+    setProvider(value);
+    saveProvider(value);
+    setApiKey(loadStoredApiKey(value));
+    setModel(loadStoredModel(value));
+  }
+
   function handleApiKeyChange(value: string) {
     setApiKey(value);
-    saveApiKey(value);
+    saveApiKey(provider, value);
   }
 
   function handleModelChange(value: string) {
     setModel(value);
-    saveModel(value);
+    saveModel(provider, value);
   }
 
   async function handleGenerate() {
@@ -122,6 +181,7 @@ export default function AiGeneratePanel({ onClose, onLoad }: AiGeneratePanelProp
         apiKey: apiKey.trim(),
         model,
         prompt: prompt.trim(),
+        callModel: getCallModelForProvider(provider),
         onProgress: (p) => setProgress(p),
       });
       if (!result.ok) {
@@ -205,30 +265,67 @@ export default function AiGeneratePanel({ onClose, onLoad }: AiGeneratePanelProp
         </div>
 
         <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
-          APIキー(Anthropic)
+          プロバイダ
+          <select
+            data-testid="ai-provider-select"
+            value={provider}
+            onChange={(e) => handleProviderChange(e.target.value as Provider)}
+          >
+            {PROVIDERS.map((p) => (
+              <option key={p} value={p}>
+                {PROVIDER_LABEL[p]}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
+          APIキー({PROVIDER_LABEL[provider]})
           <input
             type="password"
             data-testid="ai-api-key-input"
             value={apiKey}
             onChange={(e) => handleApiKeyChange(e.target.value)}
-            placeholder="sk-ant-..."
+            placeholder={API_KEY_PLACEHOLDER[provider]}
             autoComplete="off"
           />
         </label>
         <p style={{ margin: 0, fontSize: 11, color: "#aaa" }}>
-          キーはこの端末のlocalStorageにのみ保存され、Anthropic API以外には送信されません。
+          キーはこの端末のlocalStorageにのみ保存され、選択中のプロバイダのAPI以外には送信されません。
         </p>
 
-        <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
-          モデル
-          <select data-testid="ai-model-select" value={model} onChange={(e) => handleModelChange(e.target.value)}>
-            {MODEL_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
-        </label>
+        {provider === "anthropic" ? (
+          <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
+            モデル
+            <select data-testid="ai-model-select" value={model} onChange={(e) => handleModelChange(e.target.value)}>
+              {ANTHROPIC_MODEL_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
+            モデル(候補から選ぶか、直接入力できます)
+            <input
+              type="text"
+              data-testid="ai-model-input"
+              list="ai-openai-model-options"
+              value={model}
+              onChange={(e) => handleModelChange(e.target.value)}
+              placeholder="gpt-5.5"
+              autoComplete="off"
+            />
+            <datalist id="ai-openai-model-options">
+              {OPENAI_MODEL_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </datalist>
+          </label>
+        )}
 
         <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
           プロンプト
