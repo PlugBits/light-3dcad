@@ -52,7 +52,7 @@ jobs:
         env:
           SUBMISSION_JSON_PATH: ${{ steps.parse.outputs.model_json_path }}
           SUBMISSION_RESULT_PATH: ${{ runner.temp }}/gallery-submission-validate-result.json
-        run: npx vitest run tests/project/validateSubmissionEnv.test.ts --reporter=basic
+        run: npx vitest run tests/project/validateSubmissionEnv.test.ts --reporter=dot
 
       - name: 検証結果を読み取る
         if: steps.parse.outputs.ok == 'true'
