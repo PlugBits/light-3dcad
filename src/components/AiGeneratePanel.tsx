@@ -1,12 +1,15 @@
-// Phase 37/37b: AIモデル生成パネル(自然言語プロンプト→アウソリングJSON→CadDocument)。
+// Phase 37/37b/39: AIモデル生成パネル(自然言語プロンプト→設計メモ+アウソリングJSON→CadDocument)。
 // src/app/App.tsx から React.lazy() 経由でのみ読み込まれる(@anthropic-ai/sdk・openaiはこのチャンクからも
 // 直接importせず、src/ai/generate.ts・src/ai/openaiClient.tsの中でさらに動的importする。
 // メインバンドルには一切含まれない)。
+// Phase 39: AI応答が質問(questions)を返した場合はチップUIで回答を選ばせ、回答を含めて
+// 再度generateCadDocument()を呼ぶ(会話を引き継ぐ)。生成成功時は設計メモ(design)を
+// 折りたたみ表示し、パネルは閉じずに残す(寸法を確認しながら繰り返し生成できるようにするため)。
 import { useEffect, useState } from "react";
 
 import { compileAuthoringModel } from "../ai/compile";
-import { generateCadDocument, type GenerateProgress } from "../ai/generate";
-import { AUTHORING_SYSTEM_PROMPT } from "../ai/promptSpec";
+import { generateCadDocument, type AiQuestion, type GenerateProgress, type ModelMessage } from "../ai/generate";
+import { AUTHORING_PASTE_PROMPT } from "../ai/promptSpec";
 import { getCallModelForProvider, PROVIDER_LABEL, PROVIDERS, type Provider } from "../ai/provider";
 import type { CadDocument } from "../model/types";
 
@@ -135,6 +138,17 @@ export default function AiGeneratePanel({ onClose, onLoad }: AiGeneratePanelProp
   const [progress, setProgress] = useState<GenerateProgress | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // Phase 39: 質問モード(AIが寸法確定に必要な質問を返した場合)の状態。
+  const [questions, setQuestions] = useState<AiQuestion[] | null>(null);
+  const [conversation, setConversation] = useState<ModelMessage[] | null>(null);
+  const [answers, setAnswers] = useState<Record<number, string>>({});
+  const [freeText, setFreeText] = useState<Record<number, string>>({});
+
+  // Phase 39: 生成成功後の設計メモ表示用状態(パネルは閉じずに残す)。
+  const [design, setDesign] = useState<string | null>(null);
+  const [designOpen, setDesignOpen] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [pasteJson, setPasteJson] = useState("");
   const [pasteError, setPasteError] = useState<string | null>(null);
@@ -175,6 +189,11 @@ export default function AiGeneratePanel({ onClose, onLoad }: AiGeneratePanelProp
     }
     setBusy(true);
     setErrorMessage(null);
+    setQuestions(null);
+    setConversation(null);
+    setAnswers({});
+    setFreeText({});
+    setLoaded(false);
     setProgress({ attempt: 1, maxAttempts: 3, phase: "generating" });
     try {
       const result = await generateCadDocument({
@@ -184,17 +203,65 @@ export default function AiGeneratePanel({ onClose, onLoad }: AiGeneratePanelProp
         callModel: getCallModelForProvider(provider),
         onProgress: (p) => setProgress(p),
       });
-      if (!result.ok) {
-        setErrorMessage(result.message);
-        return;
-      }
-      onLoad(result.doc);
+      applyGenerateResult(result);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
       setProgress(null);
     }
+  }
+
+  /** 質問への回答(またはすべて「おまかせ」)を送信し、会話を引き継いで再度生成する。 */
+  async function handleAnswerSubmit(useAllOmakase: boolean) {
+    if (busy || !conversation || !questions) return;
+    const answerText = questions
+      .map((_, i) => {
+        const override = freeText[i]?.trim();
+        const chosen = useAllOmakase ? "おまかせ" : override || answers[i] || "おまかせ";
+        return `${i + 1}. ${chosen}`;
+      })
+      .join(" / ");
+    setBusy(true);
+    setErrorMessage(null);
+    setProgress({ attempt: 1, maxAttempts: 3, phase: "generating" });
+    try {
+      const result = await generateCadDocument({
+        apiKey: apiKey.trim(),
+        model,
+        prompt: prompt.trim(),
+        conversation: [...conversation, { role: "user", content: answerText }],
+        answeringQuestions: true,
+        callModel: getCallModelForProvider(provider),
+        onProgress: (p) => setProgress(p),
+      });
+      applyGenerateResult(result);
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  }
+
+  /** generateCadDocument()の結果を質問モード/生成成功/失敗のいずれかとして状態へ反映する共通処理。 */
+  function applyGenerateResult(result: Awaited<ReturnType<typeof generateCadDocument>>) {
+    if (!result.ok) {
+      setErrorMessage(result.message);
+      return;
+    }
+    if (result.kind === "questions") {
+      setQuestions(result.questions);
+      setConversation(result.conversation);
+      setAnswers({});
+      setFreeText({});
+      return;
+    }
+    setQuestions(null);
+    setConversation(null);
+    setDesign(result.design);
+    setLoaded(true);
+    onLoad(result.doc);
   }
 
   function handlePasteLoad() {
@@ -212,11 +279,12 @@ export default function AiGeneratePanel({ onClose, onLoad }: AiGeneratePanelProp
       return;
     }
     onLoad(compiled.doc);
+    onClose();
   }
 
   async function handleCopyPromptSpec() {
     try {
-      await navigator.clipboard.writeText(AUTHORING_SYSTEM_PROMPT);
+      await navigator.clipboard.writeText(AUTHORING_PASTE_PROMPT);
       setCopyNotice("プロンプト仕様をコピーしました");
     } catch (err) {
       setCopyNotice(`コピーに失敗しました: ${err instanceof Error ? err.message : String(err)}`);
@@ -355,6 +423,106 @@ export default function AiGeneratePanel({ onClose, onLoad }: AiGeneratePanelProp
           >
             {errorMessage}
           </p>
+        )}
+
+        {questions && (
+          <div
+            data-testid="ai-questions-panel"
+            style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: "1px solid #444", paddingTop: 8 }}
+          >
+            <p style={{ margin: 0, fontSize: 12, color: "#9cf" }} data-testid="ai-generate-awaiting-answers">
+              質問に回答待ち — 設計を確定するためにいくつか確認させてください
+            </p>
+            {questions.map((q, i) => (
+              <div key={i} data-testid={`ai-question-${i}`} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <p style={{ margin: 0, fontSize: 12 }}>
+                  {i + 1}. {q.question}
+                </p>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                  {q.options.map((opt, j) => {
+                    const selected = answers[i] === opt;
+                    return (
+                      <button
+                        key={j}
+                        type="button"
+                        data-testid={`ai-question-${i}-option-${j}`}
+                        onClick={() => setAnswers((a) => ({ ...a, [i]: opt }))}
+                        style={{
+                          fontSize: 11,
+                          padding: "4px 8px",
+                          borderRadius: 12,
+                          border: selected ? "1px solid #9cf" : "1px solid #555",
+                          background: selected ? "#2c4a5e" : "transparent",
+                          color: "#eee",
+                          cursor: "pointer",
+                        }}
+                      >
+                        {opt}
+                      </button>
+                    );
+                  })}
+                  <button
+                    type="button"
+                    data-testid={`ai-question-${i}-omakase`}
+                    onClick={() => setAnswers((a) => ({ ...a, [i]: "おまかせ" }))}
+                    style={{
+                      fontSize: 11,
+                      padding: "4px 8px",
+                      borderRadius: 12,
+                      border: answers[i] === "おまかせ" ? "1px solid #9cf" : "1px dashed #777",
+                      background: answers[i] === "おまかせ" ? "#2c4a5e" : "transparent",
+                      color: "#ccc",
+                      cursor: "pointer",
+                    }}
+                  >
+                    おまかせ
+                  </button>
+                </div>
+                <details style={{ fontSize: 11 }}>
+                  <summary style={{ cursor: "pointer", color: "#888" }}>自由回答で上書き</summary>
+                  <input
+                    type="text"
+                    data-testid={`ai-question-${i}-freetext`}
+                    value={freeText[i] ?? ""}
+                    onChange={(e) => setFreeText((f) => ({ ...f, [i]: e.target.value }))}
+                    style={{ width: "100%", marginTop: 4 }}
+                  />
+                </details>
+              </div>
+            ))}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button type="button" data-testid="btn-ai-answer-submit" onClick={() => handleAnswerSubmit(false)} disabled={busy}>
+                回答して生成
+              </button>
+              <button type="button" data-testid="btn-ai-answer-all-omakase" onClick={() => handleAnswerSubmit(true)} disabled={busy}>
+                全部おまかせで生成
+              </button>
+            </div>
+          </div>
+        )}
+
+        {loaded && (
+          <div
+            data-testid="ai-generate-loaded"
+            style={{ display: "flex", flexDirection: "column", gap: 6, borderTop: "1px solid #444", paddingTop: 8 }}
+          >
+            <p style={{ margin: 0, fontSize: 12, color: "#8f8" }}>読み込み完了 — ドキュメントに反映しました</p>
+            {design && (
+              <details
+                data-testid="ai-design-details"
+                open={designOpen}
+                onToggle={(e) => setDesignOpen((e.target as HTMLDetailsElement).open)}
+              >
+                <summary style={{ cursor: "pointer", fontSize: 12 }}>設計メモを表示</summary>
+                <pre
+                  data-testid="ai-design-text"
+                  style={{ whiteSpace: "pre-wrap", fontSize: 11, color: "#ccc", margin: "6px 0 0", fontFamily: "inherit" }}
+                >
+                  {design}
+                </pre>
+              </details>
+            )}
+          </div>
         )}
 
         <details

@@ -780,13 +780,15 @@ export default function App() {
    * AI生成パネル(生成 or JSON貼り付け)から得られたCadDocumentを読み込む(Phase 37)。
    * 「開く」と同じ責務分担: 確認ダイアログ→fitToView予約→loadDocument()。生成された/貼り付けられた
    * モデルは既に何らかの作業内容を上書きするため、「新規」ボタンと同様に確認する。
+   * Phase 39: パネル自体を閉じるかどうかはAiGeneratePanel側の判断に委ねる(貼り付けモードは
+   * 即座に閉じるが、生成モードは設計メモを表示するためパネルを開いたままにする)ため、ここでは
+   * 閉じない。
    */
   function handleLoadAiGeneratedDocument(generatedDoc: CadDocument) {
     const ok = window.confirm("現在の作業内容を破棄してAIが生成したモデルを読み込みますか?(自動保存には現在の内容が残っています)");
     if (!ok) return;
     viewerRef.current?.requestFitOnNextMesh();
     loadDocument(generatedDoc);
-    setAiPanelOpen(false);
   }
 
   /**

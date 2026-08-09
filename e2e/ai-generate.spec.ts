@@ -1,12 +1,17 @@
-// AIモデル生成(Phase 37/37b)のE2E。3ケース:
-// (a) 貼り付けモード: AI生成パネルを開き、小さな有効なアウソリングJSONを貼り付けて読み込み、
-//     フィーチャーツリーにsketch+extrudeが現れ、ビューアに形状が表示されることを確認する。
+// AIモデル生成(Phase 37/37b/39)のE2E。4ケース:
+// (a) 貼り付けモード: AI生成パネルを開き、小さな有効なアウソリングJSON(素のJSON、エンベロープ
+//     ではない)を貼り付けて読み込み、フィーチャーツリーにsketch+extrudeが現れ、ビューアに形状が
+//     表示されることを確認する。読み込み後、パネルは自動的に閉じる(貼り付けモードの既存挙動)。
 // (b) 生成パス(Anthropic): page.route()で https://api.anthropic.com/** をインターセプトし、
-//     有効なアウソリングJSONをテキストブロックに含む(stop_reason: end_turn の)Messages API
-//     ストリーミング応答を模擬する。実際のAPIには一切アクセスしない。
-// (c) 生成パス(OpenAI): page.route()で https://api.openai.com/** をインターセプトし、
-//     有効なアウソリングJSONをoutput_textに含むResponses API応答を模擬する。実際のAPIには
-//     一切アクセスしない。
+//     エンベロープ形式({design, questions:null, model})のJSONをテキストブロックに含む
+//     (stop_reason: end_turn の)Messages APIストリーミング応答を模擬する。実際のAPIには
+//     一切アクセスしない。生成成功後はパネルが自動的には閉じず、「読み込み完了」+設計メモの
+//     折りたたみ表示が現れる(Phase 39)ので、明示的に「閉じる」を押してから検証する。
+// (c) 生成パス(OpenAI): 同様にhttps://api.openai.com/**をインターセプトし、エンベロープ形式の
+//     JSONをoutput_textに含むResponses API応答を模擬する。実際のAPIには一切アクセスしない。
+// (d) 質問モード→回答フロー: 1回目の応答をquestions付きエンベロープにして、チップUIが描画される
+//     ことを確認し、「全部おまかせで生成」をクリック→2回目の応答(model付きエンベロープ)で
+//     ドキュメントが読み込まれることを確認する。
 import { expect, test, type Page } from "@playwright/test";
 
 import { collectPageErrors, gotoApp, waitForReady } from "./helpers";
@@ -29,6 +34,23 @@ const VALID_AUTHORING_JSON = {
   ],
 };
 
+/** src/ai/envelopeSchema.ts の AiResponseEnvelope 形式(生成結果: design+model、questions:null)。 */
+const VALID_ENVELOPE = {
+  design: "## 対象物の実寸\n該当なし\n## 機能要件\nテスト用の板。\n## 主要寸法\n| 項目 | 値 | 根拠 |\n|---|---|---|\n| 幅 | 80mm | 指示どおり |\n## 造形方針\n矩形の内側に円を追加する。",
+  questions: null,
+  model: VALID_AUTHORING_JSON,
+};
+
+/** src/ai/envelopeSchema.ts の AiResponseEnvelope 形式(質問モード: questionsのみ、design/modelはnull)。 */
+const QUESTIONS_ENVELOPE = {
+  design: null,
+  questions: [
+    { question: "置き方は?", options: ["横置き", "縦置き", "おまかせ"] },
+    { question: "穴の用途は?", options: ["ネジ止め", "ケーブル通し"] },
+  ],
+  model: null,
+};
+
 /** AI生成パネルを開き、「詳細」を展開する(貼り付けモードの共通前準備)。 */
 async function openAiPanelAdvanced(page: Page) {
   await page.getByTestId("btn-ai-generate").click();
@@ -48,7 +70,7 @@ test("AI生成: 貼り付けモードでアウソリングJSONを読み込むと
   await page.getByTestId("ai-paste-json-textarea").fill(JSON.stringify(VALID_AUTHORING_JSON));
   await page.getByTestId("btn-ai-paste-load").click();
 
-  // 確認ダイアログ承諾後、パネルが閉じて再評価が完了する。
+  // 確認ダイアログ承諾後、パネルが閉じて再評価が完了する(貼り付けモードは常に即座に閉じる)。
   await expect(page.getByTestId("ai-generate-panel")).toHaveCount(0);
   await waitForReady(page);
   await expect(page.getByTestId("eval-error")).toHaveCount(0);
@@ -99,7 +121,7 @@ function buildFakeMessagesSseBody(jsonText: string): string {
   return events.map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`).join("");
 }
 
-test("AI生成: 生成パス(Anthropic APIをインターセプト)で得たJSONが読み込まれる", async ({ page }) => {
+test("AI生成: 生成パス(Anthropic APIをインターセプト)で得たエンベロープが読み込まれる", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
   page.on("dialog", (dialog) => dialog.accept());
 
@@ -107,7 +129,7 @@ test("AI生成: 生成パス(Anthropic APIをインターセプト)で得たJSON
     await route.fulfill({
       status: 200,
       headers: { "content-type": "text/event-stream" },
-      body: buildFakeMessagesSseBody(JSON.stringify(VALID_AUTHORING_JSON)),
+      body: buildFakeMessagesSseBody(JSON.stringify(VALID_ENVELOPE)),
     });
   });
   const requestPromise = page.waitForRequest((req) => req.url().startsWith("https://api.anthropic.com/"));
@@ -126,7 +148,14 @@ test("AI生成: 生成パス(Anthropic APIをインターセプト)で得たJSON
   expect(sentBody.model).toBe("claude-opus-5");
   expect(sentBody.stream).toBe(true);
 
-  await expect(page.getByTestId("ai-generate-panel")).toHaveCount(0, { timeout: 30_000 });
+  // Phase 39: 生成成功後もパネルは自動的には閉じず、「読み込み完了」+設計メモの折りたたみが現れる。
+  await expect(page.getByTestId("ai-generate-loaded")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("ai-design-details")).toBeVisible();
+  await page.locator('[data-testid="ai-design-details"] summary').click();
+  await expect(page.getByTestId("ai-design-text")).toContainText("対象物の実寸");
+  await page.getByTestId("btn-ai-close").click();
+
+  await expect(page.getByTestId("ai-generate-panel")).toHaveCount(0);
   await waitForReady(page);
   await expect(page.getByTestId("eval-error")).toHaveCount(0);
   await expect(page.getByTestId("feature-item-Sketch1")).toBeVisible();
@@ -166,7 +195,7 @@ function buildFakeResponsesApiBody(jsonText: string): unknown {
   };
 }
 
-test("AI生成: 生成パス(OpenAI APIをインターセプト)で得たJSONが読み込まれる", async ({ page }) => {
+test("AI生成: 生成パス(OpenAI APIをインターセプト)で得たエンベロープが読み込まれる", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
   page.on("dialog", (dialog) => dialog.accept());
 
@@ -174,7 +203,7 @@ test("AI生成: 生成パス(OpenAI APIをインターセプト)で得たJSONが
     await route.fulfill({
       status: 200,
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(buildFakeResponsesApiBody(JSON.stringify(VALID_AUTHORING_JSON))),
+      body: JSON.stringify(buildFakeResponsesApiBody(JSON.stringify(VALID_ENVELOPE))),
     });
   });
   const requestPromise = page.waitForRequest((req) => req.url().startsWith("https://api.openai.com/"));
@@ -195,11 +224,68 @@ test("AI生成: 生成パス(OpenAI APIをインターセプト)で得たJSONが
   expect(sentBody.text?.format?.type).toBe("json_schema");
   expect(sentBody.text?.format?.strict).toBe(true);
 
-  await expect(page.getByTestId("ai-generate-panel")).toHaveCount(0, { timeout: 30_000 });
+  await expect(page.getByTestId("ai-generate-loaded")).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId("btn-ai-close").click();
+
+  await expect(page.getByTestId("ai-generate-panel")).toHaveCount(0);
   await waitForReady(page);
   await expect(page.getByTestId("eval-error")).toHaveCount(0);
   await expect(page.getByTestId("feature-item-Sketch1")).toBeVisible();
   await expect(page.getByTestId("feature-item-Extrude1")).toBeVisible();
 
+  expect(pageErrors).toEqual([]);
+});
+
+test("AI生成: 質問モード→チップUIで「全部おまかせで生成」→2回目の応答でドキュメントが読み込まれる", async ({ page }) => {
+  const pageErrors = collectPageErrors(page);
+  page.on("dialog", (dialog) => dialog.accept());
+
+  let callCount = 0;
+  await page.route("https://api.anthropic.com/**", async (route) => {
+    callCount += 1;
+    const jsonText = callCount === 1 ? JSON.stringify(QUESTIONS_ENVELOPE) : JSON.stringify(VALID_ENVELOPE);
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: buildFakeMessagesSseBody(jsonText),
+    });
+  });
+
+  await gotoApp(page);
+  await waitForReady(page);
+
+  await page.getByTestId("btn-ai-generate").click();
+  await expect(page.getByTestId("ai-generate-panel")).toBeVisible();
+  await page.getByTestId("ai-api-key-input").fill("sk-ant-e2e-test-fake-key");
+  await page.getByTestId("ai-prompt-textarea").fill("iPhone用スタンド作って");
+
+  const firstRequestPromise = page.waitForRequest((req) => req.url().startsWith("https://api.anthropic.com/"));
+  await page.getByTestId("btn-ai-generate-submit").click();
+  await firstRequestPromise;
+
+  await expect(page.getByTestId("ai-questions-panel")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("ai-question-0")).toContainText("置き方は?");
+  await expect(page.getByTestId("ai-question-1")).toContainText("穴の用途は?");
+  await expect(page.getByTestId("ai-question-0-option-0")).toContainText("横置き");
+
+  const secondRequestPromise = page.waitForRequest((req) => req.url().startsWith("https://api.anthropic.com/"));
+  await page.getByTestId("btn-ai-answer-all-omakase").click();
+  const secondRequest = await secondRequestPromise;
+  const secondBody = secondRequest.postDataJSON() as { messages?: { role: string; content: string }[] };
+  const lastMessage = secondBody.messages?.[secondBody.messages.length - 1];
+  expect(lastMessage?.role).toBe("user");
+  expect(lastMessage?.content).toContain("おまかせ");
+
+  await expect(page.getByTestId("ai-generate-loaded")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("ai-questions-panel")).toHaveCount(0);
+  await page.getByTestId("btn-ai-close").click();
+
+  await expect(page.getByTestId("ai-generate-panel")).toHaveCount(0);
+  await waitForReady(page);
+  await expect(page.getByTestId("eval-error")).toHaveCount(0);
+  await expect(page.getByTestId("feature-item-Sketch1")).toBeVisible();
+  await expect(page.getByTestId("feature-item-Extrude1")).toBeVisible();
+
+  expect(callCount).toBe(2);
   expect(pageErrors).toEqual([]);
 });
