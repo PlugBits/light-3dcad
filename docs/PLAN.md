@@ -1044,6 +1044,16 @@ revolveのaxis:"y"がevaluator実装上ワールドZ相当になることを検�
 Vitest 517→534件全通過、`vite build`+`npm run size`でメインバンドルgzip 261.2KB(変化なし、
 AI関連は遅延チャンク)、E2E 41→42件全通過(2分割でBash同期実行)。
 
+## Phase 40a: モデル共有リンク(URL埋め込み共有、バックエンド不要)
+
+現在のドキュメントをgzip圧縮(CompressionStream)+base64url化してlocation.hash(`#m=...`)に
+埋め込みクリップボードへコピーする「共有リンクをコピー」ボタンをリボンのファイル群に追加した
+(`src/project/shareLink.ts`、非対応環境はボタンを無効化しツールチップで案内)。起動時にhashを
+検出したら復号→検証し、自動保存(localStorage)の内容と異なる場合のみconfirm()で確認してから
+読み込む(自動保存の無言上書きを避ける)ことで自動保存復元より優先する。gate結果: `tsc --noEmit`
+(app/e2e両方)エラーなし、Vitest 534→548件全通過、`vite build`+`npm run size`でメインバンドル
+gzip 262.5KB(+1.3KB、上限350KB内)、E2E 42→43件全通過(2分割でBash同期実行)。
+
 ## Phase 40b: オープンソース公開準備(ライセンス・ドキュメント整備)
 
 MIT License・`THIRD_PARTY_NOTICES.md`(OCCT/PlaneGCSのLGPL-2.1系WASM無改変利用の明記)・

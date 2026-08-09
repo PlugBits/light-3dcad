@@ -9,6 +9,7 @@ export type ToolIconName =
   | "new"
   | "save"
   | "open"
+  | "shareLink"
   | "addPart"
   | "aiGenerate"
   | "exportStl"
@@ -72,6 +73,15 @@ const PATHS: Record<ToolIconName, ReactElement> = {
     <>
       <path d="M3 7a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v2H3Z" />
       <path d="M3 9l1.4 10.2a1 1 0 0 0 1 .8h13.2a1 1 0 0 0 1-.8L21 9" />
+    </>
+  ),
+  // 共有リンク(Phase 40a): 3つの丸(ノード)を線で結ぶ、一般的な「共有」アイコンの意匠。
+  shareLink: (
+    <>
+      <circle cx="6" cy="12" r="2.6" />
+      <circle cx="18" cy="5.5" r="2.6" />
+      <circle cx="18" cy="18.5" r="2.6" />
+      <path d="M8.3 10.8 15.7 6.8M8.3 13.2l7.4 4" />
     </>
   ),
   addPart: (

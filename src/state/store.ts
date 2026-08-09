@@ -75,8 +75,12 @@ function scheduleAutosave(doc: CadDocument) {
   }, 500);
 }
 
-/** 起動時、自動保存があれば復元する。無い・壊れている場合はnull(呼び出し側が従来の初期ドキュメントにフォールバックする)。 */
-function loadAutosavedDocument(): CadDocument | null {
+/**
+ * 起動時、自動保存があれば復元する。無い・壊れている場合はnull(呼び出し側が従来の初期ドキュメントに
+ * フォールバックする)。共有リンク(Phase 40a、src/project/shareLink.ts)の読み込み時、「自動保存された
+ * 作業内容と共有リンクのモデルが異なるか」の判定にも使うためexportする(App.tsx参照)。
+ */
+export function loadAutosavedDocument(): CadDocument | null {
   if (typeof localStorage === "undefined") return null;
   try {
     const text = localStorage.getItem(AUTOSAVE_KEY);

@@ -93,12 +93,20 @@ import {
   upsertRadiusConstraint,
 } from "../sketch/constraintDimensions";
 import { deserializeProject, serializeProject } from "../project/serialization";
+import {
+  buildShareLinkUrl,
+  decodeShareLinkPayload,
+  extractShareLinkData,
+  encodeShareLinkPayload,
+  isShareLinkSupported,
+  SHARE_LINK_WARN_CHARS,
+} from "../project/shareLink";
 import { distanceBetweenPoints, distancePointToLine } from "../sketch/positionDimensions";
 import { worldOriginLocal } from "../sketch/originRef";
 import { rectangleFromCorners, regularPolygonVertices } from "../sketch/shapeFromPoints";
 import { getSketchDiagnostics } from "../sketch/solver";
 import { updateDocumentWithConflictRollback } from "../state/constraintUpdate";
-import { useCadStore } from "../state/store";
+import { loadAutosavedDocument, useCadStore } from "../state/store";
 import {
   CadViewer,
   type ConstraintPickTarget,
@@ -228,6 +236,9 @@ export default function App() {
   const [drawingSketchId, setDrawingSketchId] = useState<string | null>(null);
   // 1mmグリッドスナップ(デフォルトON)。
   const [gridSnap, setGridSnap] = useState(true);
+  // 共有リンク機能(Phase 40a)がこの環境で使えるか(CompressionStream/DecompressionStream対応)。
+  // 実行中に変化しない値のため、マウント時に一度だけ計算する。
+  const [shareLinkSupported] = useState(() => isShareLinkSupported());
   // 「開く」で選んだ.l3dcadファイルの読み込みに失敗したときのエラーメッセージ(Phase 26)。未発生はnull。
   const [openProjectError, setOpenProjectError] = useState<string | null>(null);
   // 「部品を配置」で選んだ.l3dcadファイルの読み込みに失敗したときのエラーメッセージ(Phase 27b)。未発生はnull。
@@ -366,6 +377,53 @@ export default function App() {
   useEffect(() => {
     initialize();
   }, [initialize]);
+
+  /**
+   * 起動時、URLに共有リンク(location.hash="#m=...")があれば読み込む(Phase 40a)。
+   * ストアのresolveInitialDocument()による自動保存の復元(store.tsモジュール読み込み時に同期的に
+   * 完了済み)より後に実行されるため、共有リンクは自動保存より優先して読み込まれる。ただし
+   * 自動保存に現在の作業内容が残っており、かつそれが共有リンクの内容と異なる場合は、無言で
+   * 上書きせずconfirm()で確認する(キャンセル時は自動保存された内容のまま、hashだけ取り除く)。
+   * マウント時に一度だけチェックすればよい(以後のhash変更、例えば#m=読み込み後のreplaceStateは
+   * このeffect自身が行うため無視してよい)ため依存配列は空。
+   */
+  useEffect(() => {
+    const shareData = extractShareLinkData(window.location.hash);
+    if (!shareData) return;
+
+    function stripShareLinkHash() {
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
+
+    let cancelled = false;
+    void (async () => {
+      const result = await decodeShareLinkPayload(shareData);
+      if (cancelled) return;
+      if (!result.ok) {
+        showTransientMessage(`共有リンクの読み込みに失敗しました: ${result.message}`);
+        stripShareLinkHash();
+        return;
+      }
+      // 自動保存(localStorage)された作業内容と共有リンクのモデルが異なる場合のみ確認する
+      // (自動保存が無い、または内容が同一の場合は確認なしでそのまま読み込む)。
+      const autosaved = loadAutosavedDocument();
+      if (autosaved && serializeProject(autosaved) !== serializeProject(result.doc)) {
+        const ok = window.confirm("共有リンクのモデルを開きますか?現在の作業は破棄されます");
+        if (!ok) {
+          stripShareLinkHash();
+          return;
+        }
+      }
+      viewerRef.current?.requestFitOnNextMesh();
+      loadDocument(result.doc);
+      stripShareLinkHash();
+      showTransientMessage("共有モデルを読み込みました");
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Three.jsビューア初期化(マウント時に一度だけ)。
   // 面クリック時のコールバックはストアの最新スナップショットを直接参照する
@@ -738,6 +796,25 @@ export default function App() {
     const text = serializeProject(doc);
     const blob = new Blob([text], { type: "application/json" });
     downloadBlob(blob, "model.l3dcad");
+  }
+
+  /**
+   * 「共有リンクをコピー」ボタン(Phase 40a): 現在のドキュメントをgzip圧縮+base64url化して
+   * location.hash("#m=...")に埋め込んだURLをクリップボードにコピーする(バックエンド不要)。
+   * CompressionStream非対応環境ではボタン自体を無効化している(下のisShareLinkSupported参照)ため、
+   * ここが呼ばれるのは対応環境のみだが、念のためtry/catchで囲み失敗時もクラッシュしない。
+   */
+  async function handleCopyShareLink() {
+    try {
+      const { data, byteLength } = await encodeShareLinkPayload(doc);
+      const url = buildShareLinkUrl(location.origin, location.pathname, data);
+      await navigator.clipboard.writeText(url);
+      const kb = (byteLength / 1024).toFixed(1);
+      const sizeWarning = data.length > SHARE_LINK_WARN_CHARS ? "(URLが長いため一部の環境では開けない可能性があります)" : "";
+      showTransientMessage(`共有リンクをコピーしました(${kb}KB)${sizeWarning}`);
+    } catch (err) {
+      showTransientMessage(`共有リンクの作成に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /** 「開く」ボタン(Phase 26): 隠しfile inputのクリックを発火する。 */
@@ -2079,6 +2156,20 @@ export default function App() {
               style={{ display: "none" }}
               onChange={handleOpenProjectFile}
             />
+            <button
+              type="button"
+              className="ribbon-file-btn"
+              data-testid="btn-copy-share-link"
+              onClick={handleCopyShareLink}
+              disabled={!shareLinkSupported}
+              title={
+                shareLinkSupported
+                  ? "現在のドキュメントをURLに埋め込んだ共有リンクをコピーします(サーバー不要)"
+                  : "このブラウザは共有リンク機能(CompressionStream)に対応していません"
+              }
+            >
+              <ToolIcon name="shareLink" /> 共有リンクをコピー
+            </button>
             <button
               type="button"
               className="ribbon-file-btn"
