@@ -1,0 +1,70 @@
+name: モデルギャラリーへの投稿
+description: >-
+  作成したモデルをコミュニティギャラリー(models/)に投稿します。アプリ内の「ギャラリーに投稿」
+  ボタンから開くと、以下の項目が自動的に入力された状態でこの画面が開きます。
+title: "[モデル投稿] "
+labels:
+  - model-submission
+body:
+  - type: markdown
+    attributes:
+      value: |
+        モデルギャラリー(`models/`)への投稿フォームです。送信すると自動的にこの内容を検証し、
+        Pull Requestを作成します(`.github/workflows/model-submission.yml`)。マージされると
+        ギャラリー(`?g=<slug>`、アプリのリボンの「ギャラリー」リンク)に掲載されます。
+
+        アプリの「ギャラリーに投稿」ボタンから開いた場合、タイトル・作者名・説明・タグ・
+        モデルデータは自動的に入力されています。手動でこのフォームを開いた場合は、アプリの
+        「共有リンクをコピー」ボタンで得たURLを「モデルデータ」欄に貼り付けてください。
+  - type: input
+    id: model_title
+    attributes:
+      label: タイトル
+      description: モデルの名前(日本語可)
+      placeholder: "例: L字ブラケット"
+    validations:
+      required: true
+  - type: input
+    id: author_name
+    attributes:
+      label: 作者名
+      description: ギャラリーに表示される投稿者名・ハンドル名
+      placeholder: "例: yourname"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: 説明
+      description: モデルの簡単な説明(用途・寸法・使っているフィーチャー等)
+      placeholder: "例: 60×50mm・厚さ15mmのL字形状ブラケットです。"
+    validations:
+      required: true
+  - type: input
+    id: tags
+    attributes:
+      label: タグ
+      description: カンマ区切りのタグ(任意)
+      placeholder: "例: ブラケット, L字, 構造材"
+    validations:
+      required: false
+  - type: textarea
+    id: model_data
+    attributes:
+      label: モデルデータ
+      description: >-
+        アプリの「共有リンクをコピー」ボタンで得られるURL(#m=... を含む完全なURL、または
+        #m=以降のペイロード部分のみ)をそのまま貼り付けてください。「ギャラリーに投稿」
+        ダイアログが自動入力できなかった場合は、クリップボードに共有リンクがコピーされている
+        ので、それをここに貼り付けてください。改行や折り返しが入っても構いません。
+      placeholder: "https://plugbits.github.io/light-3dcad/#m=..."
+      render: text
+    validations:
+      required: true
+  - type: checkboxes
+    id: license_agreement
+    attributes:
+      label: ライセンス同意
+      options:
+        - label: 投稿モデルをMITライセンスで公開することに同意します
+          required: true
