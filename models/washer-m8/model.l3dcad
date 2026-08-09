@@ -1,0 +1,38 @@
+{
+  "format": "l3dcad",
+  "schemaVersion": 1,
+  "document": {
+    "version": 1,
+    "features": [
+      {
+        "type": "sketch",
+        "id": "sketch-washer-1",
+        "name": "Sketch1",
+        "plane": { "kind": "world", "plane": "XY" },
+        "entities": [
+          {
+            "kind": "circle",
+            "id": "entity-washer-outer",
+            "center": [0, 0],
+            "radius": 8
+          },
+          {
+            "kind": "circle",
+            "id": "entity-washer-inner",
+            "center": [0, 0],
+            "radius": 4.25
+          }
+        ]
+      },
+      {
+        "type": "extrude",
+        "id": "extrude-washer-1",
+        "name": "Extrude1",
+        "sketchId": "sketch-washer-1",
+        "distance": 1.6,
+        "direction": 1,
+        "operation": "newBody"
+      }
+    ]
+  }
+}

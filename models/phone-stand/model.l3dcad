@@ -1,0 +1,61 @@
+{
+  "format": "l3dcad",
+  "schemaVersion": 1,
+  "document": {
+    "version": 1,
+    "features": [
+      {
+        "type": "sketch",
+        "id": "sketch-phonestand-1",
+        "name": "Sketch1",
+        "plane": { "kind": "world", "plane": "XZ" },
+        "entities": [
+          {
+            "kind": "polygon",
+            "id": "entity-phonestand-profile",
+            "points": [
+              [0, 2],
+              [0.15, 1.23],
+              [0.59, 0.59],
+              [1.23, 0.15],
+              [2, 0],
+              [88, 0],
+              [88.77, 0.15],
+              [89.41, 0.59],
+              [89.85, 1.23],
+              [90, 2],
+              [90, 8],
+              [117.9, 84.64],
+              [118.03, 85.83],
+              [117.6, 86.93],
+              [116.7, 87.72],
+              [115.55, 88],
+              [112.87, 88],
+              [112.12, 87.88],
+              [111.44, 87.55],
+              [110.89, 87.02],
+              [110.52, 86.36],
+              [82, 8],
+              [8, 8],
+              [8, 20],
+              [2, 20],
+              [1.23, 19.85],
+              [0.59, 19.41],
+              [0.15, 18.77],
+              [0, 18]
+            ]
+          }
+        ]
+      },
+      {
+        "type": "extrude",
+        "id": "extrude-phonestand-1",
+        "name": "Extrude1",
+        "sketchId": "sketch-phonestand-1",
+        "distance": 70,
+        "direction": 1,
+        "operation": "newBody"
+      }
+    ]
+  }
+}

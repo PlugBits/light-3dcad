@@ -1,0 +1,62 @@
+{
+  "format": "l3dcad",
+  "schemaVersion": 1,
+  "document": {
+    "version": 1,
+    "features": [
+      {
+        "type": "sketch",
+        "id": "sketch-nameplate-1",
+        "name": "Sketch1",
+        "plane": { "kind": "world", "plane": "XY" },
+        "entities": [
+          {
+            "kind": "polygon",
+            "id": "entity-nameplate-outline",
+            "points": [
+              [-40, -10],
+              [-39.76, -11.55],
+              [-39.05, -12.94],
+              [-37.94, -14.05],
+              [-36.55, -14.76],
+              [-35, -15],
+              [35, -15],
+              [36.55, -14.76],
+              [37.94, -14.05],
+              [39.05, -12.94],
+              [39.76, -11.55],
+              [40, -10],
+              [40, 10],
+              [39.76, 11.55],
+              [39.05, 12.94],
+              [37.94, 14.05],
+              [36.55, 14.76],
+              [35, 15],
+              [-35, 15],
+              [-36.55, 14.76],
+              [-37.94, 14.05],
+              [-39.05, 12.94],
+              [-39.76, 11.55],
+              [-40, 10]
+            ]
+          },
+          {
+            "kind": "circle",
+            "id": "entity-nameplate-hole",
+            "center": [-30, 0],
+            "radius": 2.5
+          }
+        ]
+      },
+      {
+        "type": "extrude",
+        "id": "extrude-nameplate-1",
+        "name": "Extrude1",
+        "sketchId": "sketch-nameplate-1",
+        "distance": 3,
+        "direction": 1,
+        "operation": "newBody"
+      }
+    ]
+  }
+}
