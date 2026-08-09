@@ -1,0 +1,38 @@
+{
+  "format": "l3dcad",
+  "schemaVersion": 1,
+  "document": {
+    "version": 1,
+    "features": [
+      {
+        "type": "sketch",
+        "id": "sketch-ring-1",
+        "name": "Sketch1",
+        "plane": { "kind": "world", "plane": "XY" },
+        "entities": [
+          {
+            "kind": "circle",
+            "id": "entity-ring-outer",
+            "center": [0, 0],
+            "radius": 20
+          },
+          {
+            "kind": "circle",
+            "id": "entity-ring-inner",
+            "center": [0, 0],
+            "radius": 10
+          }
+        ]
+      },
+      {
+        "type": "extrude",
+        "id": "extrude-ring-1",
+        "name": "Extrude1",
+        "sketchId": "sketch-ring-1",
+        "distance": 8,
+        "direction": 1,
+        "operation": "newBody"
+      }
+    ]
+  }
+}
