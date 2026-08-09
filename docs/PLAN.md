@@ -1058,3 +1058,16 @@ gzip 262.5KB(+1.3KB、上限350KB内)、E2E 42→43件全通過(2分割でBash�
 
 MIT License・`THIRD_PARTY_NOTICES.md`(OCCT/PlaneGCSのLGPL-2.1系WASM無改変利用の明記)・
 `CONTRIBUTING.md`を新設しREADME.mdを日英構成へ刷新(src/・e2e/は無変更、履歴シークレット走査は異常無し)。
+
+## Phase 40c: コミュニティモデルギャラリー(PR投稿・静的ビルド)
+
+リポジトリルート`models/<slug>/`(model.l3dcad+meta.json)を正本とするコミュニティモデル投稿の
+仕組みを追加した。共有リンク(Phase 40a)と共通化した`src/project/bootLoad.ts`が起動時ロード
+(`?g=<slug>`、`src/project/galleryLoad.ts`)を担い、`scripts/build-gallery.mjs`+
+`scripts/capture-thumbnails.mjs`(`npm run gallery:build`、Playwrightでサムネイル撮影)が
+`dist/gallery/`を生成、`vite.config.ts`の`modelsGalleryAssetsPlugin`がdev配信/ビルドコピーを
+担う。CIは`npm test`内の`tests/project/models.test.ts`で不正モデルを検出し、`deploy.yml`に
+ギャラリービルド手順を追加した。gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest
+548→580件全通過、`vite build`+`npm run size`でメインバンドルgzip 263.1KB(+0.6KB、上限350KB内)、
+`npm run gallery:build`でdist/gallery/index.html+サムネイル3件生成、E2E 43→46件全通過
+(2分割でBash同期実行)。
