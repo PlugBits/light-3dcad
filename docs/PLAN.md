@@ -1011,3 +1011,17 @@ gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 517件全通�
 グラデーションテクスチャ化+左下固定の毎フレーム更新XYZ軸インジケータを追加した(新規npm依存なし)。
 gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 517件全通過、`vite build`+`npm run size`で
 メインバンドルgzip 259.8KB→261.0KB(+1.2KB)、E2E 41件全通過(2分割でBash同期実行)。
+
+## Phase 38c: フィーチャーツリー常時表示+「セグメント」表記の人間可読化
+
+スケッチ編集中にツリーへ戻れないというユーザー報告に対応した(実際はaside内に常駐していたが、
+明示的な離脱導線が無くSketchEditorパネルの下に埋もれて見えた)。SketchEditorパネルヘッダ+
+リボンの`スケッチ`タブ両方に「スケッチ終了」ボタン(`btn-exit-sketch-panel`/`btn-exit-sketch`、
+`selectFeature(null)`)を追加し、`.feature-tree`を`position: sticky; top: 0`化してaside内で
+常に最上部に留まるようにした。「セグメント」表記は`src/sketch/displayNames.ts`(新設、
+`constraintLabels.ts`を置き換え)に一元化し、種類(線分/円弧/矩形/円/…)+配列内位置で
+「線分1」「円1」のように表示、拘束一覧は「一致: 線分5の終点 = 線分1の始点」のような人間可読文へ
+変更した(SketchEditor・gcsAdapter矛盾トースト・validation/ai-compileの診断メッセージまで横断)。
+gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 517件全通過(文字列アサーション追従)、
+`vite build`+`npm run size`でメインバンドルgzip 261.0KB→261.2KB(+0.2KB)、E2E 41件全通過(2分割で
+Bash同期実行)。
