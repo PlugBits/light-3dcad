@@ -1043,3 +1043,8 @@ revolveのaxis:"y"がevaluator実装上ワールドZ相当になることを検�
 設計メモを折りたたみ表示する形へ変更した。gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、
 Vitest 517→534件全通過、`vite build`+`npm run size`でメインバンドルgzip 261.2KB(変化なし、
 AI関連は遅延チャンク)、E2E 41→42件全通過(2分割でBash同期実行)。
+
+## Phase 40b: オープンソース公開準備(ライセンス・ドキュメント整備)
+
+MIT License・`THIRD_PARTY_NOTICES.md`(OCCT/PlaneGCSのLGPL-2.1系WASM無改変利用の明記)・
+`CONTRIBUTING.md`を新設しREADME.mdを日英構成へ刷新(src/・e2e/は無変更、履歴シークレット走査は異常無し)。

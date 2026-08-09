@@ -3,6 +3,12 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PlugBits/light-3dcad.git"
+  },
+  "homepage": "https://plugbits.github.io/light-3dcad/",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
