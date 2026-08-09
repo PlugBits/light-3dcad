@@ -18,7 +18,7 @@ import {
 import { createCircleEntity, createRectangleEntity, createRegularPolygonEntity, createSlotEntity } from "../model/entity";
 import type { FeatureId, PolygonCorner, SketchEntity, SketchFeature, SketchSegment } from "../model/types";
 import { isEntityFixed, removeConstraint, setEntityFixed } from "../sketch/constraintDimensions";
-import { CONSTRAINT_KIND_LABELS, describeConstraint } from "../sketch/constraintLabels";
+import { CONSTRAINT_KIND_LABELS, describeConstraint, segmentDisplayName } from "../sketch/displayNames";
 import { formatMm } from "../sketch/format";
 import type { SketchDiagnostics } from "../sketch/solver";
 import { updateDocumentWithConflictRollback } from "../state/constraintUpdate";
@@ -83,12 +83,20 @@ export function SketchEditor({
   sketch,
   onNotice,
   diagnostics,
+  onExitSketch,
 }: {
   sketch: SketchFeature;
   onNotice?: (message: string) => void;
   /** 拘束診断(自由度[dof]・矛盾/冗長拘束id、拘束診断UI、Phase 35b-2)。App.tsxがsolve後の状態から
    * 都度計算して渡す(GCS未初期化・図形が無い等はnull=定義状態バッジ非表示)。 */
   diagnostics?: SketchDiagnostics | null;
+  /**
+   * 「スケッチ終了」ボタン(ユーザー報告対応、Phase 38c: フィーチャーツリーへ戻る導線が
+   * 分かりにくいという報告への対応)。App.tsxのselectFeature(null)を渡す想定(省略時はボタン非表示)。
+   * クリックでスケッチの選択を解除する(=フィーチャーツリーのみの状態に戻る、リボンも
+   * 「フィーチャー」タブへ自動的に切り替わる、既存の自動タブ切替ロジック参照)。
+   */
+  onExitSketch?: () => void;
 }) {
   const updateDocument = useCadStore((s) => s.updateDocument);
   // ビューア上のスケッチ線直接クリックで選択されたentity/segmentのid(Phase 31b、未選択はnull)。
@@ -215,7 +223,20 @@ export function SketchEditor({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <h3 style={{ margin: 0, fontSize: 14 }}>スケッチ編集</h3>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <h3 style={{ margin: 0, fontSize: 14 }}>スケッチ編集</h3>
+        {onExitSketch && (
+          <button
+            type="button"
+            data-testid="btn-exit-sketch-panel"
+            onClick={onExitSketch}
+            title="スケッチの選択を解除してフィーチャーツリーに戻ります"
+            style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}
+          >
+            ✓ スケッチ終了
+          </button>
+        )}
+      </div>
       {diagnostics && hasGeometry && <DefinitionStateBadge diagnostics={diagnostics} />}
       <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
         名前
@@ -290,7 +311,7 @@ export function SketchEditor({
               <span style={{ display: "flex", gap: 6 }}>
                 <button
                   type="button"
-                  title="等価な線分・円弧セグメントに変換します(変換後はトリムツールで編集できます)"
+                  title="等価な線分・円弧要素に変換します(変換後はトリムツールで編集できます)"
                   data-testid={`entity-${entity.kind}-${index}-explode`}
                   onClick={() => handleExplodeEntity(entity)}
                   style={{ fontSize: 11 }}
@@ -452,17 +473,17 @@ export function SketchEditor({
         }}
       >
         <h3 style={{ margin: 0, fontSize: 13 }} title="座標編集は未対応(トリムツールで区間ごと削除できます)">
-          セグメント(線分・円弧)
+          線分・円弧
         </h3>
         <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12 }}>
-          <span data-testid="segment-count">セグメント数: {sketch.segments?.length ?? 0}</span>
+          <span data-testid="segment-count">スケッチ要素: {sketch.segments?.length ?? 0}</span>
           <button
             type="button"
             data-testid="btn-clear-segments"
             onClick={handleClearSegments}
             disabled={!sketch.segments || sketch.segments.length === 0}
             style={{ fontSize: 11 }}
-            title="全てのセグメントを一括削除します(参照する拘束も一緒に削除されます)"
+            title="全てのスケッチ要素を一括削除します(参照する拘束も一緒に削除されます)"
           >
             全削除
           </button>
@@ -505,7 +526,7 @@ export function SketchEditor({
                   </span>
                   <button
                     type="button"
-                    title="このセグメントを削除します(参照する拘束も一緒に削除されます)"
+                    title="この要素を削除します(参照する拘束も一緒に削除されます)"
                     data-testid={`segment-row-${index}-delete`}
                     onClick={(e) => {
                       e.stopPropagation();
@@ -561,13 +582,15 @@ function DefinitionStateBadge({ diagnostics }: { diagnostics: SketchDiagnostics 
 
 /**
  * セグメント個別行の表示ラベル(種類+概略座標、実機報告対応Phase 32②)。
- * 例: 「セグメント1(線分): (0, 0) → (10, 0)」。座標はformatMm()で小数3桁に丸める(表示用)。
+ * 「セグメント」という分かりにくい表記をやめ、種類(線分/円弧)+配列内の位置で表す
+ * (ユーザー報告対応、Phase 38c: src/sketch/displayNames.tsのsegmentDisplayNameが単一の
+ * 表示名ロジック)。例: 「線分1: (0, 0) → (10, 0)」「円弧6: …」。
+ * 座標はformatMm()で小数3桁に丸める(表示用)。
  */
 function segmentRowLabel(seg: SketchSegment, index: number): string {
-  const kindLabel = seg.kind === "arc" ? "円弧" : "線分";
   const p1 = `(${formatMm(seg.p1[0])}, ${formatMm(seg.p1[1])})`;
   const p2 = `(${formatMm(seg.p2[0])}, ${formatMm(seg.p2[1])})`;
-  return `セグメント${index + 1}(${kindLabel}): ${p1} → ${p2}`;
+  return `${segmentDisplayName(seg, index)}: ${p1} → ${p2}`;
 }
 
 /**
@@ -626,7 +649,7 @@ function ConstraintListPanel({ sketch, diagnostics }: { sketch: SketchFeature; d
                 }}
               >
                 <span>
-                  <strong>{CONSTRAINT_KIND_LABELS[constraint.kind]}</strong>{" "}
+                  <strong>{CONSTRAINT_KIND_LABELS[constraint.kind]}:</strong>{" "}
                   <span style={{ opacity: 0.8 }}>{describeConstraint(sketch.segments, sketch.entities, constraint)}</span>
                 </span>
                 <button

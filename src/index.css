@@ -416,6 +416,13 @@ h3 {
   border-radius: var(--cad-radius-md);
   background: var(--cad-panel);
   overflow: hidden;
+  /* ユーザー報告対応(Phase 38c): スケッチ編集パネル等、下に続く内容が長くなっても
+     ツリー自体は常にasideの最上部に留まり続ける(SolidWorksのFeatureManagerツリーと同様、
+     「編集中に迷子にならない」ことを保証する)。 */
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  flex-shrink: 0;
 }
 .feature-tree-header {
   display: flex;

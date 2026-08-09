@@ -2224,9 +2224,9 @@ export default function App() {
                     className={`ribbon-tool-mini${arcModeActive ? " is-active" : ""}`}
                     data-testid="btn-toggle-arc-mode"
                     onClick={handleToggleArcMode}
-                    title="次のセグメントを円弧(3点円弧)にします(Aキーでも切替)"
+                    title="次に描く要素を円弧(3点円弧)にします(Aキーでも切替)"
                   >
-                    <ToolIcon name="arc" size={16} /> {arcModeActive ? "円弧セグメント中(A)" : "円弧(A)"}
+                    <ToolIcon name="arc" size={16} /> {arcModeActive ? "円弧モード中(A)" : "円弧(A)"}
                   </button>
                 )}
                 <button
@@ -2293,7 +2293,7 @@ export default function App() {
                   data-testid="btn-extend"
                   onClick={extendTool ? handleCancelExtendTool : handleStartExtendTool}
                   disabled={isExtendToolDisabled()}
-                  title="直線セグメントの近い側の端点をホバーし、最初に交わる相手まで延長します(緑色プレビューが延長区間、Escで終了)"
+                  title="線分の近い側の端点をホバーし、最初に交わる相手まで延長します(緑色プレビューが延長区間、Escで終了)"
                 >
                   <ToolIcon name="extend" />
                   <span className="ribbon-tool-label">{extendTool ? "延長キャンセル(Esc)" : "延長"}</span>
@@ -2345,7 +2345,7 @@ export default function App() {
                   data-testid="btn-trim"
                   onClick={trimTool ? handleCancelTrimTool : handleStartTrimTool}
                   disabled={isTrimToolDisabled()}
-                  title="セグメントの区間をクリックして削除します(赤色プレビューが削除対象、Escで終了)"
+                  title="スケッチ要素の区間をクリックして削除します(赤色プレビューが削除対象、Escで終了)"
                 >
                   <ToolIcon name="trim" />
                   <span className="ribbon-tool-label">{trimTool ? "トリムキャンセル(Esc)" : "トリム"}</span>
@@ -2402,6 +2402,24 @@ export default function App() {
                 >
                   <ToolIcon name="revolve" />
                   <span className="ribbon-tool-label">回転体</span>
+                </button>
+              </div>
+
+              {/* スケッチ終了(ユーザー報告対応、Phase 38c): スケッチの選択を解除し、フィーチャーツリー
+                  のみの状態へ明示的に戻るボタン。SketchEditorパネルヘッダの同名ボタンと同じ動作
+                  (selectFeature(null))で、リボンは既存の自動タブ切替ロジックにより「フィーチャー」
+                  タブへ自動的に戻る。 */}
+              <div className="ribbon-group">
+                <button
+                  type="button"
+                  className="ribbon-tool"
+                  data-testid="btn-exit-sketch"
+                  onClick={() => selectFeature(null)}
+                  title="スケッチの選択を解除してフィーチャーツリーに戻ります"
+                  style={{ color: "var(--cad-accent, #4a90d9)" }}
+                >
+                  <ToolIcon name="sketchExit" />
+                  <span className="ribbon-tool-label">スケッチ終了</span>
                 </button>
               </div>
             </>
@@ -2947,7 +2965,12 @@ export default function App() {
           {selectedFeature && (
             <div style={{ borderTop: "1px solid var(--cad-border)", paddingTop: 12 }}>
               {selectedFeature.type === "sketch" && (
-                <SketchEditor sketch={selectedFeature} onNotice={showTransientMessage} diagnostics={selectedSketchDiagnostics} />
+                <SketchEditor
+                  sketch={selectedFeature}
+                  onNotice={showTransientMessage}
+                  diagnostics={selectedSketchDiagnostics}
+                  onExitSketch={() => selectFeature(null)}
+                />
               )}
               {selectedFeature.type === "extrude" && <ExtrudeEditor extrude={selectedFeature} doc={doc} />}
               {selectedFeature.type === "fillet3d" && (

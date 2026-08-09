@@ -28,6 +28,7 @@ export type ToolIconName =
   | "dimension"
   | "constraint"
   | "sketchStart"
+  | "sketchExit"
   | "faceSketch"
   | "extrude"
   | "revolve"
@@ -182,6 +183,14 @@ const PATHS: Record<ToolIconName, ReactElement> = {
       <path d="M4 8 12 4l8 4-8 4-8-4Z" />
       <path d="M4 8v8l8 4 8-4V8" />
       <circle cx="12" cy="12" r="1.8" />
+    </>
+  ),
+  // 「スケッチ終了」ボタン(ユーザー報告対応、Phase 38c)。丸に囲まれたチェックマーク(SolidWorks風の
+  // 「スケッチ終了」アイコンを意識した、緑系の確定/完了を示す意匠)。
+  sketchExit: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M7.5 12.5l3 3 6-6.5" />
     </>
   ),
   extrude: (
