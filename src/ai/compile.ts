@@ -95,7 +95,7 @@ function readPointRef(value: unknown, path: string, errors: ErrorCollector): { s
   const segment = value.segment;
   const point = value.point;
   if (!isNonEmptyString(segment)) {
-    errors.push(`${path}.segment`, "セグメントIDは空でない文字列である必要があります");
+    errors.push(`${path}.segment`, "スケッチ要素IDは空でない文字列である必要があります");
     return null;
   }
   if (point !== "start" && point !== "end") {
@@ -207,11 +207,11 @@ function compileSegment(raw: unknown, index: number, ctx: SketchCompileContext, 
     return null;
   }
   if (ctx.segmentIds.has(id)) {
-    errors.push(path, `セグメントID "${id}" がスケッチ内で重複しています`);
+    errors.push(path, `スケッチ要素ID "${id}" がスケッチ内で重複しています`);
     return null;
   }
   if (kind !== "line" && kind !== "arc") {
-    errors.push(`${path}.kind`, `未対応のセグメント種別です: ${JSON.stringify(kind)}("line"または"arc")`);
+    errors.push(`${path}.kind`, `未対応の線分/円弧種別です: ${JSON.stringify(kind)}("line"または"arc")`);
     return null;
   }
   const p1 = readPoint2(raw.p1, `${path}.p1`, errors);
@@ -244,7 +244,7 @@ function resolvePointRef(
   errors: ErrorCollector,
 ): PointRef | null {
   if (!ctx.segmentIds.has(ref.segmentId)) {
-    errors.push(path, `"${ref.segmentId}" というIDのセグメントが見つかりません`);
+    errors.push(path, `"${ref.segmentId}" というIDのスケッチ要素が見つかりません`);
     return null;
   }
   return { segmentId: ref.segmentId, end: ref.point === "start" ? "p1" : "p2" };
@@ -280,11 +280,11 @@ function compileConstraint(raw: unknown, index: number, ctx: SketchCompileContex
       if (!isPositiveFiniteNumber(value)) errors.push(`${path}.value`, "正の数である必要があります");
       if (!isNonEmptyString(segment) || !isPositiveFiniteNumber(value)) return null;
       if (!ctx.segmentIds.has(segment)) {
-        errors.push(path, `"${segment}" というIDのセグメントが見つかりません`);
+        errors.push(path, `"${segment}" というIDのスケッチ要素が見つかりません`);
         return null;
       }
       if (ctx.segmentKindById.get(segment) !== "arc") {
-        errors.push(path, `半径拘束は円弧セグメントにのみ指定できます("${segment}"はarcではありません)`);
+        errors.push(path, `半径拘束は円弧にのみ指定できます("${segment}"はarcではありません)`);
         return null;
       }
       return { id, kind: "radius", segmentId: segment, value };
@@ -297,7 +297,7 @@ function compileConstraint(raw: unknown, index: number, ctx: SketchCompileContex
         return null;
       }
       if (!ctx.segmentIds.has(segment)) {
-        errors.push(path, `"${segment}" というIDのセグメントが見つかりません`);
+        errors.push(path, `"${segment}" というIDのスケッチ要素が見つかりません`);
         return null;
       }
       return { id, kind, segmentId: segment };

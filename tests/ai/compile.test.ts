@@ -217,7 +217,7 @@ describe("compileAuthoringModel: 意味的エラー(日本語+JSONパス)", () =
     const result = compileAuthoringModel(model);
     expect("errors" in result).toBe(true);
     if (!("errors" in result)) throw new Error("unreachable");
-    expect(result.errors.some((e) => e.includes("円弧セグメントにのみ指定できます"))).toBe(true);
+    expect(result.errors.some((e) => e.includes("円弧にのみ指定できます"))).toBe(true);
   });
 
   it("拘束が存在しないセグメントIDを参照しているとエラーになる", () => {
@@ -236,7 +236,7 @@ describe("compileAuthoringModel: 意味的エラー(日本語+JSONパス)", () =
     const result = compileAuthoringModel(model);
     expect("errors" in result).toBe(true);
     if (!("errors" in result)) throw new Error("unreachable");
-    expect(result.errors.some((e) => e.includes('"does-not-exist" というIDのセグメントが見つかりません'))).toBe(true);
+    expect(result.errors.some((e) => e.includes('"does-not-exist" というIDのスケッチ要素が見つかりません'))).toBe(true);
   });
 
   it("regularPolygonのsidesが範囲外(3〜24)だとエラーになる", () => {

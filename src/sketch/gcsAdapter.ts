@@ -23,7 +23,7 @@
 // 十分高速なことを確認済み。sketch_param経由の差分更新は複雑さに見合わないため採用しない)。
 import { Algorithm, GcsWrapper, make_gcs_wrapper, type SketchPrimitive } from "@salusoft89/planegcs";
 import type { EntityRef, LineRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
-import { constraintFullLabel } from "./constraintLabels";
+import { constraintDisplayText } from "./displayNames";
 import { rectangleEdgePointsAtCenter, resolveLineRefPoints } from "./entityEdges";
 import type { DragTarget, Point2, SolveOptions, SolveResult } from "./solver";
 
@@ -1089,7 +1089,7 @@ export function solveSketchGcs(
           if (offenders.length >= 2) break;
         }
       }
-      const names = offenders.map((o) => `『${constraintFullLabel(segments, entities, o)}』`);
+      const names = offenders.map((o) => `『${constraintDisplayText(segments, entities, o)}』`);
       const detail = names.length > 0 ? `${names[0]}を満たす位置に到達できませんでした${names.length > 1 ? `(関連: ${names[1]})` : ""}。` : "";
       return {
         ok: false,

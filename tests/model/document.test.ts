@@ -690,7 +690,7 @@ describe("validateFeature / validateDocument", () => {
     it("radius拘束をline(直線)セグメントに指定するとエラー", () => {
       const feature = sketchWithSegmentsAndConstraints([{ id: "c1", kind: "radius", segmentId: "line1", value: 5 }]);
       const errors = validateFeature(feature, [feature]);
-      expect(errors.some((e) => e.message.includes("円弧セグメントにのみ"))).toBe(true);
+      expect(errors.some((e) => e.message.includes("円弧にのみ"))).toBe(true);
     });
 
     it("distance拘束の参照点(PointRef)のsegmentIdが存在しないとエラー", () => {

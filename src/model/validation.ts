@@ -167,16 +167,16 @@ function validateSegment(segment: SketchSegment, featureId: FeatureId): Validati
     !Number.isFinite(segment.p2[0]) ||
     !Number.isFinite(segment.p2[1])
   ) {
-    errors.push({ featureId, message: `セグメント(${segment.id})の座標が不正です` });
+    errors.push({ featureId, message: `スケッチ要素(${segment.id})の座標が不正です` });
     return errors;
   }
   const dx = segment.p1[0] - segment.p2[0];
   const dy = segment.p1[1] - segment.p2[1];
   if (Math.sqrt(dx * dx + dy * dy) <= POLYGON_MIN_VERTEX_DISTANCE) {
-    errors.push({ featureId, message: `セグメント(${segment.id})の始点と終点が一致しています` });
+    errors.push({ featureId, message: `スケッチ要素(${segment.id})の始点と終点が一致しています` });
   }
   if (segment.kind === "arc" && segment.bulge !== undefined && !Number.isFinite(segment.bulge)) {
-    errors.push({ featureId, message: `セグメント(${segment.id})のbulge値が不正です` });
+    errors.push({ featureId, message: `スケッチ要素(${segment.id})のbulge値が不正です` });
   }
   return errors;
 }
@@ -230,7 +230,7 @@ function validatePointRef(
   featureId: FeatureId,
 ): ValidationError[] {
   if (!findSegmentById(segments, ref.segmentId)) {
-    return [{ featureId, message: `拘束(${constraintId})の参照先セグメント(${ref.segmentId}、${label})が見つかりません` }];
+    return [{ featureId, message: `拘束(${constraintId})の参照先スケッチ要素(${ref.segmentId}、${label})が見つかりません` }];
   }
   return [];
 }
@@ -267,7 +267,7 @@ function validateConstraint(
       if (!findSegmentById(segments, constraint.segmentId)) {
         errors.push({
           featureId,
-          message: `拘束(${constraint.id})の参照先セグメント(${constraint.segmentId})が見つかりません`,
+          message: `拘束(${constraint.id})の参照先スケッチ要素(${constraint.segmentId})が見つかりません`,
         });
       }
       break;
@@ -276,7 +276,7 @@ function validateConstraint(
       if (!findSegmentById(segments, constraint.segmentId)) {
         errors.push({
           featureId,
-          message: `拘束(${constraint.id})の参照先セグメント(${constraint.segmentId})が見つかりません`,
+          message: `拘束(${constraint.id})の参照先スケッチ要素(${constraint.segmentId})が見つかりません`,
         });
       }
       if (!isPositiveFiniteNumber(constraint.value)) {
@@ -344,10 +344,10 @@ function validateConstraint(
       if (!segment) {
         errors.push({
           featureId,
-          message: `拘束(${constraint.id})の参照先セグメント(${constraint.segmentId})が見つかりません`,
+          message: `拘束(${constraint.id})の参照先スケッチ要素(${constraint.segmentId})が見つかりません`,
         });
       } else if (segment.kind !== "arc") {
-        errors.push({ featureId, message: `拘束(${constraint.id})は円弧セグメントにのみ指定できます` });
+        errors.push({ featureId, message: `拘束(${constraint.id})は円弧にのみ指定できます` });
       }
       if (!isPositiveFiniteNumber(constraint.value)) {
         errors.push({ featureId, message: `拘束(${constraint.id})の半径は正の数である必要があります` });
@@ -361,19 +361,19 @@ function validateConstraint(
     case "perpendicular": {
       const a = findSegmentById(segments, constraint.a);
       const b = findSegmentById(segments, constraint.b);
-      if (!a) errors.push({ featureId, message: `拘束(${constraint.id})の参照先セグメント(${constraint.a})が見つかりません` });
-      else if (a.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は直線セグメントにのみ指定できます(${constraint.a})` });
-      if (!b) errors.push({ featureId, message: `拘束(${constraint.id})の参照先セグメント(${constraint.b})が見つかりません` });
-      else if (b.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は直線セグメントにのみ指定できます(${constraint.b})` });
+      if (!a) errors.push({ featureId, message: `拘束(${constraint.id})の参照先スケッチ要素(${constraint.a})が見つかりません` });
+      else if (a.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は線分にのみ指定できます(${constraint.a})` });
+      if (!b) errors.push({ featureId, message: `拘束(${constraint.id})の参照先スケッチ要素(${constraint.b})が見つかりません` });
+      else if (b.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は線分にのみ指定できます(${constraint.b})` });
       break;
     }
     case "distanceLineLine": {
       const a = findSegmentById(segments, constraint.a);
       const b = findSegmentById(segments, constraint.b);
-      if (!a) errors.push({ featureId, message: `拘束(${constraint.id})の参照先セグメント(${constraint.a})が見つかりません` });
-      else if (a.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は直線セグメントにのみ指定できます(${constraint.a})` });
-      if (!b) errors.push({ featureId, message: `拘束(${constraint.id})の参照先セグメント(${constraint.b})が見つかりません` });
-      else if (b.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は直線セグメントにのみ指定できます(${constraint.b})` });
+      if (!a) errors.push({ featureId, message: `拘束(${constraint.id})の参照先スケッチ要素(${constraint.a})が見つかりません` });
+      else if (a.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は線分にのみ指定できます(${constraint.a})` });
+      if (!b) errors.push({ featureId, message: `拘束(${constraint.id})の参照先スケッチ要素(${constraint.b})が見つかりません` });
+      else if (b.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は線分にのみ指定できます(${constraint.b})` });
       // 線↔線距離は0を許可(平行かつ線上一致として機能、寸法値の符号仕様の明確化、Phase 33)。負は不可。
       if (!isNonNegativeFiniteNumber(constraint.value)) {
         errors.push({ featureId, message: `拘束(${constraint.id})の距離は0以上の数である必要があります` });
@@ -383,10 +383,10 @@ function validateConstraint(
     case "angleLineLine": {
       const a = findSegmentById(segments, constraint.a);
       const b = findSegmentById(segments, constraint.b);
-      if (!a) errors.push({ featureId, message: `拘束(${constraint.id})の参照先セグメント(${constraint.a})が見つかりません` });
-      else if (a.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は直線セグメントにのみ指定できます(${constraint.a})` });
-      if (!b) errors.push({ featureId, message: `拘束(${constraint.id})の参照先セグメント(${constraint.b})が見つかりません` });
-      else if (b.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は直線セグメントにのみ指定できます(${constraint.b})` });
+      if (!a) errors.push({ featureId, message: `拘束(${constraint.id})の参照先スケッチ要素(${constraint.a})が見つかりません` });
+      else if (a.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は線分にのみ指定できます(${constraint.a})` });
+      if (!b) errors.push({ featureId, message: `拘束(${constraint.id})の参照先スケッチ要素(${constraint.b})が見つかりません` });
+      else if (b.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は線分にのみ指定できます(${constraint.b})` });
       if (!isPositiveFiniteNumber(constraint.value)) {
         errors.push({ featureId, message: `拘束(${constraint.id})の角度は正の数である必要があります` });
       }
@@ -394,8 +394,8 @@ function validateConstraint(
     }
     case "distanceLineRefEdge": {
       const seg = findSegmentById(segments, constraint.segmentId);
-      if (!seg) errors.push({ featureId, message: `拘束(${constraint.id})の参照先セグメント(${constraint.segmentId})が見つかりません` });
-      else if (seg.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は直線セグメントにのみ指定できます(${constraint.segmentId})` });
+      if (!seg) errors.push({ featureId, message: `拘束(${constraint.id})の参照先スケッチ要素(${constraint.segmentId})が見つかりません` });
+      else if (seg.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は線分にのみ指定できます(${constraint.segmentId})` });
       // 線↔参照エッジ距離も線↔線距離と同じく0を許可(Phase 33)。負は不可。
       if (!isNonNegativeFiniteNumber(constraint.value)) {
         errors.push({ featureId, message: `拘束(${constraint.id})の距離は0以上の数である必要があります` });
@@ -404,8 +404,8 @@ function validateConstraint(
     }
     case "angleLineRefEdge": {
       const seg = findSegmentById(segments, constraint.segmentId);
-      if (!seg) errors.push({ featureId, message: `拘束(${constraint.id})の参照先セグメント(${constraint.segmentId})が見つかりません` });
-      else if (seg.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は直線セグメントにのみ指定できます(${constraint.segmentId})` });
+      if (!seg) errors.push({ featureId, message: `拘束(${constraint.id})の参照先スケッチ要素(${constraint.segmentId})が見つかりません` });
+      else if (seg.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は線分にのみ指定できます(${constraint.segmentId})` });
       if (!isPositiveFiniteNumber(constraint.value)) {
         errors.push({ featureId, message: `拘束(${constraint.id})の角度は正の数である必要があります` });
       }
@@ -427,8 +427,8 @@ function validateConstraint(
       const target = constraint.target;
       if (target.kind === "segment") {
         const seg = findSegmentById(segments, target.segmentId);
-        if (!seg) errors.push({ featureId, message: `拘束(${constraint.id})の参照先セグメント(${target.segmentId})が見つかりません` });
-        else if (seg.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は直線セグメントにのみ指定できます(${target.segmentId})` });
+        if (!seg) errors.push({ featureId, message: `拘束(${constraint.id})の参照先スケッチ要素(${target.segmentId})が見つかりません` });
+        else if (seg.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は線分にのみ指定できます(${target.segmentId})` });
       } else {
         if (!entities.find((e) => e.id === target.entityId && e.kind === "circle")) {
           errors.push({ featureId, message: `拘束(${constraint.id})の参照先の円(${target.entityId})が見つかりません` });

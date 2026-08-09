@@ -1145,8 +1145,8 @@ describe("solveSketch 接線拘束が解けるのに矛盾判定されるバグ�
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.conflicting).toBe(true);
-    // 拘束一覧パネルと同じ表記(種類ラベル+セグメントラベル)を含む。
-    expect(result.message).toContain("セグメント1");
+    // 拘束一覧パネルと同じ表記(種類ラベル+要素の表示名)を含む。
+    expect(result.message).toContain("線分1");
     expect(result.message).toMatch(/長さ/);
   });
 });

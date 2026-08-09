@@ -52,7 +52,7 @@ async function dragSketchPoint(page: Page, from: [number, number], to: [number, 
   await page.mouse.up();
 }
 
-/** segment-row-{index} のテキスト("セグメントN(線分): (x1, y1) → (x2, y2)")からp1/p2を読み取る。 */
+/** segment-row-{index} のテキスト("線分N: (x1, y1) → (x2, y2)")からp1/p2を読み取る。 */
 async function segmentRowPoints(page: Page, index: number): Promise<{ p1: [number, number]; p2: [number, number] }> {
   const text = await page.getByTestId(`segment-row-${index}`).innerText();
   const match = text.match(/\(([-\d.]+), ([-\d.]+)\) → \(([-\d.]+), ([-\d.]+)\)/);

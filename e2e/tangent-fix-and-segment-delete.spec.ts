@@ -262,7 +262,7 @@ test("④真の矛盾(同一セグメントの両端点を原点一致させつ�
   // 拘束一覧パネルと同じ表記(種類ラベル)が含まれる: 「原点一致」または「長さ」のいずれか
   // (どちらが残差最大になるかは実装の内部詳細のため、いずれかを含んでいれば良しとする)。
   expect(message.includes("原点一致") || message.includes("長さ")).toBe(true);
-  expect(message).toContain("セグメント1");
+  expect(message).toContain("線分1");
 
   await page.getByTestId("btn-constraint").click(); // 拘束ツールを終了する。
 
