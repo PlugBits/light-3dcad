@@ -16,7 +16,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "e2e": "playwright test",
-    "size": "node scripts/check-bundle-size.mjs"
+    "size": "node scripts/check-bundle-size.mjs",
+    "gallery:build": "node scripts/build-gallery.mjs && node scripts/capture-thumbnails.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.116.0",
