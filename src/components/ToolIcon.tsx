@@ -10,6 +10,7 @@ export type ToolIconName =
   | "save"
   | "open"
   | "shareLink"
+  | "gallery"
   | "addPart"
   | "aiGenerate"
   | "exportStl"
@@ -82,6 +83,15 @@ const PATHS: Record<ToolIconName, ReactElement> = {
       <circle cx="18" cy="5.5" r="2.6" />
       <circle cx="18" cy="18.5" r="2.6" />
       <path d="M8.3 10.8 15.7 6.8M8.3 13.2l7.4 4" />
+    </>
+  ),
+  // モデルギャラリー(Phase 40c): 画像カード2枚(サムネイル)の意匠。
+  gallery: (
+    <>
+      <rect x="3" y="4" width="9" height="9" rx="1" />
+      <rect x="13" y="4" width="8" height="6" rx="1" />
+      <rect x="13" y="12" width="8" height="8" rx="1" />
+      <rect x="3" y="15" width="9" height="6" rx="1" />
     </>
   ),
   addPart: (

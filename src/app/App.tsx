@@ -93,6 +93,8 @@ import {
   upsertRadiusConstraint,
 } from "../sketch/constraintDimensions";
 import { deserializeProject, serializeProject } from "../project/serialization";
+import { runBootLoad } from "../project/bootLoad";
+import { extractGallerySlug, fetchGalleryModel, stripGallerySlugFromSearch } from "../project/galleryLoad";
 import {
   buildShareLinkUrl,
   decodeShareLinkPayload,
@@ -386,6 +388,8 @@ export default function App() {
    * 上書きせずconfirm()で確認する(キャンセル時は自動保存された内容のまま、hashだけ取り除く)。
    * マウント時に一度だけチェックすればよい(以後のhash変更、例えば#m=読み込み後のreplaceStateは
    * このeffect自身が行うため無視してよい)ため依存配列は空。
+   * 自動保存差分確認→読み込み→トースト表示の共通オーケストレーションは
+   * src/project/bootLoad.ts の runBootLoad()(モデルギャラリー[Phase 40c]の起動時ロードと共有)。
    */
   useEffect(() => {
     const shareData = extractShareLinkData(window.location.hash);
@@ -396,29 +400,65 @@ export default function App() {
     }
 
     let cancelled = false;
-    void (async () => {
-      const result = await decodeShareLinkPayload(shareData);
-      if (cancelled) return;
-      if (!result.ok) {
-        showTransientMessage(`共有リンクの読み込みに失敗しました: ${result.message}`);
+    void runBootLoad({
+      resolve: () => decodeShareLinkPayload(shareData),
+      isCancelled: () => cancelled,
+      getAutosaved: loadAutosavedDocument,
+      confirm: (message) => window.confirm(message),
+      confirmMessage: "共有リンクのモデルを開きますか?現在の作業は破棄されます",
+      onSuccess: (doc) => {
+        viewerRef.current?.requestFitOnNextMesh();
+        loadDocument(doc);
         stripShareLinkHash();
-        return;
-      }
-      // 自動保存(localStorage)された作業内容と共有リンクのモデルが異なる場合のみ確認する
-      // (自動保存が無い、または内容が同一の場合は確認なしでそのまま読み込む)。
-      const autosaved = loadAutosavedDocument();
-      if (autosaved && serializeProject(autosaved) !== serializeProject(result.doc)) {
-        const ok = window.confirm("共有リンクのモデルを開きますか?現在の作業は破棄されます");
-        if (!ok) {
-          stripShareLinkHash();
-          return;
-        }
-      }
-      viewerRef.current?.requestFitOnNextMesh();
-      loadDocument(result.doc);
-      stripShareLinkHash();
-      showTransientMessage("共有モデルを読み込みました");
-    })();
+        showTransientMessage("共有モデルを読み込みました");
+      },
+      onError: (message) => {
+        showTransientMessage(`共有リンクの読み込みに失敗しました: ${message}`);
+        stripShareLinkHash();
+      },
+      onCancelled: stripShareLinkHash,
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /**
+   * 起動時、URLにモデルギャラリーのクエリ(location.search="?g=<slug>")があれば読み込む
+   * (Phase 40c)。models/<slug>/model.l3dcad をfetchする点以外は共有リンク(上記effect)と
+   * 完全に同じ流れ(自動保存差分確認→読み込み→トースト、runBootLoad()で共通化)。
+   * 共有リンク(hash)とギャラリー(query)が同時に指定されることは通常想定しないが、
+   * 別々のURL部分・別々のeffectのため両方処理されても害はない(後勝ち)。
+   */
+  useEffect(() => {
+    const slug = extractGallerySlug(window.location.search);
+    if (!slug) return;
+
+    function stripGalleryQuery() {
+      const search = stripGallerySlugFromSearch(window.location.search);
+      window.history.replaceState(null, "", window.location.pathname + search + window.location.hash);
+    }
+
+    let cancelled = false;
+    void runBootLoad({
+      resolve: () => fetchGalleryModel(import.meta.env.BASE_URL, slug),
+      isCancelled: () => cancelled,
+      getAutosaved: loadAutosavedDocument,
+      confirm: (message) => window.confirm(message),
+      confirmMessage: "ギャラリーモデルを開きますか?現在の作業は破棄されます",
+      onSuccess: (doc) => {
+        viewerRef.current?.requestFitOnNextMesh();
+        loadDocument(doc);
+        stripGalleryQuery();
+        showTransientMessage("ギャラリーモデルを読み込みました");
+      },
+      onError: (message) => {
+        showTransientMessage(`ギャラリーモデルの読み込みに失敗しました: ${message}`);
+        stripGalleryQuery();
+      },
+      onCancelled: stripGalleryQuery,
+    });
 
     return () => {
       cancelled = true;
@@ -2196,6 +2236,16 @@ export default function App() {
             >
               <ToolIcon name="aiGenerate" /> AI生成
             </button>
+            <a
+              className="ribbon-file-btn"
+              data-testid="btn-open-gallery"
+              href={`${import.meta.env.BASE_URL}gallery/`}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="コミュニティが投稿したモデルのギャラリーを新しいタブで開きます"
+            >
+              <ToolIcon name="gallery" /> ギャラリー
+            </a>
             <button
               type="button"
               className="ribbon-file-btn"

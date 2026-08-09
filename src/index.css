@@ -192,6 +192,23 @@ h3 {
   width: 15px;
   height: 15px;
 }
+/* ギャラリーへのリンク(Phase 40c)は<a>要素のため、buttonセレクタ(上記)の基本見た目を個別に再現する。 */
+a.ribbon-file-btn {
+  cursor: pointer;
+  font-family: inherit;
+  color: var(--cad-text);
+  background: var(--cad-panel);
+  border: 1px solid var(--cad-border);
+  border-radius: var(--cad-radius-sm);
+  text-decoration: none;
+}
+a.ribbon-file-btn:hover {
+  background: var(--cad-hover);
+  border-color: var(--cad-border-strong);
+}
+a.ribbon-file-btn:active {
+  background: var(--cad-active);
+}
 
 .ribbon-icon-btn {
   display: flex;
