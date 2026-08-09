@@ -1,0 +1,181 @@
+name: Model Submission (Auto PR)
+
+# ギャラリーへのモデル投稿(Phase 40d)。model-submissionラベル付きのissue(issueフォーム
+# .github/ISSUE_TEMPLATE/model-submission.yml から自動的にラベルが付く)が開かれる/編集される
+# たびに、issue本文をパース→共有リンクのペイロードを伸長→バリデーション→models/<slug>/への
+# 配置→ブランチ作成→コミット→PR作成、をすべて自動で行う。モデルデータはJSONとして扱うのみで、
+# 一切実行しない(evaluatorやWASM等は動かさない、純粋なパース・検証)。
+#
+# 使用するmarketplaceアクションは actions/checkout・actions/setup-node・actions/github-script の
+# 3つのみ(いずれもGitHub公式)。issue本文の解析・slug化・PR作成は自前のNode/bashスクリプトで行う。
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: model-submission-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  process:
+    if: contains(github.event.issue.labels.*.name, 'model-submission')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: issue本文をパース・共有リンクを伸長
+        id: parse
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: node scripts/run-model-submission.mjs
+
+      - name: モデルデータを検証(vitest)
+        if: steps.parse.outputs.ok == 'true'
+        id: validate
+        continue-on-error: true
+        env:
+          SUBMISSION_JSON_PATH: ${{ steps.parse.outputs.model_json_path }}
+          SUBMISSION_RESULT_PATH: ${{ runner.temp }}/gallery-submission-validate-result.json
+        run: npx vitest run tests/project/validateSubmissionEnv.test.ts --reporter=basic
+
+      - name: 検証結果を読み取る
+        if: steps.parse.outputs.ok == 'true'
+        id: result
+        env:
+          SUBMISSION_RESULT_PATH: ${{ runner.temp }}/gallery-submission-validate-result.json
+        run: node scripts/finalize-submission-validation.mjs
+
+      - name: ブランチを作成してモデルをコミット
+        if: steps.parse.outputs.ok == 'true' && steps.result.outputs.ok == 'true'
+        id: commit
+        env:
+          SLUG: ${{ steps.parse.outputs.slug }}
+          MODEL_JSON_PATH: ${{ steps.parse.outputs.model_json_path }}
+          META_JSON_PATH: ${{ steps.parse.outputs.meta_json_path }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BRANCH="model-submission/issue-${ISSUE_NUMBER}"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+
+          mkdir -p "models/${SLUG}"
+          cp "$MODEL_JSON_PATH" "models/${SLUG}/model.l3dcad"
+          cp "$META_JSON_PATH" "models/${SLUG}/meta.json"
+
+          git add "models/${SLUG}"
+          git commit -m "feat: モデルギャラリーへ投稿を追加(slug: ${SLUG}, Issue #${ISSUE_NUMBER})"
+          # 再編集(issues: edited)による再送信では同じブランチを上書きする(ボット専用ブランチの
+          # ため force push で問題ない。main/masterへは一切触れない)。
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${BRANCH}"
+
+      - name: PRを作成してissueにコメント
+        if: steps.parse.outputs.ok == 'true' && steps.result.outputs.ok == 'true'
+        uses: actions/github-script@v8
+        env:
+          BRANCH: ${{ steps.commit.outputs.branch }}
+          SLUG: ${{ steps.parse.outputs.slug }}
+        with:
+          script: |
+            const branch = process.env.BRANCH;
+            const slug = process.env.SLUG;
+            const issueNumber = context.issue.number;
+
+            const existing = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: `${context.repo.owner}:${branch}`,
+              state: "open",
+            });
+
+            let prNumber;
+            let prUrl;
+            if (existing.data.length > 0) {
+              prNumber = existing.data[0].number;
+              prUrl = existing.data[0].html_url;
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: `投稿内容を更新し、Pull Request #${prNumber} を更新しました: ${prUrl}`,
+              });
+            } else {
+              const pr = await github.rest.pulls.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `feat: モデルギャラリーへ投稿を追加(${slug})`,
+                head: branch,
+                base: context.payload.repository.default_branch,
+                body: `Issue #${issueNumber} から自動生成されたモデル投稿です。\n\nCloses #${issueNumber}`,
+              });
+              prNumber = pr.data.number;
+              prUrl = pr.data.html_url;
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: `投稿を確認し、Pull Requestを作成しました: ${prUrl}\nマージされるとギャラリーに掲載されます。`,
+              });
+            }
+
+      - name: 投稿内容が不正な場合にコメント
+        if: steps.parse.outputs.ok != 'true'
+        uses: actions/github-script@v8
+        env:
+          FAIL_MESSAGE: ${{ steps.parse.outputs.message }}
+        with:
+          script: |
+            const message = process.env.FAIL_MESSAGE || "不明なエラーです";
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `投稿内容の確認でエラーが見つかりました。内容を修正のうえ、このissueを編集して再送信してください。\n\n\`\`\`\n${message}\n\`\`\``,
+            });
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ["invalid"],
+            });
+
+      - name: バリデーション失敗時にコメント
+        if: steps.parse.outputs.ok == 'true' && steps.result.outputs.ok != 'true'
+        uses: actions/github-script@v8
+        env:
+          FAIL_MESSAGE: ${{ steps.result.outputs.message }}
+        with:
+          script: |
+            const message = process.env.FAIL_MESSAGE || "不明なエラーです";
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `モデルデータのバリデーションに失敗しました。アプリで開いて評価が成功することを確認のうえ、このissueを編集して再送信してください。\n\n\`\`\`\n${message}\n\`\`\``,
+            });
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ["invalid"],
+            });
