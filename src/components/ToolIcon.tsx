@@ -11,6 +11,7 @@ export type ToolIconName =
   | "open"
   | "shareLink"
   | "gallery"
+  | "gallerySubmit"
   | "addPart"
   | "aiGenerate"
   | "exportStl"
@@ -99,6 +100,14 @@ const PATHS: Record<ToolIconName, ReactElement> = {
       <path d="M12 3 4 7v10l8 4 8-4V7Z" />
       <path d="M4 7l8 4 8-4M12 11v10" />
       <path d="M17 2l1.4 1.4L20 2" transform="translate(0 0)" />
+    </>
+  ),
+  // ギャラリーへの投稿(Phase 40d): カード(gallery意匠)+右上の上向き矢印(アップロード)。
+  gallerySubmit: (
+    <>
+      <rect x="3" y="6" width="12" height="14" rx="1" />
+      <path d="M6 10h6M6 13h4" />
+      <path d="M18 3v8M14.5 7.5 18 4l3.5 3.5" />
     </>
   ),
   aiGenerate: (

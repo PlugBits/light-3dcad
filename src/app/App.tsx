@@ -17,6 +17,8 @@ import { worldDirectionToLocal, worldPointToLocal } from "../assembly/mateSolver
 // AIモデル生成パネル(Phase 37)。@anthropic-ai/sdkを含む重い依存(src/ai/generate.ts経由で
 // さらに動的import)をメインバンドルから分離するため、React.lazy()で遅延読み込みする。
 const AiGeneratePanel = lazy(() => import("../components/AiGeneratePanel"));
+// 「ギャラリーに投稿」ダイアログ(Phase 40d)。使用頻度が低いUIのため同様に遅延読み込みする。
+const GallerySubmitDialog = lazy(() => import("../components/GallerySubmitDialog"));
 import { downloadBlob } from "../export/downloadBlob";
 import { downloadStl } from "../export/downloadStl";
 import {
@@ -247,6 +249,8 @@ export default function App() {
   const [openPartError, setOpenPartError] = useState<string | null>(null);
   // AI生成パネル(Phase 37)の開閉状態。
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
+  // 「ギャラリーに投稿」ダイアログ(Phase 40d)の開閉状態。
+  const [gallerySubmitOpen, setGallerySubmitOpen] = useState(false);
   // 「スケッチ追加」ボタンで使う平面選択(Phase 13)。基準平面クリックと同等の機能をUIからも操作できるようにする。
   const [newSketchPlane, setNewSketchPlane] = useState<"XY" | "XZ" | "YZ">("XY");
   // 現在アクティブなフィレット/面取りツール(未選択はnull、Phase 18)。
@@ -2249,6 +2253,22 @@ export default function App() {
             <button
               type="button"
               className="ribbon-file-btn"
+              data-testid="btn-gallery-submit"
+              onClick={() => setGallerySubmitOpen(true)}
+              disabled={doc.features.length === 0 || !shareLinkSupported}
+              title={
+                doc.features.length === 0
+                  ? "モデルが空です。フィーチャーを追加してから投稿してください"
+                  : shareLinkSupported
+                    ? "現在のモデルをコミュニティギャラリーに投稿します(GitHubアカウントが必要です)"
+                    : "このブラウザは共有リンク機能(CompressionStream)に対応していないため投稿できません"
+              }
+            >
+              <ToolIcon name="gallerySubmit" /> ギャラリーに投稿
+            </button>
+            <button
+              type="button"
+              className="ribbon-file-btn"
               data-testid="btn-download-stl"
               onClick={handleDownloadStl}
               disabled={busy || exporting}
@@ -3424,6 +3444,11 @@ export default function App() {
       {aiPanelOpen && (
         <Suspense fallback={null}>
           <AiGeneratePanel onClose={() => setAiPanelOpen(false)} onLoad={handleLoadAiGeneratedDocument} />
+        </Suspense>
+      )}
+      {gallerySubmitOpen && (
+        <Suspense fallback={null}>
+          <GallerySubmitDialog doc={doc} onClose={() => setGallerySubmitOpen(false)} onNotice={showTransientMessage} />
         </Suspense>
       )}
     </div>
