@@ -9,13 +9,6 @@ import { deserializeProject } from "../../src/project/serialization";
 
 const MODELS_DIR = resolve(__dirname, "../../models");
 
-interface ModelMeta {
-  title: string;
-  author: string;
-  description: string;
-  tags: string[];
-}
-
 function listModelSlugs(): string[] {
   return readdirSync(MODELS_DIR).filter((name) => statSync(join(MODELS_DIR, name)).isDirectory());
 }
@@ -58,9 +51,11 @@ describe("models/ (モデルギャラリー)", () => {
   it.each(slugs)("models/%s/meta.json は必須フィールドを満たす", (slug) => {
     const text = readFileSync(join(MODELS_DIR, slug, "meta.json"), "utf-8");
     const meta = JSON.parse(text) as unknown;
+    // Phase 40d: authorは投稿者ごとに異なる値になる(自動PRフローが投稿フォームの「作者名」を
+    // そのまま書き込む)ため、"PlugBits"固定値チェックはここでは行わない
+    // (以前はサンプル3件がすべてPlugBits名義だったための過検証だった)。
     const errors = validateMetaShape(meta);
     expect(errors, errors.join(", ")).toEqual([]);
-    expect((meta as ModelMeta).author).toBe("PlugBits");
   });
 
   it("slugはURLセーフな英数字・ハイフンのみで構成される", () => {
