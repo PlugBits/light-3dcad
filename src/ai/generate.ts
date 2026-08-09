@@ -1,5 +1,8 @@
-// Phase 37: AIモデル生成のループ(生成→コンパイル→スケッチ拘束を解く→ドライラン評価→
-// 失敗時は最大3回まで自己修復)。
+// Phase 37/39: AIモデル生成のループ(生成→コンパイル→スケッチ拘束を解く→ドライラン評価→
+// 失敗時は最大3回まで自己修復)。Phase 39でAI応答を「エンベロープ」形式
+// ({design, questions, model}、src/ai/envelopeSchema.ts)に変更し、design-first生成
+// (設計メモを先に書かせる)と質問モード(寸法が一意に決まらない場合はquestionsで確認する、
+// セッションあたり最大1ラウンド)に対応した。
 //
 // @anthropic-ai/sdk は関数内でのみ動的import()する(このファイル自体がAiGeneratePanel経由の
 // 遅延チャンクからのみ読み込まれる想定だが、SDK自体もさらに別チャンクへ分離してビルド時の
@@ -7,8 +10,10 @@
 import type { CadDocument } from "../model/types";
 import type { WorkerResponse } from "../protocol/messages";
 import { compileAuthoringModel } from "./compile";
-import { AUTHORING_JSON_SCHEMA } from "./authoringSchema";
+import { AI_RESPONSE_JSON_SCHEMA, type AiQuestion } from "./envelopeSchema";
 import { AUTHORING_SYSTEM_PROMPT } from "./promptSpec";
+
+export type { AiQuestion } from "./envelopeSchema";
 
 /** モデルへ渡す会話の1メッセージ(Anthropic Messages APIのuser/assistantロールのみ)。 */
 export interface ModelMessage {
@@ -52,7 +57,7 @@ export const defaultCallModel: CallModelFn = async (params) => {
       max_tokens: 16000,
       system: params.system,
       messages: params.messages.map((m) => ({ role: m.role, content: m.content })),
-      output_config: { format: { type: "json_schema", schema: AUTHORING_JSON_SCHEMA } },
+      output_config: { format: { type: "json_schema", schema: AI_RESPONSE_JSON_SCHEMA } },
     });
     const finalMessage = await stream.finalMessage();
 
@@ -117,16 +122,38 @@ export interface GenerateTranscript {
   repaired: GenerateAttemptLog[];
 }
 
+/**
+ * 生成結果("document")か、質問モード("questions")か。質問モードのconversationには、
+ * ユーザーの回答メッセージを追加した上で再度generateCadDocument()の`conversation`
+ * オプションへそのまま渡す(`answeringQuestions: true`とセットで)。
+ */
 export type GenerateResult =
-  | { ok: true; doc: CadDocument; transcript: GenerateTranscript }
+  | { ok: true; kind: "document"; doc: CadDocument; design: string; transcript: GenerateTranscript }
+  | { ok: true; kind: "questions"; questions: AiQuestion[]; conversation: ModelMessage[]; transcript: GenerateTranscript }
   | { ok: false; message: string; transcript: GenerateTranscript };
 
 export const MAX_GENERATE_ATTEMPTS = 3;
 
+/** ユーザーが質問へ回答しなかった項目、または「おまかせ」を選んだ項目に使う固定文言。 */
+const AUTO_OMAKASE_MESSAGE = "すべておまかせで生成してください";
+
 export interface GenerateOptions {
   apiKey: string;
   model: string;
+  /** 新規セッションの初回プロンプト。`conversation`を渡した場合はそちらが優先され、これは無視される。 */
   prompt: string;
+  /**
+   * 質問モードの回答フローを継続する場合に渡す、直前までの会話全体(GenerateResultの
+   * kind:"questions"が返したconversationに、ユーザーの回答メッセージを追加したもの)。
+   * 省略時はpromptから新規に会話を開始する。
+   */
+  conversation?: ModelMessage[];
+  /**
+   * この呼び出しが「質問への回答」フロー(=既に1回の質問ラウンドが完了している)ならtrue。
+   * trueの場合、AIが再度questionsを返してもUIへは返さず、1回だけAUTO_OMAKASE_MESSAGEを
+   * 自動送信して生成へ誘導する(既に自動応答済みで、なお質問してきた場合は失敗として扱う)。
+   */
+  answeringQuestions?: boolean;
   onProgress?: (progress: GenerateProgress) => void;
   callModel?: CallModelFn;
   dryRunEvaluate?: DryRunEvaluateFn;
@@ -136,7 +163,66 @@ export interface GenerateOptions {
 
 function buildRepairPrompt(errors: string[]): string {
   const list = errors.map((e) => `- ${e}`).join("\n");
-  return `生成されたJSONに次のエラーがありました。エラーを修正した上で、JSONオブジェクトのみを出力し直してください(説明文やコードフェンスは不要です):\n${list}`;
+  return `生成されたJSONに次のエラーがありました。エラーを修正した上で、指定されたJSONオブジェクトのみを出力し直してください(説明文やコードフェンスは不要です):\n${list}`;
+}
+
+type EnvelopeParseResult =
+  | { kind: "document"; design: string; model: unknown }
+  | { kind: "questions"; questions: AiQuestion[] }
+  | { kind: "invalid"; message: string };
+
+/**
+ * AI応答のJSON(AiResponseEnvelope形状であるはず)を検証する。構造化出力である程度の形は
+ * 保証されるが、(1)貼り付け不要でも念のため、(2)テストでのフェイクcallModel経由の入力、の
+ * 両方に備えてここでも再検証する。compileAuthoringModel()と同様、深いバリデーションは行わず
+ * 「document/questionsどちらの形か」の判定に必要な最小限のみをチェックする(model本体の
+ * 詳細な検証はcompileAuthoringModel()に委ねる)。
+ */
+function parseEnvelope(json: unknown): EnvelopeParseResult {
+  if (typeof json !== "object" || json === null || Array.isArray(json)) {
+    return { kind: "invalid", message: "応答はJSONオブジェクトである必要があります" };
+  }
+  const obj = json as Record<string, unknown>;
+  const questionsRaw = obj.questions;
+
+  if (questionsRaw !== null && questionsRaw !== undefined) {
+    if (!Array.isArray(questionsRaw) || questionsRaw.length < 1 || questionsRaw.length > 3) {
+      return { kind: "invalid", message: "questionsは1〜3件の配列である必要があります" };
+    }
+    const questions: AiQuestion[] = [];
+    for (const q of questionsRaw) {
+      if (typeof q !== "object" || q === null) {
+        return { kind: "invalid", message: "questionsの各項目はオブジェクトである必要があります" };
+      }
+      const qObj = q as Record<string, unknown>;
+      const options = qObj.options;
+      if (
+        typeof qObj.question !== "string" ||
+        !Array.isArray(options) ||
+        options.length < 2 ||
+        options.length > 4 ||
+        !options.every((o) => typeof o === "string")
+      ) {
+        return {
+          kind: "invalid",
+          message: "questionsの各項目はquestion(文字列)とoptions(2〜4件の文字列配列)を持つ必要があります",
+        };
+      }
+      questions.push({ question: qObj.question, options: options as string[] });
+    }
+    return { kind: "questions", questions };
+  }
+
+  const design = obj.design;
+  const model = obj.model;
+  if (typeof design === "string" && model !== null && model !== undefined) {
+    return { kind: "document", design, model };
+  }
+
+  return {
+    kind: "invalid",
+    message: "応答はdesign+model(生成)、またはquestions(質問)のいずれかの形式である必要があります",
+  };
 }
 
 /**
@@ -150,8 +236,10 @@ export async function generateCadDocument(options: GenerateOptions): Promise<Gen
   const dryRunEvaluate = options.dryRunEvaluate ?? defaultDryRunEvaluate;
   const solveSketches = options.solveSketches ?? defaultSolveSketches;
 
-  const messages: ModelMessage[] = [{ role: "user", content: options.prompt }];
+  const messages: ModelMessage[] = options.conversation ? [...options.conversation] : [{ role: "user", content: options.prompt }];
   const repaired: GenerateAttemptLog[] = [];
+  /** 質問ラウンドの上限(セッションあたり最大1回)を超えて質問された場合に1回だけ自動応答したかどうか。 */
+  let autoOmakaseUsed = false;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     options.onProgress?.({ attempt, maxAttempts, phase: "generating" });
@@ -192,8 +280,53 @@ export async function generateCadDocument(options: GenerateOptions): Promise<Gen
       continue;
     }
 
+    const envelope = parseEnvelope(json);
+
+    if (envelope.kind === "invalid") {
+      const message = `応答の形式が仕様(design+model または questions)に従っていません: ${envelope.message}`;
+      if (attempt >= maxAttempts) {
+        repaired.push({ attempt, errors: [message] });
+        break;
+      }
+      messages.push({ role: "assistant", content: modelResult.text });
+      messages.push({ role: "user", content: buildRepairPrompt([message]) });
+      repaired.push({ attempt, errors: [message] });
+      continue;
+    }
+
+    if (envelope.kind === "questions") {
+      // このセッションで既に1回の質問ラウンドが完了している(answeringQuestions)か、
+      // 既に自動「おまかせ」応答を1回使い切っている場合、UIへは返さず処理を続ける。
+      const mustNotAskAgain = options.answeringQuestions === true || autoOmakaseUsed;
+      if (!mustNotAskAgain) {
+        messages.push({ role: "assistant", content: modelResult.text });
+        return {
+          ok: true,
+          kind: "questions",
+          questions: envelope.questions,
+          conversation: messages,
+          transcript: { attempts: attempt, repaired },
+        };
+      }
+      if (autoOmakaseUsed) {
+        return {
+          ok: false,
+          message: "AIが回答済みにもかかわらず再度質問してきたため、生成を中止しました。プロンプトをより具体的にして再試行してください。",
+          transcript: { attempts: attempt, repaired },
+        };
+      }
+      messages.push({ role: "assistant", content: modelResult.text });
+      messages.push({ role: "user", content: AUTO_OMAKASE_MESSAGE });
+      autoOmakaseUsed = true;
+      repaired.push({
+        attempt,
+        errors: ["AIが回答済みにもかかわらず再度質問しました(「すべておまかせで生成してください」と自動応答しました)"],
+      });
+      continue;
+    }
+
     options.onProgress?.({ attempt, maxAttempts, phase: "compiling" });
-    const compiled = compileAuthoringModel(json);
+    const compiled = compileAuthoringModel(envelope.model);
     if ("errors" in compiled) {
       if (attempt >= maxAttempts) {
         repaired.push({ attempt, errors: compiled.errors });
@@ -263,7 +396,7 @@ export async function generateCadDocument(options: GenerateOptions): Promise<Gen
       continue;
     }
 
-    return { ok: true, doc: solved.doc, transcript: { attempts: attempt, repaired } };
+    return { ok: true, kind: "document", doc: solved.doc, design: envelope.design, transcript: { attempts: attempt, repaired } };
   }
 
   return {

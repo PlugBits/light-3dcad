@@ -1,14 +1,14 @@
 // Phase 37b: OpenAI用のcallModel実装。openai SDKは関数内でのみ動的import()する
 // (このファイルはsrc/ai/provider.ts経由でAiGeneratePanelの遅延チャンクからのみ読み込まれる想定だが、
 // SDK自体もさらに別チャンクへ分離してビルド時の主要チャンクサイズへ絶対に影響しないようにするため)。
-import { AUTHORING_JSON_SCHEMA } from "./authoringSchema";
+import { AI_RESPONSE_JSON_SCHEMA } from "./envelopeSchema";
 import { GenerateModelError, type CallModelFn } from "./generate";
 
 /**
  * openai SDK(Responses API)を使ったcallModel実装。dangerouslyAllowBrowser: trueは
  * ブラウザから直接呼ぶ際にOpenAIが要求するオプトインフラグ(Anthropic SDKと同じ位置付け)。
- * 構造化出力(text.format: {type:"json_schema", strict:true})でAUTHORING_JSON_SCHEMAに
- * 従ったJSONを強制する(AUTHORING_JSON_SCHEMAは既にadditionalProperties:false+全キーrequired
+ * 構造化出力(text.format: {type:"json_schema", strict:true})でAI_RESPONSE_JSON_SCHEMAに
+ * 従ったJSONを強制する(AI_RESPONSE_JSON_SCHEMAは既にadditionalProperties:false+全キーrequired
  * なので、OpenAIのstrictモードにそのまま渡せる)。
  */
 export const openaiCallModel: CallModelFn = async (params) => {
@@ -25,8 +25,8 @@ export const openaiCallModel: CallModelFn = async (params) => {
       text: {
         format: {
           type: "json_schema",
-          name: "authoring_model",
-          schema: AUTHORING_JSON_SCHEMA,
+          name: "ai_response_envelope",
+          schema: AI_RESPONSE_JSON_SCHEMA,
           strict: true,
         },
       },
