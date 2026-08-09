@@ -1025,3 +1025,21 @@ gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 517件全通�
 gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 517件全通過(文字列アサーション追従)、
 `vite build`+`npm run size`でメインバンドルgzip 261.0KB→261.2KB(+0.2KB)、E2E 41件全通過(2分割で
 Bash同期実行)。
+
+## Phase 39: design-first生成+質問モード(ユーザー承認済み設計の採用)
+
+AI応答を「エンベロープ」形式({design, questions, model}、`src/ai/envelopeSchema.ts`の
+`AI_RESPONSE_JSON_SCHEMA`、AUTHORING_JSON_SCHEMAを`model`プロパティとして埋め込み)に変更し、
+毎回設計メモ(実寸/機能要件/主要寸法表/造形方針)を先に書かせるdesign-first生成と、寸法が
+一意に決まらない指示への質問モード(最大3問・セッションあたり1ラウンドのみ、`generate.ts`が
+再質問を検知したら1回だけ「すべておまかせで生成してください」と自動応答)を導入した。
+`promptSpec.ts`をユーザー草稿の実質(平面/押し出し方向表・サジタ表によるpolygon近似フィレット・
+最小肉厚3mm・出力前チェックリスト等)を踏襲しつつ実装(authoringSchema.ts/compile.ts/
+evaluator.ts)に合わせて全面刷新し、few-shot3例をcompileAuthoringModel()で実検証(リング例は
+revolveのaxis:"y"がevaluator実装上ワールドZ相当になることを検証し、断面をXZ平面に描く形へ
+補正)。「プロンプト仕様をコピー」用に貼り付けモード向けの素JSON出力プロンプト
+(`AUTHORING_PASTE_PROMPT`)を分離した。`AiGeneratePanel`は質問をチップUI(選択肢+
+「おまかせ」+自由回答上書き+「全部おまかせで生成」)で表示し、生成成功後はパネルを閉じずに
+設計メモを折りたたみ表示する形へ変更した。gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、
+Vitest 517→534件全通過、`vite build`+`npm run size`でメインバンドルgzip 261.2KB(変化なし、
+AI関連は遅延チャンク)、E2E 41→42件全通過(2分割でBash同期実行)。
