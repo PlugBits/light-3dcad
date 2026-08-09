@@ -1071,3 +1071,11 @@ MIT License・`THIRD_PARTY_NOTICES.md`(OCCT/PlaneGCSのLGPL-2.1系WASM無改変�
 548→580件全通過、`vite build`+`npm run size`でメインバンドルgzip 263.1KB(+0.6KB、上限350KB内)、
 `npm run gallery:build`でdist/gallery/index.html+サムネイル3件生成、E2E 43→46件全通過
 (2分割でBash同期実行)。
+
+## Phase 40d: アプリ内「ギャラリーに投稿」ボタン(Issue→自動PRフロー)
+
+リボンに「ギャラリーに投稿」ボタン(`GallerySubmitDialog`、遅延読み込み)を追加し、共有リンクと
+同じgzip+base64urlペイロードでGitHub Issueフォーム(`.github/ISSUE_TEMPLATE/model-submission.yml`)を
+事前入力して開く(長すぎる場合はクリップボードへフォールバック)。`model-submission.yml`
+ワークフローがissue本文をパース・検証し`models/<slug>/`へのPRを自動作成する(`scripts/`配下の
+Node製ロジックをvitestで単体テスト、実際のAction実行はこの環境では検証不可)。
