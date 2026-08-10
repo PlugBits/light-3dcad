@@ -1,0 +1,416 @@
+{
+  "format": "l3dcad",
+  "schemaVersion": 1,
+  "document": {
+    "version": 1,
+    "features": [
+      {
+        "type": "sketch",
+        "id": "sketch-e0c6f171-b85d-4f5a-b51c-2c27c26d69c1",
+        "name": "Sketch1",
+        "plane": {
+          "kind": "world",
+          "plane": "XZ"
+        },
+        "entities": [
+          {
+            "kind": "polygon",
+            "id": "saucer_profile",
+            "points": [
+              [
+                0,
+                0
+              ],
+              [
+                59,
+                0
+              ],
+              [
+                60.15,
+                0.23
+              ],
+              [
+                61.12,
+                0.88
+              ],
+              [
+                61.77,
+                1.85
+              ],
+              [
+                62,
+                3
+              ],
+              [
+                62,
+                12
+              ],
+              [
+                61.81,
+                12.96
+              ],
+              [
+                61.27,
+                13.77
+              ],
+              [
+                60.46,
+                14.31
+              ],
+              [
+                59.5,
+                14.5
+              ],
+              [
+                58.54,
+                14.31
+              ],
+              [
+                57.73,
+                13.77
+              ],
+              [
+                57.19,
+                12.96
+              ],
+              [
+                57,
+                12
+              ],
+              [
+                57,
+                8
+              ],
+              [
+                56.7,
+                6.47
+              ],
+              [
+                55.83,
+                5.17
+              ],
+              [
+                54.53,
+                4.3
+              ],
+              [
+                53,
+                4
+              ],
+              [
+                0,
+                4
+              ]
+            ]
+          }
+        ]
+      },
+      {
+        "type": "sketch",
+        "id": "sketch-3468682c-8233-4ff3-a967-1e278f265811",
+        "name": "Sketch2",
+        "plane": {
+          "kind": "world",
+          "plane": "XZ"
+        },
+        "entities": [
+          {
+            "kind": "polygon",
+            "id": "planter_profile",
+            "points": [
+              [
+                0,
+                4
+              ],
+              [
+                40,
+                4
+              ],
+              [
+                40.77,
+                4.15
+              ],
+              [
+                41.41,
+                4.59
+              ],
+              [
+                41.85,
+                5.24
+              ],
+              [
+                42,
+                6
+              ],
+              [
+                53,
+                84
+              ],
+              [
+                52.81,
+                84.96
+              ],
+              [
+                52.27,
+                85.77
+              ],
+              [
+                51.46,
+                86.31
+              ],
+              [
+                50.5,
+                86.5
+              ],
+              [
+                49.54,
+                86.31
+              ],
+              [
+                48.73,
+                85.77
+              ],
+              [
+                48.19,
+                84.96
+              ],
+              [
+                48,
+                84
+              ],
+              [
+                38,
+                19
+              ],
+              [
+                37.7,
+                17.47
+              ],
+              [
+                36.83,
+                16.17
+              ],
+              [
+                35.53,
+                15.3
+              ],
+              [
+                34,
+                15
+              ],
+              [
+                0,
+                15
+              ]
+            ]
+          }
+        ]
+      },
+      {
+        "type": "sketch",
+        "id": "sketch-9f503ea4-043f-4f56-ac4d-649e623b797b",
+        "name": "Sketch3",
+        "plane": {
+          "kind": "world",
+          "plane": "XY"
+        },
+        "entities": [
+          {
+            "kind": "circle",
+            "id": "groove_outer",
+            "center": [
+              0,
+              0
+            ],
+            "radius": 34
+          },
+          {
+            "kind": "circle",
+            "id": "groove_inner",
+            "center": [
+              0,
+              0
+            ],
+            "radius": 24
+          }
+        ]
+      },
+      {
+        "type": "sketch",
+        "id": "sketch-fd8d1803-8fa8-4722-9323-6cd742deaa4f",
+        "name": "Sketch4",
+        "plane": {
+          "kind": "world",
+          "plane": "XY"
+        },
+        "entities": [
+          {
+            "kind": "circle",
+            "id": "drain1",
+            "center": [
+              29,
+              0
+            ],
+            "radius": 4
+          },
+          {
+            "kind": "circle",
+            "id": "drain2",
+            "center": [
+              14.5,
+              25.11
+            ],
+            "radius": 4
+          },
+          {
+            "kind": "circle",
+            "id": "drain3",
+            "center": [
+              -14.5,
+              25.11
+            ],
+            "radius": 4
+          },
+          {
+            "kind": "circle",
+            "id": "drain4",
+            "center": [
+              -29,
+              0
+            ],
+            "radius": 4
+          },
+          {
+            "kind": "circle",
+            "id": "drain5",
+            "center": [
+              -14.5,
+              -25.11
+            ],
+            "radius": 4
+          },
+          {
+            "kind": "circle",
+            "id": "drain6",
+            "center": [
+              14.5,
+              -25.11
+            ],
+            "radius": 4
+          }
+        ]
+      },
+      {
+        "type": "sketch",
+        "id": "sketch-b7a70cc5-5f3d-4ac1-96f6-5a30bc4dd395",
+        "name": "Sketch5",
+        "plane": {
+          "kind": "world",
+          "plane": "XY"
+        },
+        "entities": [
+          {
+            "kind": "slot",
+            "id": "vent_ne",
+            "start": [
+              22.63,
+              22.63
+            ],
+            "end": [
+              33.94,
+              33.94
+            ],
+            "width": 9
+          },
+          {
+            "kind": "slot",
+            "id": "vent_nw",
+            "start": [
+              -22.63,
+              22.63
+            ],
+            "end": [
+              -33.94,
+              33.94
+            ],
+            "width": 9
+          },
+          {
+            "kind": "slot",
+            "id": "vent_sw",
+            "start": [
+              -22.63,
+              -22.63
+            ],
+            "end": [
+              -33.94,
+              -33.94
+            ],
+            "width": 9
+          },
+          {
+            "kind": "slot",
+            "id": "vent_se",
+            "start": [
+              22.63,
+              -22.63
+            ],
+            "end": [
+              33.94,
+              -33.94
+            ],
+            "width": 9
+          }
+        ]
+      },
+      {
+        "type": "revolve",
+        "id": "revolve-56f2416b-11cd-4c6a-b202-377a7e54bc67",
+        "name": "Revolve1",
+        "sketchId": "sketch-e0c6f171-b85d-4f5a-b51c-2c27c26d69c1",
+        "axis": "y",
+        "angle": 360,
+        "operation": "newBody"
+      },
+      {
+        "type": "revolve",
+        "id": "revolve-4ca0fb33-c03a-4fae-89ba-b7568231d6d7",
+        "name": "Revolve2",
+        "sketchId": "sketch-3468682c-8233-4ff3-a967-1e278f265811",
+        "axis": "y",
+        "angle": 360,
+        "operation": "newBody"
+      },
+      {
+        "type": "extrude",
+        "id": "extrude-1589bf25-734b-4902-9cdf-3672056c9301",
+        "name": "Extrude1",
+        "sketchId": "sketch-9f503ea4-043f-4f56-ac4d-649e623b797b",
+        "distance": 10,
+        "direction": 1,
+        "operation": "cut",
+        "targetBodyId": "revolve-4ca0fb33-c03a-4fae-89ba-b7568231d6d7"
+      },
+      {
+        "type": "extrude",
+        "id": "extrude-a1a35a39-3bc1-4d9e-b32e-b0dedaf8d691",
+        "name": "Extrude2",
+        "sketchId": "sketch-fd8d1803-8fa8-4722-9323-6cd742deaa4f",
+        "distance": 20,
+        "direction": 1,
+        "operation": "cut",
+        "targetBodyId": "revolve-4ca0fb33-c03a-4fae-89ba-b7568231d6d7"
+      },
+      {
+        "type": "extrude",
+        "id": "extrude-23ee4034-00e0-40cd-a2f3-5e3497388b2e",
+        "name": "Extrude3",
+        "sketchId": "sketch-b7a70cc5-5f3d-4ac1-96f6-5a30bc4dd395",
+        "distance": 7,
+        "direction": 1,
+        "operation": "cut",
+        "targetBodyId": "revolve-4ca0fb33-c03a-4fae-89ba-b7568231d6d7"
+      }
+    ]
+  }
+}
