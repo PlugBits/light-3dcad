@@ -7,7 +7,7 @@
 // で「区間」に分割し、クリック/ホバー位置に最も近い区間を求める(削除候補として提示・実削除する)。
 // 区間が1つしかできない(=他セグメントとの有効な交点が無い)場合は、区間全体=セグメント全体を削除する。
 import { generateId } from "../model/id";
-import type { PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
+import type { LineRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
 import { bulgeArcPoints } from "./bulge";
 import { explodeEntity } from "./explode";
 import {
@@ -257,6 +257,152 @@ function isPointRefTo(ref: PointRef | { entityId: string }, targetId: string): r
   return "segmentId" in ref && ref.segmentId === targetId;
 }
 
+// ------- 拘束が参照するid一覧・ダングリング(参照切れ)拘束の掃除(実機報告バグ対応、Phase 42) -------
+//
+// トリムでentity(円等)がまるごとsegmentsへ置き換わったり、セグメントがまるごと削除されたりすると、
+// それらのid(segmentId/entityId)を参照していた拘束(fixEntity/tangent/distanceEntityLine/
+// coincident等)が参照先を失う。src/sketch/gcsAdapter.ts のaddConstraint()/evaluateResidual()は
+// 参照解決に失敗した拘束を素通し(残差0扱い)するため、ソルバの数値的な矛盾を直接引き起こすわけでは
+// ない(「参照切れ拘束は無害」という旧来の想定は個々の拘束単体では今も成り立つ)。しかし:
+//   - 拘束一覧UIに解決不能な生IDがそのまま表示され続ける(壊れた表示、ユーザー報告の「tell-tale sign」)。
+//   - 元の拘束が実現していたはずの自由度の縛り(例: fixEntityによる固定)が消えるため、その拘束が
+//     繋がっていた形状全体が本来より大きく自由になり(実機確認: 最小再現でdofが14増加)、
+//     複雑な実データでは2段階solve(warmup regularize→仕上げ)がCONFLICT_TOLERANCE内に収束せず、
+//     「拘束矛盾」として誤検出されうる(個々の拘束は無害でも、全体のfloppyさが収束を不安定にする)。
+// そのため、トリムのたびに参照切れ拘束を能動的に一掃する(このセクション)。
+
+/**
+ * 拘束cが参照する生きたsegmentId/entityIdの一覧を返す(重複を許す。呼び出し側がSetで判定する)。
+ * refEdge(LineRef)はピック時点のスナップショットで生きたidを参照しないため含めない。
+ * SketchConstraintの全種別を網羅する(switchが尽くしていない場合、TypeScriptのnever型チェックで
+ * 新しい拘束種別の追加漏れがコンパイル時に検出される。src/model/document.tsのconstraintReferencesId
+ * と同じ設計方針)。
+ */
+export function collectReferencedIds(c: SketchConstraint): string[] {
+  switch (c.kind) {
+    case "coincident":
+      return [c.a.segmentId, c.b.segmentId];
+    case "horizontal":
+    case "vertical":
+    case "length":
+    case "radius":
+      return [c.segmentId];
+    case "distanceLineRefEdge":
+    case "angleLineRefEdge":
+      return [c.segmentId, ...lineRefReferencedIds(c.line)];
+    case "distance":
+      return [c.a.segmentId, c.b.segmentId];
+    case "fix":
+      return [c.point.segmentId];
+    case "distanceEntityOrigin":
+    case "fixEntity":
+      return [c.entity.entityId];
+    case "distancePointOrigin":
+      return [c.point.segmentId];
+    case "coincidentOrigin":
+      return ["segmentId" in c.point ? c.point.segmentId : c.point.entityId];
+    case "distanceEntityEntity":
+    case "concentric":
+      return [c.a.entityId, c.b.entityId];
+    case "distanceEntityLine":
+      return [c.entity.entityId, ...lineRefReferencedIds(c.line)];
+    case "distancePointLine":
+      return [c.point.segmentId, ...lineRefReferencedIds(c.line)];
+    case "perpendicular":
+    case "distanceLineLine":
+    case "angleLineLine":
+      return [c.a, c.b];
+    case "tangent":
+      return [c.entity.entityId, c.target.kind === "segment" ? c.target.segmentId : c.target.entityId];
+    default: {
+      const exhaustive: never = c;
+      return exhaustive;
+    }
+  }
+}
+
+/** LineRefが参照するid一覧(collectReferencedIds()のヘルパー、refEdgeは空配列)。 */
+function lineRefReferencedIds(line: LineRef): string[] {
+  if (line.kind === "entityEdge") return [line.entityId];
+  if (line.kind === "segmentEdge") return [line.segmentId];
+  return [];
+}
+
+/** 拘束cがtargetId(segmentId/entityId)を参照しているか判定する(個別削除のカスケード・ダングリング掃除の両方で使う共通ヘルパー)。 */
+export function constraintReferencesId(constraint: SketchConstraint, targetId: string): boolean {
+  return collectReferencedIds(constraint).includes(targetId);
+}
+
+/**
+ * constraints内から、もはや存在しないsegmentId/entityIdを参照する拘束(ダングリング拘束)を
+ * 一掃する(実機報告バグ対応、Phase 42)。segments/entitiesは掃除後(=トリム適用後)の配列を渡す。
+ * trimEntityAtPoint()・trimSegmentWithConstraints()の両方から、既存の付け替え・移行ロジックの
+ * 最終安全網として呼ぶ(item 5: 「トリム後は必ずこのヘルパーを通す」)。
+ * refEdge(LineRef)はスナップショットのため対象外(collectReferencedIds参照)。
+ */
+export function pruneDanglingConstraints(
+  constraints: SketchConstraint[],
+  segments: SketchSegment[],
+  entities: SketchEntity[],
+): { constraints: SketchConstraint[]; removedCount: number } {
+  const liveIds = new Set<string>([...segments.map((s) => s.id), ...entities.map((e) => e.id)]);
+  let removedCount = 0;
+  const kept = constraints.filter((c) => {
+    const alive = collectReferencedIds(c).every((id) => liveIds.has(id));
+    if (!alive) removedCount += 1;
+    return alive;
+  });
+  return { constraints: kept, removedCount };
+}
+
+/**
+ * entity(entityId)が丸ごとkeptPieces(自由セグメント)へ置き換わる際、そのentityを参照していた
+ * 拘束を移行/削除する(実機報告バグの根本原因修正、Phase 42。trimEntityAtPoint()の
+ * entityトリムと、分解[explodeSketchEntity]UIアクションの両方から呼ぶ共通ロジック)。
+ *
+ * - fixEntity: keptPiecesの全断片の両端点(p1・p2)への"fix"拘束に移行する。断片のbulgeは
+ *   explodeEntity()が生成した時点の値で不変(ソルバの変数ではない)なので、両端点さえ固定すれば
+ *   その断片の形状(=円なら弦・弧の全て)は元のentity形状のまま完全に凍結される。既存の"fix"拘束
+ *   語彙のみで表現できるため新規拘束種別は不要(「中心+半径をfix」と等価)。
+ * - tangent/distanceEntityLine/distanceEntityOrigin/distanceEntityEntity/concentric、および
+ *   distanceEntityLine/distancePointLineのLineRef(entityEdge)経由の参照:
+ *   entityIdがfixEntityを持っていた(=上記で凍結された)場合、これらの拘束が表していた関係は
+ *   凍結後の形状で自動的に満たされ続けるため、実害なく削除できる(件数に数えない)。
+ *   fixEntityが無かった(=entityが元々可動だった)場合は、自由セグメントに「中心」を指す語彙
+ *   (LineRef/PointRef/EntityRef)が存在せず再現不能なため削除し、件数に数える
+ *   (呼び出し側の一時トースト表示用、item 4のフォールバック)。
+ * - 上記以外(entityIdを参照しない拘束)はそのまま。
+ *
+ * 戻り値のconstraintsはこのentityId分の移行・削除を反映した拘束配列(呼び出し側はentities/segments
+ * の置き換えと合わせて使う。他のtargetの削除で生じるダングリングはpruneDanglingConstraints()を
+ * 別途呼ぶこと)。
+ */
+export function migrateEntityConstraintsForReplace(
+  entityId: string,
+  keptPieces: SketchSegment[],
+  constraints: SketchConstraint[],
+): { constraints: SketchConstraint[]; removedConstraintCount: number } {
+  const hadFixEntity = constraints.some((c) => c.kind === "fixEntity" && c.entity.entityId === entityId);
+  let removedConstraintCount = 0;
+  const kept: SketchConstraint[] = [];
+  for (const c of constraints) {
+    if (!constraintReferencesId(c, entityId)) {
+      kept.push(c);
+      continue;
+    }
+    if (c.kind === "fixEntity") continue; // 下でfix拘束へ移行する(件数に数えない)。
+    if (!hadFixEntity) removedConstraintCount += 1; // 凍結されないため関係が真に失われる。
+    // hadFixEntity===trueの場合は凍結により自動的に満たされ続けるため、件数に数えず黙って削除する。
+  }
+  if (hadFixEntity) {
+    for (const piece of keptPieces) {
+      kept.push({ id: generateId("constraint"), kind: "fix", point: { segmentId: piece.id, end: "p1" } });
+      kept.push({ id: generateId("constraint"), kind: "fix", point: { segmentId: piece.id, end: "p2" } });
+    }
+  }
+  return { constraints: kept, removedConstraintCount };
+}
+
 /**
  * targetId のセグメントをclickPointに最も近い区間で分割・削除し、segments・constraintsの両方を
  * 一貫した状態に更新する(実機報告対応、trim後の拘束・寸法引き継ぎ)。
@@ -271,6 +417,11 @@ function isPointRefTo(ref: PointRef | { entityId: string }, targetId: string): r
  *   半径を保つため長さ拘束と異なり削除しない)。
  * - length拘束(segmentId===targetId)は、区間分割(pieces.length>1)によって対象の長さの意味が変わる
  *   ため削除し、削除件数をremovedLengthConstraintCountで返す(呼び出し側が一時トースト表示に使う)。
+ * - それ以外の、削除された断片を参照する拘束(coincident/fix/distancePointOrigin/
+ *   distancePointLine/coincidentOrigin等)は、区間が2つ以上の場合は座標一致で新しい断片へ
+ *   付け替える(下記reassignPoint)。区間が1つ(セグメント全体削除)の場合はそもそも付け替え先が
+ *   無いため、pruneDanglingConstraints()で一括して取り除き、件数をremovedDanglingConstraintCountで
+ *   返す(実機報告バグ対応、Phase 42。以前はlength拘束以外が参照切れのまま残り続けるバグがあった)。
  * targetIdが見つからない場合はsegments/constraintsをそのまま返す。
  */
 export function trimSegmentWithConstraints(
@@ -279,25 +430,36 @@ export function trimSegmentWithConstraints(
   targetId: string,
   clickPoint: Point2,
   entities: SketchEntity[] = [],
-): { segments: SketchSegment[]; constraints: SketchConstraint[]; removedLengthConstraintCount: number } {
+): {
+  segments: SketchSegment[];
+  constraints: SketchConstraint[];
+  removedLengthConstraintCount: number;
+  removedDanglingConstraintCount: number;
+} {
   const split = splitTargetIntoPieces(segments, targetId, entities);
-  if (!split) return { segments, constraints, removedLengthConstraintCount: 0 };
+  if (!split) return { segments, constraints, removedLengthConstraintCount: 0, removedDanglingConstraintCount: 0 };
   const { target, others, pieces } = split;
 
   if (pieces.length <= 1) {
     // 分割不能(他セグメント・entities輪郭との有効な交点が無い)= セグメント全体を削除する。
-    // このセグメントを参照していたlength拘束も対象が消えるため取り除き、件数を数える
-    // (それ以外の拘束[coincident等]は既存の挙動通り、参照先を失っても配列には残す。
-    // ソルバは参照解決できない拘束の残差項を単に持たないため実害はない)。
+    // このセグメントを参照していたlength拘束は対象の長さの意味が変わるため常に取り除く(件数を数える)。
+    // それ以外(coincident/fix等)は、targetId自体が消えるため付け替え先が無く、
+    // pruneDanglingConstraints()でまとめて取り除く(Phase 42、旧バグの修正)。
     let removedLength = 0;
-    const nextConstraints = constraints.filter((c) => {
+    const afterLengthFilter = constraints.filter((c) => {
       if (c.kind === "length" && c.segmentId === targetId) {
         removedLength += 1;
         return false;
       }
       return true;
     });
-    return { segments: others, constraints: nextConstraints, removedLengthConstraintCount: removedLength };
+    const swept = pruneDanglingConstraints(afterLengthFilter, others, entities);
+    return {
+      segments: others,
+      constraints: swept.constraints,
+      removedLengthConstraintCount: removedLength,
+      removedDanglingConstraintCount: swept.removedCount,
+    };
   }
 
   let removeIndex = 0;
@@ -392,7 +554,17 @@ export function trimSegmentWithConstraints(
   const poolCandidates = [...endpointCandidates(keptPieces), ...endpointCandidates(others)];
   nextConstraints.push(...coincidentsForCutPoints(cutPoints, poolCandidates, nextConstraints));
 
-  return { segments: nextSegments, constraints: nextConstraints, removedLengthConstraintCount: removedLength };
+  // 最終安全網(Phase 42、item 5): 上記の付け替えロジックで想定していない参照切れ(例: 過去の
+  // entityトリムで既にダングリングだった拘束が、たまたまこのセグメントも参照していた場合)を掃除する。
+  // 通常の付け替えが正しく機能していれば基本的に無効(0件)。
+  const swept = pruneDanglingConstraints(nextConstraints, nextSegments, entities);
+
+  return {
+    segments: nextSegments,
+    constraints: swept.constraints,
+    removedLengthConstraintCount: removedLength,
+    removedDanglingConstraintCount: swept.removedCount,
+  };
 }
 
 /** 点pからentity(rectangle/circle/polygon/slot/regularPolygon)の輪郭への最短距離(explodeEntity()によるポリライン近似)。CadViewerのトリムホバー対象選定に使う。 */
@@ -460,6 +632,13 @@ export function findClosestEntityPiece(
  * 残りの分解片(区間)が新しいsegmentsとして既存segmentsに追記される。App側はこれを1回の
  * ドキュメント更新(entities・segmentsの同時置き換え)として適用すればundo1回で戻せる。
  * entityIdが見つからない場合は元のentities/segmentsをそのまま返す。
+ *
+ * 実機報告バグ対応(Phase 42): entityId自体を参照していた拘束(fixEntity/tangent/
+ * distanceEntityLine/distanceEntityOrigin/distanceEntityEntity/concentric)は
+ * migrateEntityConstraintsForReplace()で移行/削除し(fixEntityは残る全断片の両端点への
+ * fix拘束へ移行、それ以外は移行後に凍結されていれば無害に削除・凍結されていなければ
+ * 削除して件数を数える)、最後にpruneDanglingConstraints()で残る参照切れを一掃する
+ * (件数はremovedConstraintCountとして返し、呼び出し側の一時トースト表示に使う)。
  */
 export function trimEntityAtPoint(
   entities: SketchEntity[],
@@ -467,9 +646,9 @@ export function trimEntityAtPoint(
   segments: SketchSegment[],
   clickPoint: Point2,
   constraints: SketchConstraint[] = [],
-): { entities: SketchEntity[]; segments: SketchSegment[]; constraints: SketchConstraint[] } {
+): { entities: SketchEntity[]; segments: SketchSegment[]; constraints: SketchConstraint[]; removedConstraintCount: number } {
   const groups = explodeEntityIntoPieceGroups(entities, entityId, segments);
-  if (!groups) return { entities, segments, constraints };
+  if (!groups) return { entities, segments, constraints, removedConstraintCount: 0 };
   let removeGroupIndex = -1;
   let removePieceIndex = -1;
   let bestDist = Infinity;
@@ -501,7 +680,18 @@ export function trimEntityAtPoint(
   // point-on-curveはスコープ外)、あればcoincident拘束を自動付与する(重複は追加しない)。
   const cutPoints = endpointCandidates(kept);
   const poolCandidates = [...cutPoints, ...endpointCandidates(segments)];
-  const nextConstraints = [...constraints, ...coincidentsForCutPoints(cutPoints, poolCandidates, constraints)];
+  const withCutPointCoincidents = [...constraints, ...coincidentsForCutPoints(cutPoints, poolCandidates, constraints)];
 
-  return { entities: nextEntities, segments: nextSegments, constraints: nextConstraints };
+  // Fix3(Phase 42、ユーザー報告バグの根本原因の修正): entityId自体を参照していた拘束
+  // (fixEntity/tangent/distanceEntityLine等)を移行/削除し、最後に他の参照切れ
+  // (通常発生しないはずだが安全網として)を一掃する。
+  const migrated = migrateEntityConstraintsForReplace(entityId, kept, withCutPointCoincidents);
+  const swept = pruneDanglingConstraints(migrated.constraints, nextSegments, nextEntities);
+
+  return {
+    entities: nextEntities,
+    segments: nextSegments,
+    constraints: swept.constraints,
+    removedConstraintCount: migrated.removedConstraintCount + swept.removedCount,
+  };
 }
