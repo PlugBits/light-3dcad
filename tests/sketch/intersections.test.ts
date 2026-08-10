@@ -2,7 +2,13 @@
 import { describe, expect, it } from "vitest";
 
 import { createArcSegment, createLineSegment } from "../../src/model";
-import { arcArcIntersection, lineArcIntersection, lineLineIntersection, splitSegmentAt } from "../../src/sketch/intersections";
+import {
+  arcArcIntersection,
+  lineArcIntersection,
+  lineLineIntersection,
+  splitSegmentAt,
+  TANGENT_CONTACT_EPS,
+} from "../../src/sketch/intersections";
 
 describe("lineLineIntersection", () => {
   it("交差するX字の2線分は中央で1点交差する", () => {
@@ -121,6 +127,58 @@ describe("lineArcIntersection", () => {
     expect(results[0].point[0]).toBeCloseTo(5, 9);
     expect(results[0].point[1]).toBeCloseTo(0, 9);
   });
+
+  // 接触バンド(Phase 42c、実機報告バグ「接線拘束→トリムで交点が見つからず全消去」の再現・修正確認)。
+  describe("接触バンド(TANGENT_CONTACT_EPS、ソルバのグリッド丸め誤差の吸収)", () => {
+    it("接線拘束を解いた直後に典型的な丸め誤差(< 1e-6mm)で円からわずかに離れた直線でも接点が1件見つかる", () => {
+      const arc = createArcSegment({ p1: [-10, 0], p2: [10, 0], bulge: 1 }); // 半径10、中心(0,0)
+      // 数学的な接線(x=10)から、ソルバの1e-6mmグリッド丸めで生じうる典型的なずれ(7e-7mm)だけ外側へ。
+      const line = createLineSegment({ p1: [10 + 7e-7, -5], p2: [10 + 7e-7, 5] });
+      const results = lineArcIntersection(line, arc);
+      expect(results).toHaveLength(1);
+      expect(results[0].point[0]).toBeCloseTo(10, 5);
+      expect(results[0].point[1]).toBeCloseTo(0, 5);
+    });
+
+    it("TANGENT_CONTACT_EPSぎりぎり内側の距離でも接点が1件見つかる(境界値)", () => {
+      const arc = createArcSegment({ p1: [-10, 0], p2: [10, 0], bulge: 1 });
+      const line = createLineSegment({ p1: [10 + TANGENT_CONTACT_EPS * 0.9, -5], p2: [10 + TANGENT_CONTACT_EPS * 0.9, 5] });
+      const results = lineArcIntersection(line, arc);
+      expect(results).toHaveLength(1);
+    });
+
+    it("TANGENT_CONTACT_EPSを明確に超える距離(意図的なギャップ)は接触とみなさず交差しない", () => {
+      const arc = createArcSegment({ p1: [-10, 0], p2: [10, 0], bulge: 1 });
+      const line = createLineSegment({ p1: [10 + TANGENT_CONTACT_EPS * 20, -5], p2: [10 + TANGENT_CONTACT_EPS * 20, 5] });
+      expect(lineArcIntersection(line, arc)).toHaveLength(0);
+    });
+
+    it("接触バンド内でも接点(垂線の足)が直線の区間外なら交差しない(範囲クランプ)", () => {
+      const arc = createArcSegment({ p1: [-10, 0], p2: [10, 0], bulge: 1 }); // 接点候補は(10,0)
+      // 直線区間はy∈[4,4.5]のみ(垂線の足y=0を含まない)。
+      const line = createLineSegment({ p1: [10 + 5e-7, 4], p2: [10 + 5e-7, 4.5] });
+      expect(lineArcIntersection(line, arc)).toHaveLength(0);
+    });
+
+    it("接触バンド内でも接点が円弧の角度範囲外なら交差しない(範囲クランプ)", () => {
+      // 上半円のみ(y>=0側、既存テストと同じbulge=-1の規約)。接点候補は円の最下点(0,-10)で、
+      // これは上半円の角度範囲外(下半分)にある。丸め誤差スケールの接触バンド内へわずかに
+      // ずらしても(y=-10-5e-7)、範囲外である限り交差は返らないことを確認する。
+      const upperArc = createArcSegment({ p1: [-10, 0], p2: [10, 0], bulge: -1 }); // 中心(0,0)半径10、上半円
+      const line = createLineSegment({ p1: [-20, -10 - 5e-7], p2: [20, -10 - 5e-7] }); // 接点候補(0,-10)、上半円の範囲外
+      expect(lineArcIntersection(line, upperArc)).toHaveLength(0);
+    });
+
+    it("明確に交差する(接触バンドよりずっと内側にある)通常ケースは従来どおり2点を返し、重複しない", () => {
+      const arc = createArcSegment({ p1: [-10, 0], p2: [10, 0], bulge: -1 }); // 上半円(y>=0側)、半径10
+      const line = createLineSegment({ p1: [-20, 5], p2: [20, 5] }); // y=5、明確に円を貫く
+      const results = lineArcIntersection(line, arc);
+      expect(results).toHaveLength(2);
+      const xs = results.map((r) => r.point[0]).sort((x, y) => x - y);
+      expect(xs[0]).toBeCloseTo(-Math.sqrt(75), 6);
+      expect(xs[1]).toBeCloseTo(Math.sqrt(75), 6);
+    });
+  });
 });
 
 describe("arcArcIntersection", () => {
@@ -168,6 +226,77 @@ describe("arcArcIntersection", () => {
     const a = createArcSegment({ p1: [-10, 0], p2: [10, 0], bulge: 1 });
     const b = createArcSegment({ p1: [90, 0], p2: [110, 0], bulge: 1 });
     expect(arcArcIntersection(a, b)).toHaveLength(0);
+  });
+
+  // 接触バンド(Phase 42c)。lineArcIntersectionと同じ考え方をarcArcIntersectionにも適用する。
+  // 接点が「たまたま円弧の端点」だと既存のincludeEndpointTouchesロジックと区別が付かないため、
+  // 接点が両円弧の角度範囲の内部(端点ではない)に来るよう、300°の大きな弧(端点は接点から
+  // 十分離れた位置)で構成する。
+  describe("接触バンド(TANGENT_CONTACT_EPS、ソルバのグリッド丸め誤差の吸収)", () => {
+    /** center中心・radius半径、startDeg(度)からsweepDeg(度、CCW)だけ掃引する円弧セグメントを作る。 */
+    function bigArc(center: [number, number], radius: number, startDeg: number, sweepDeg: number) {
+      const start = (startDeg * Math.PI) / 180;
+      const sweep = (sweepDeg * Math.PI) / 180;
+      const p1: [number, number] = [center[0] + radius * Math.cos(start), center[1] + radius * Math.sin(start)];
+      const end = start + sweep;
+      const p2: [number, number] = [center[0] + radius * Math.cos(end), center[1] + radius * Math.sin(end)];
+      const bulge = Math.tan(sweep / 4);
+      return createArcSegment({ p1, p2, bulge });
+    }
+
+    it("外接(接点は円弧内部、端点ではない)で丸め誤差スケールの隙間があっても接点が1件見つかる", () => {
+      const r1 = 5;
+      const r2 = 3;
+      const gap = 7e-7; // ソルバのグリッド丸めで典型的に生じる程度のずれ。
+      const a = bigArc([0, 0], r1, -150, 300); // 接点候補(5,0)、角度0°は内部(-150°〜150°の範囲内)。
+      const b = bigArc([r1 + r2 + gap, 0], r2, 30, 300); // 接点候補は同じ(5,0)付近、B側の角度180°は内部(30°〜330°)。
+      const results = arcArcIntersection(a, b);
+      expect(results).toHaveLength(1);
+      expect(results[0].point[0]).toBeCloseTo(r1, 5);
+      expect(results[0].point[1]).toBeCloseTo(0, 5);
+    });
+
+    it("内接(接点は円弧内部)で丸め誤差スケールの隙間があっても接点が1件見つかる", () => {
+      const r1 = 8;
+      const r2 = 3;
+      const gap = 7e-7;
+      const a = bigArc([0, 0], r1, -150, 300); // 接点候補(8,0)、角度0°は内部。
+      const b = bigArc([r1 - r2 + gap, 0], r2, -150, 300); // Bの中心は(5+gap,0)、接点候補も角度0°側で内部。
+      const results = arcArcIntersection(a, b);
+      expect(results).toHaveLength(1);
+      expect(results[0].point[0]).toBeCloseTo(r1, 5);
+      expect(results[0].point[1]).toBeCloseTo(0, 5);
+    });
+
+    it("TANGENT_CONTACT_EPSを明確に超える隙間(意図的に離れた2円)は接触とみなさず交差しない", () => {
+      const r1 = 5;
+      const r2 = 3;
+      const gap = TANGENT_CONTACT_EPS * 20;
+      const a = bigArc([0, 0], r1, -150, 300);
+      const b = bigArc([r1 + r2 + gap, 0], r2, 30, 300);
+      expect(arcArcIntersection(a, b)).toHaveLength(0);
+    });
+
+    it("接触バンド内でも接点が円弧の角度範囲外なら交差しない(範囲クランプ)", () => {
+      const r1 = 5;
+      const r2 = 3;
+      const gap = 7e-7;
+      // 接点候補は(5,0)(角度0°)だが、Aの角度範囲を10°〜300°(0°を含まない)に限定する。
+      const a = bigArc([0, 0], r1, 10, 290);
+      const b = bigArc([r1 + r2 + gap, 0], r2, 30, 300);
+      expect(arcArcIntersection(a, b)).toHaveLength(0);
+    });
+
+    it("明確に交差する(接触バンドよりずっと内側にある)通常ケースは従来どおり2点を返す", () => {
+      const a = bigArc([0, 0], 10, -150, 300);
+      const b = bigArc([10, 0], 10, -150, 300); // 中心距離10、半径10同士(標準的な2点交差)
+      const results = arcArcIntersection(a, b);
+      expect(results.length).toBeGreaterThanOrEqual(1);
+      for (const r of results) {
+        expect(r.point[0]).toBeCloseTo(5, 6);
+        expect(Math.abs(r.point[1])).toBeCloseTo(Math.sqrt(75), 3);
+      }
+    });
   });
 
   it("同一円上で重なる2つの円弧(同心・同半径)は重なり区間の両端を返す", () => {

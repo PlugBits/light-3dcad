@@ -16,6 +16,43 @@ export type Point2 = [number, number];
 /** 交点計算・分割の共通の距離許容(mm)。 */
 export const EPS = 1e-6;
 
+/**
+ * 接触(tangency)判定用の距離許容(mm、Phase 42c)。線↔円/円弧・円弧↔円弧が「接している」とみなす
+ * バンド幅で、|dist(中心, 直線) − 半径| <= この値、または円弧同士は|dist(中心間) − (r1+r2)|
+ * (外接)・|dist(中心間) − |r1−r2||(内接)がこの値以下なら、判別式ベースの通常経路ではなく
+ * 単一の接点を直接返す(下記の各関数の接触バンド分岐を参照)。
+ *
+ * 値の根拠(実測、tests/sketch/intersections.test.tsの再現テストで検証):
+ * ソルバ(src/sketch/gcsAdapter.ts)は解いた座標を1e-6mmグリッドへ丸める(ROUND_GRID)。
+ * 接線拘束が数学的に厳密に満たされた解であっても、丸め後は中心・直線双方の端点が
+ * それぞれ独立に最大でグリッド幅の半分(5e-7mm、対角成分を考えると最大 5e-7*√2≈7.1e-7mm)
+ * だけずれうる。直線↔円の垂線距離は中心の丸め誤差に対して1-Lipschitz(中心を動かした分
+ * そのまま距離が変わりうる)であり、さらに直線の両端点(p1/p2)の丸め誤差も回転を通じて
+ * 寄与するため、極端な配置(直線の一方の腕が接点のごく近くにあり、もう一方の腕が
+ * 数千mm先まで伸びる非対称な場合)を含めて数値的に走査したところ、垂線距離と半径の差
+ * (本来ゼロのはずの量)は最大で約1.06e-6mm(実質グリッド1段分)まで観測された
+ * (半径1〜500mm、腕の非対称性・接触角を広く走査。実務的なスケッチ規模である
+ * 「半径 数百mmまで」の範囲では1e-6mm強に収まる)。
+ * 判別式(2次方程式の解の公式)ベースの旧来の許容は、ここで使われていたEPS(1e-6)を
+ * そのままスケールしない形で使っていたため、代数的に整理すると実効許容が
+ * 常にEPS/8(=1.25e-7mm、直線の長さや半径のスケールに依らず一定)に潰れてしまい、
+ * 上記の丸め誤差(最大1.06e-6mm)を1桁以上下回っていた。これが実機報告バグ
+ * (接線拘束→トリムで交点が見つからず全消去)の直接の原因。
+ *
+ * そのため、実測ワーストケース(1.06e-6mm)に対して約100倍の安全マージンを持たせつつ、
+ * 通常のスケッチで意図的に作る「わずかに離れた」形状(0.01mm〜のオーダーの意図的なギャップ・
+ * 半径差)を誤って「接触」と判定しないよう、指示された1e-4〜1e-3mmの範囲の下寄りである
+ * 1e-4mm(=0.1µm)を採用する。src/model/validation.tsのPOLYGON_MIN_VERTEX_DISTANCE(1e-6mm、
+ * 縮退頂点の判定にのみ使う値)よりは十分大きいが、実務的な最小意味のある寸法(通常0.01mm以上)
+ * よりは十分小さく、実形状の意図的な近接配置を誤検出するリスクは低い。
+ */
+export const TANGENT_CONTACT_EPS = 1e-4;
+
+/** パラメータ値を[0,1]へクランプする(接触点・通常交点の両方で使う共通の丸め処理)。 */
+function clampParam(t: number): number {
+  return Math.min(1, Math.max(0, t));
+}
+
 /** セグメント同士の交点1件。tA/tBはそれぞれのセグメント上の位置(0=p1, 1=p2)。 */
 export interface SegIntersection {
   point: Point2;
@@ -187,8 +224,13 @@ export function lineLineIntersection(a: SketchSegment, b: SketchSegment, opts?: 
 /**
  * 直線セグメントlineと円弧セグメントarcの交点を返す。
  * arcのbulgeが0/未指定(=実質直線)の場合はlineLineIntersection()に委譲する。
- * それ以外は直線と円の2次方程式を解き、各解が直線区間([0,1])かつ円弧の角度範囲内にあるものを返す
- * (接する場合は1件、通常は0〜2件)。
+ * それ以外は、まず中心から直線までの垂線距離と半径の差(接触バンド、TANGENT_CONTACT_EPS参照)を
+ * 直接判定し、バンド内なら垂線の足を単一の接点として返す(Phase 42c: ソルバの1e-6mmグリッド丸めで
+ * 生じる僅かな残差を吸収し、トリムの区切り点として機能させるため。判別式ベースの許容だけでは
+ * 実効的にEPS/8[≈1.25e-7mm]まで潰れてしまい丸め誤差を吸収できなかった)。
+ * バンド外は通常どおり直線と円の2次方程式を解き、各解が直線区間([0,1])かつ円弧の角度範囲内に
+ * あるものを返す(明確に交差する場合は0〜2件、接触バンドと判定されなかった残りの近接ケースの
+ * 保険として判別式の僅かな負値も許容する)。
  */
 export function lineArcIntersection(line: SketchSegment, arc: SketchSegment, opts?: IntersectionOptions): SegIntersection[] {
   const geom = arcGeometry(arc);
@@ -206,8 +248,24 @@ export function lineArcIntersection(line: SketchSegment, arc: SketchSegment, opt
   const c = dot(f, f) - geom.radius * geom.radius;
   if (a <= EPS * EPS) return [];
 
+  // 接触バンド判定(Phase 42c): 中心から直線への垂線距離(|cross(d,f)|/|d|)と半径の差を、
+  // 判別式を介さず直接TANGENT_CONTACT_EPSと比較する。垂線の足(-b/2a、判別式ゼロ点と同じtだが
+  // 判別式の値そのものには依存しない)が直線区間・円弧角度範囲の両方に収まれば単一の接点を返す。
+  const distToLine = Math.abs(cross2(d, f)) / Math.sqrt(a);
+  const gap = distToLine - geom.radius;
+  if (Math.abs(gap) <= TANGENT_CONTACT_EPS) {
+    const tFoot = -b / (2 * a);
+    if (tFoot < -tTolLine || tFoot > 1 + tTolLine) return [];
+    const point: Point2 = [line.p1[0] + tFoot * d[0], line.p1[1] + tFoot * d[1]];
+    const frac = arcParam(geom, point);
+    if (frac < -tTolArc || frac > 1 + tTolArc) return [];
+    return applyEndpointFilter([{ point, tA: clampParam(tFoot), tB: clampParam(frac) }], line, arc, opts);
+  }
+
   const disc = b * b - 4 * a * c;
-  // 判別式が0近傍のときは数値誤差で僅かに負になりうるため接する(1解)とみなす。
+  // 判別式が0近傍のときは数値誤差で僅かに負になりうるため接する(1解)とみなす(接触バンドの外側で
+  // 発生しうる、より小さな数値誤差[浮動小数点演算由来]に対する保険。実質的なソルバ丸め誤差の吸収は
+  // 上記の接触バンド判定が担う)。
   const discTol = EPS * Math.max(1, a * geom.radius);
   if (disc < -discTol) return [];
   const safeDisc = Math.max(0, disc);
@@ -223,8 +281,8 @@ export function lineArcIntersection(line: SketchSegment, arc: SketchSegment, opt
     if (frac < -tTolArc || frac > 1 + tTolArc) continue;
     results.push({
       point,
-      tA: Math.min(1, Math.max(0, t)),
-      tB: Math.min(1, Math.max(0, frac)),
+      tA: clampParam(t),
+      tB: clampParam(frac),
     });
   }
   return applyEndpointFilter(dedupePoints(results), line, arc, opts);
@@ -262,6 +320,25 @@ export function arcArcIntersection(a: SketchSegment, b: SketchSegment, opts?: In
 
   const r1 = geomA.radius;
   const r2 = geomB.radius;
+
+  // 接触バンド判定(Phase 42c、line↔arcと同じ考え方): 外接(dCenters≈r1+r2)・内接
+  // (dCenters≈|r1-r2|)のいずれかにTANGENT_CONTACT_EPS以内で近ければ、判別式(hSq)を介さず
+  // 単一の接点を返す。接点はどちらの場合も中心間を結ぶ直線上、Aの中心からr1だけBの方向へ
+  // 進んだ点になる(外接: T=A+r1*dir、内接: T=A+r1*dirで dist(B,T)=|r1-dCenters|=r2 も成立する
+  // ため同じ式で両方をカバーできる)。dCenters<=EPSの同心ケースは上で処理済みのためここでは
+  // dCenters>EPSが保証されており、dirの正規化は安全。
+  const extGap = dCenters - (r1 + r2);
+  const intGap = dCenters - Math.abs(r1 - r2);
+  if (Math.abs(extGap) <= TANGENT_CONTACT_EPS || Math.abs(intGap) <= TANGENT_CONTACT_EPS) {
+    const dir: Point2 = [(geomB.center[0] - geomA.center[0]) / dCenters, (geomB.center[1] - geomA.center[1]) / dCenters];
+    const point: Point2 = [geomA.center[0] + r1 * dir[0], geomA.center[1] + r1 * dir[1]];
+    const fracA = arcParam(geomA, point);
+    const fracB = arcParam(geomB, point);
+    if (fracA < -tTolA || fracA > 1 + tTolA) return [];
+    if (fracB < -tTolB || fracB > 1 + tTolB) return [];
+    return applyEndpointFilter([{ point, tA: clampParam(fracA), tB: clampParam(fracB) }], a, b, opts);
+  }
+
   if (dCenters > r1 + r2 + EPS) return [];
   if (dCenters < Math.abs(r1 - r2) - EPS) return [];
 
