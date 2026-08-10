@@ -514,19 +514,19 @@ describe("entityトリムでの拘束移行・ダングリング拘束の掃除(
     // fixEntityは「移行」であり実質的な喪失ではないため、除去件数には数えない。
     expect(result.removedConstraintCount).toBe(0);
 
-    // 残った円弧片の全てに、両端点を固定するfix拘束が付与されている(=元の円の形状[中心・半径]が
-    // 完全に凍結される。既存の"fix"拘束語彙のみで表現、新規拘束種別なし)。
+    // 残った円弧片の全てに、中心・半径を固定するfixArc拘束が付与されている(=元の円の上に
+    // 留まる。Phase 42bで円弧がPlaneGCSのネイティブarcプリミティになったため、以前[両端点を
+    // fix]と異なり端点自体は固定しない: 端点は元の円周上を自由に滑れるのが正しい挙動になった)。
     const arcs = result.segments.filter((s) => s.kind === "arc" && !segments.some((orig) => orig.id === s.id));
     expect(arcs.length).toBeGreaterThan(0);
     for (const arc of arcs) {
-      const hasFixP1 = result.constraints.some(
-        (c) => c.kind === "fix" && c.point.segmentId === arc.id && c.point.end === "p1",
+      const hasFixArc = result.constraints.some((c) => c.kind === "fixArc" && c.segmentId === arc.id);
+      expect(hasFixArc).toBe(true);
+      // 端点自体を凍結する"fix"拘束は、もはやこの移行では作られない。
+      const hasFixEndpoint = result.constraints.some(
+        (c) => c.kind === "fix" && c.point.segmentId === arc.id,
       );
-      const hasFixP2 = result.constraints.some(
-        (c) => c.kind === "fix" && c.point.segmentId === arc.id && c.point.end === "p2",
-      );
-      expect(hasFixP1).toBe(true);
-      expect(hasFixP2).toBe(true);
+      expect(hasFixEndpoint).toBe(false);
     }
   });
 

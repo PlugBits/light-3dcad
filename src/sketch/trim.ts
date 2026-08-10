@@ -7,7 +7,7 @@
 // で「区間」に分割し、クリック/ホバー位置に最も近い区間を求める(削除候補として提示・実削除する)。
 // 区間が1つしかできない(=他セグメントとの有効な交点が無い)場合は、区間全体=セグメント全体を削除する。
 import { generateId } from "../model/id";
-import type { LineRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
+import type { ArcRef, EntityRef, LineRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
 import { bulgeArcPoints } from "./bulge";
 import { explodeEntity } from "./explode";
 import {
@@ -286,6 +286,7 @@ export function collectReferencedIds(c: SketchConstraint): string[] {
     case "vertical":
     case "length":
     case "radius":
+    case "fixArc":
       return [c.segmentId];
     case "distanceLineRefEdge":
     case "angleLineRefEdge":
@@ -302,8 +303,9 @@ export function collectReferencedIds(c: SketchConstraint): string[] {
     case "coincidentOrigin":
       return ["segmentId" in c.point ? c.point.segmentId : c.point.entityId];
     case "distanceEntityEntity":
-    case "concentric":
       return [c.a.entityId, c.b.entityId];
+    case "concentric":
+      return [curveRefReferencedId(c.a), curveRefReferencedId(c.b)];
     case "distanceEntityLine":
       return [c.entity.entityId, ...lineRefReferencedIds(c.line)];
     case "distancePointLine":
@@ -313,12 +315,17 @@ export function collectReferencedIds(c: SketchConstraint): string[] {
     case "angleLineLine":
       return [c.a, c.b];
     case "tangent":
-      return [c.entity.entityId, c.target.kind === "segment" ? c.target.segmentId : c.target.entityId];
+      return [curveRefReferencedId(c.entity), c.target.kind === "segment" ? c.target.segmentId : c.target.entityId];
     default: {
       const exhaustive: never = c;
       return exhaustive;
     }
   }
+}
+
+/** EntityRef|ArcRef(concentric.a/b・tangent.entity、Phase 42b)が参照する生きたid(entityIdまたはsegmentId)。 */
+function curveRefReferencedId(ref: EntityRef | ArcRef): string {
+  return "segmentId" in ref ? ref.segmentId : ref.entityId;
 }
 
 /** LineRefが参照するid一覧(collectReferencedIds()のヘルパー、refEdgeは空配列)。 */
@@ -360,10 +367,13 @@ export function pruneDanglingConstraints(
  * 拘束を移行/削除する(実機報告バグの根本原因修正、Phase 42。trimEntityAtPoint()の
  * entityトリムと、分解[explodeSketchEntity]UIアクションの両方から呼ぶ共通ロジック)。
  *
- * - fixEntity: keptPiecesの全断片の両端点(p1・p2)への"fix"拘束に移行する。断片のbulgeは
- *   explodeEntity()が生成した時点の値で不変(ソルバの変数ではない)なので、両端点さえ固定すれば
- *   その断片の形状(=円なら弦・弧の全て)は元のentity形状のまま完全に凍結される。既存の"fix"拘束
- *   語彙のみで表現できるため新規拘束種別は不要(「中心+半径をfix」と等価)。
+ * - fixEntity: keptPiecesの各断片へ移行する。Phase 42bで円弧がPlaneGCSのネイティブarc
+ *   プリミティ(中心・半径が実変数)になったため、断片が円弧(kind:"arc"かつbulgeあり)の場合は
+ *   "fixArc"拘束(中心座標+半径のみを固定、端点は元の円の上を自由に滑れる)へ移行する
+ *   (以前は両端点を"fix"していたためトリム片が完全に硬直していたが、円弧が一級化された今は
+ *   端点を自由にしたまま「元の円の上に留まる」という本来の意図をより正確に表現できる)。
+ *   断片が直線(rectangle/polygon由来)の場合は従来通り両端点(p1・p2)への"fix"拘束に移行する
+ *   (直線には中心・半径の概念が無く、両端点を固定する以外に形状を凍結する手段が無いため)。
  * - tangent/distanceEntityLine/distanceEntityOrigin/distanceEntityEntity/concentric、および
  *   distanceEntityLine/distancePointLineのLineRef(entityEdge)経由の参照:
  *   entityIdがfixEntityを持っていた(=上記で凍結された)場合、これらの拘束が表していた関係は
@@ -390,12 +400,16 @@ export function migrateEntityConstraintsForReplace(
       kept.push(c);
       continue;
     }
-    if (c.kind === "fixEntity") continue; // 下でfix拘束へ移行する(件数に数えない)。
+    if (c.kind === "fixEntity") continue; // 下でfixArc/fix拘束へ移行する(件数に数えない)。
     if (!hadFixEntity) removedConstraintCount += 1; // 凍結されないため関係が真に失われる。
     // hadFixEntity===trueの場合は凍結により自動的に満たされ続けるため、件数に数えず黙って削除する。
   }
   if (hadFixEntity) {
     for (const piece of keptPieces) {
+      if (piece.kind === "arc" && piece.bulge) {
+        kept.push({ id: generateId("constraint"), kind: "fixArc", segmentId: piece.id });
+        continue;
+      }
       kept.push({ id: generateId("constraint"), kind: "fix", point: { segmentId: piece.id, end: "p1" } });
       kept.push({ id: generateId("constraint"), kind: "fix", point: { segmentId: piece.id, end: "p2" } });
     }
