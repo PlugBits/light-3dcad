@@ -1,7 +1,12 @@
-// Phase 37/37b/39: AIモデル生成パネル(自然言語プロンプト→設計メモ+アウソリングJSON→CadDocument)。
+// Phase 37/37b/39/45: AIモデル生成パネル(自然言語プロンプト→設計メモ+アウソリングJSON→CadDocument)。
 // src/app/App.tsx から React.lazy() 経由でのみ読み込まれる(@anthropic-ai/sdk・openaiはこのチャンクからも
 // 直接importせず、src/ai/generate.ts・src/ai/openaiClient.tsの中でさらに動的importする。
 // メインバンドルには一切含まれない)。
+// Phase 45: 「OSS/無料優先」の方針(docs/PLAN.md参照)により、コピー&ペースト経由の生成
+// (外部のAIチャットにプロンプト仕様を貼り付けて生成させ、返ってきたJSONを本アプリに貼り付ける、
+// APIキー不要)をPRIMARYフローに格上げした。従来PRIMARYだったAPIキー直接生成(プロバイダ選択+
+// APIキー入力+プロンプト+生成、自己修復リトライ込み)は、`<details>`で折りたたむSECONDARYフロー
+// 「APIキーで直接生成(上級者向け)」として温存する(機能・testidは変更しない)。
 // Phase 39: AI応答が質問(questions)を返した場合はチップUIで回答を選ばせ、回答を含めて
 // 再度generateCadDocument()を呼ぶ(会話を引き継ぐ)。生成成功時は設計メモ(design)を
 // 折りたたみ表示し、パネルは閉じずに残す(寸法を確認しながら繰り返し生成できるようにするため)。
@@ -9,8 +14,10 @@ import { useEffect, useState } from "react";
 
 import { compileAuthoringModel } from "../ai/compile";
 import { generateCadDocument, type AiQuestion, type GenerateProgress, type ModelMessage } from "../ai/generate";
+import { parsePastePayload, type GallerySubmitMeta } from "../ai/pastePayload";
 import { AUTHORING_PASTE_PROMPT } from "../ai/promptSpec";
 import { getCallModelForProvider, PROVIDER_LABEL, PROVIDERS, type Provider } from "../ai/provider";
+import { useCadStore } from "../state/store";
 import type { CadDocument } from "../model/types";
 
 /**
@@ -154,6 +161,11 @@ export default function AiGeneratePanel({ onClose, onLoad }: AiGeneratePanelProp
   const [pasteError, setPasteError] = useState<string | null>(null);
   const [copyNotice, setCopyNotice] = useState<string | null>(null);
 
+  // Phase 45: 貼り付け読み込み成功後の確認表示(パネルは自動で閉じない。寸法を見ながら
+  // 続けて別のモデルを貼り付けたり、確認してから手動で「閉じる」を押せるようにするため)。
+  const [pasteLoaded, setPasteLoaded] = useState(false);
+  const [pasteLoadedMeta, setPasteLoadedMeta] = useState<GallerySubmitMeta | null>(null);
+
   useEffect(() => {
     if (!copyNotice) return;
     const timer = setTimeout(() => setCopyNotice(null), 2500);
@@ -264,22 +276,37 @@ export default function AiGeneratePanel({ onClose, onLoad }: AiGeneratePanelProp
     onLoad(result.doc);
   }
 
+  /**
+   * 貼り付けモード(PRIMARYフロー)の「読み込む」ボタン。Phase 45から、
+   * - コードフェンス([```json ... ```])を自動で剥がす
+   * - 新形式({model, meta})・旧形式({sketches, features}、後方互換)のどちらも受け付ける
+   * - meta(ギャラリー投稿用のタイトル/説明/タグ提案)があればstore(pendingGalleryMeta)へ保存する
+   * (src/ai/pastePayload.ts の parsePastePayload() 参照)。読み込み成功後もパネルは自動的には
+   * 閉じない(確認できてから手動で「閉じる」、または続けて別のモデルを貼り付けられるようにするため)。
+   */
   function handlePasteLoad() {
     setPasteError(null);
-    let json: unknown;
-    try {
-      json = JSON.parse(pasteJson);
-    } catch (err) {
-      setPasteError(`JSONの解析に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+    setPasteLoaded(false);
+    setPasteLoadedMeta(null);
+
+    const parsed = parsePastePayload(pasteJson);
+    if (!parsed.ok) {
+      setPasteError(parsed.error);
       return;
     }
-    const compiled = compileAuthoringModel(json);
+    const compiled = compileAuthoringModel(parsed.model);
     if ("errors" in compiled) {
       setPasteError(compiled.errors.join("\n"));
       return;
     }
     onLoad(compiled.doc);
-    onClose();
+    if (parsed.meta) {
+      // loadDocument()(onLoad経由)がpendingGalleryMetaをnullへリセットした「後」に、
+      // ここで改めて新しいmetaを設定する(store.tsのpendingGalleryMetaコメント参照)。
+      useCadStore.getState().setPendingGalleryMeta(parsed.meta);
+    }
+    setPasteLoaded(true);
+    setPasteLoadedMeta(parsed.meta);
   }
 
   async function handleCopyPromptSpec() {
@@ -332,239 +359,263 @@ export default function AiGeneratePanel({ onClose, onLoad }: AiGeneratePanelProp
           </button>
         </div>
 
-        <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
-          プロバイダ
-          <select
-            data-testid="ai-provider-select"
-            value={provider}
-            onChange={(e) => handleProviderChange(e.target.value as Provider)}
-          >
-            {PROVIDERS.map((p) => (
-              <option key={p} value={p}>
-                {PROVIDER_LABEL[p]}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
-          APIキー({PROVIDER_LABEL[provider]})
-          <input
-            type="password"
-            data-testid="ai-api-key-input"
-            value={apiKey}
-            onChange={(e) => handleApiKeyChange(e.target.value)}
-            placeholder={API_KEY_PLACEHOLDER[provider]}
-            autoComplete="off"
-          />
-        </label>
-        <p style={{ margin: 0, fontSize: 11, color: "#aaa" }}>
-          キーはこの端末のlocalStorageにのみ保存され、選択中のプロバイダのAPI以外には送信されません。
+        {/* ------------------------------------------------------------------------------- */}
+        {/* PRIMARY: コピー&ペースト経由の生成(Phase 45。APIキー不要)。                          */}
+        {/* ------------------------------------------------------------------------------- */}
+        <p style={{ margin: 0, fontSize: 12, lineHeight: 1.6, color: "#ccc" }}>
+          ChatGPTやClaudeなど、お好みのAIチャットで使えます。APIキー不要。
         </p>
 
-        {provider === "anthropic" ? (
-          <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
-            モデル
-            <select data-testid="ai-model-select" value={model} onChange={(e) => handleModelChange(e.target.value)}>
-              {ANTHROPIC_MODEL_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : (
-          <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
-            モデル(候補から選ぶか、直接入力できます)
-            <input
-              type="text"
-              data-testid="ai-model-input"
-              list="ai-openai-model-options"
-              value={model}
-              onChange={(e) => handleModelChange(e.target.value)}
-              placeholder="gpt-5.5"
-              autoComplete="off"
-            />
-            <datalist id="ai-openai-model-options">
-              {OPENAI_MODEL_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </datalist>
-          </label>
-        )}
-
-        <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
-          プロンプト
-          <textarea
-            data-testid="ai-prompt-textarea"
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            rows={4}
-            placeholder="例: 幅100 高さ50 厚み10の板の中央にφ20の穴"
-          />
-        </label>
-
-        <button type="button" data-testid="btn-ai-generate-submit" onClick={handleGenerate} disabled={busy}>
-          {busy ? "生成中…" : "生成"}
+        <button type="button" data-testid="btn-ai-copy-prompt-spec" onClick={handleCopyPromptSpec}>
+          プロンプト仕様をコピー
         </button>
-
-        {progress && (
-          <p data-testid="ai-generate-progress" style={{ margin: 0, fontSize: 12, color: "#9cf" }}>
-            試行 {progress.attempt}/{progress.maxAttempts} — {PHASE_LABEL[progress.phase]}
+        {copyNotice && (
+          <p style={{ margin: 0, fontSize: 11, color: "#9cf" }} data-testid="ai-copy-notice">
+            {copyNotice}
           </p>
         )}
-        {errorMessage && (
+
+        <ol data-testid="ai-usage-steps" style={{ margin: 0, paddingLeft: 18, fontSize: 11, color: "#aaa", lineHeight: 1.7 }}>
+          <li>上のボタンでプロンプト仕様をコピー</li>
+          <li>AIチャットに貼って要望を伝える</li>
+          <li>返ってきたJSONを下に貼り付け</li>
+        </ol>
+
+        <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
+          AIチャットの返答(JSON)を貼り付け
+          <textarea
+            data-testid="ai-paste-json-textarea"
+            value={pasteJson}
+            onChange={(e) => setPasteJson(e.target.value)}
+            rows={6}
+            placeholder='{"model": {"sketches": [...], "features": [...]}, "meta": {"title": "...", "description": "...", "tags": ["..."]}}'
+          />
+        </label>
+        <button type="button" data-testid="btn-ai-paste-load" onClick={handlePasteLoad}>
+          読み込む
+        </button>
+        {pasteError && (
           <p
-            data-testid="ai-generate-error"
+            data-testid="ai-paste-error"
             role="alert"
             style={{ margin: 0, fontSize: 12, color: "#ff6b6b", whiteSpace: "pre-wrap" }}
           >
-            {errorMessage}
+            {pasteError}
           </p>
         )}
-
-        {questions && (
-          <div
-            data-testid="ai-questions-panel"
-            style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: "1px solid #444", paddingTop: 8 }}
-          >
-            <p style={{ margin: 0, fontSize: 12, color: "#9cf" }} data-testid="ai-generate-awaiting-answers">
-              質問に回答待ち — 設計を確定するためにいくつか確認させてください
-            </p>
-            {questions.map((q, i) => (
-              <div key={i} data-testid={`ai-question-${i}`} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                <p style={{ margin: 0, fontSize: 12 }}>
-                  {i + 1}. {q.question}
-                </p>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                  {q.options.map((opt, j) => {
-                    const selected = answers[i] === opt;
-                    return (
-                      <button
-                        key={j}
-                        type="button"
-                        data-testid={`ai-question-${i}-option-${j}`}
-                        onClick={() => setAnswers((a) => ({ ...a, [i]: opt }))}
-                        style={{
-                          fontSize: 11,
-                          padding: "4px 8px",
-                          borderRadius: 12,
-                          border: selected ? "1px solid #9cf" : "1px solid #555",
-                          background: selected ? "#2c4a5e" : "transparent",
-                          color: "#eee",
-                          cursor: "pointer",
-                        }}
-                      >
-                        {opt}
-                      </button>
-                    );
-                  })}
-                  <button
-                    type="button"
-                    data-testid={`ai-question-${i}-omakase`}
-                    onClick={() => setAnswers((a) => ({ ...a, [i]: "おまかせ" }))}
-                    style={{
-                      fontSize: 11,
-                      padding: "4px 8px",
-                      borderRadius: 12,
-                      border: answers[i] === "おまかせ" ? "1px solid #9cf" : "1px dashed #777",
-                      background: answers[i] === "おまかせ" ? "#2c4a5e" : "transparent",
-                      color: "#ccc",
-                      cursor: "pointer",
-                    }}
-                  >
-                    おまかせ
-                  </button>
-                </div>
-                <details style={{ fontSize: 11 }}>
-                  <summary style={{ cursor: "pointer", color: "#888" }}>自由回答で上書き</summary>
-                  <input
-                    type="text"
-                    data-testid={`ai-question-${i}-freetext`}
-                    value={freeText[i] ?? ""}
-                    onChange={(e) => setFreeText((f) => ({ ...f, [i]: e.target.value }))}
-                    style={{ width: "100%", marginTop: 4 }}
-                  />
-                </details>
-              </div>
-            ))}
-            <div style={{ display: "flex", gap: 8 }}>
-              <button type="button" data-testid="btn-ai-answer-submit" onClick={() => handleAnswerSubmit(false)} disabled={busy}>
-                回答して生成
-              </button>
-              <button type="button" data-testid="btn-ai-answer-all-omakase" onClick={() => handleAnswerSubmit(true)} disabled={busy}>
-                全部おまかせで生成
-              </button>
-            </div>
-          </div>
-        )}
-
-        {loaded && (
-          <div
-            data-testid="ai-generate-loaded"
-            style={{ display: "flex", flexDirection: "column", gap: 6, borderTop: "1px solid #444", paddingTop: 8 }}
-          >
+        {pasteLoaded && (
+          <div data-testid="ai-paste-loaded" style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <p style={{ margin: 0, fontSize: 12, color: "#8f8" }}>読み込み完了 — ドキュメントに反映しました</p>
-            {design && (
-              <details
-                data-testid="ai-design-details"
-                open={designOpen}
-                onToggle={(e) => setDesignOpen((e.target as HTMLDetailsElement).open)}
-              >
-                <summary style={{ cursor: "pointer", fontSize: 12 }}>設計メモを表示</summary>
-                <pre
-                  data-testid="ai-design-text"
-                  style={{ whiteSpace: "pre-wrap", fontSize: 11, color: "#ccc", margin: "6px 0 0", fontFamily: "inherit" }}
-                >
-                  {design}
-                </pre>
-              </details>
+            {pasteLoadedMeta && (
+              <p data-testid="ai-paste-meta-notice" style={{ margin: 0, fontSize: 12, color: "#9cf" }}>
+                投稿用メタ情報を読み込みました: {pasteLoadedMeta.title}
+              </p>
             )}
           </div>
         )}
 
+        {/* ------------------------------------------------------------------------------- */}
+        {/* SECONDARY: APIキー直接生成(上級者向け)。従来PRIMARYだったフロー、機能は変更しない。      */}
+        {/* ------------------------------------------------------------------------------- */}
         <details
           data-testid="ai-advanced-details"
           open={advancedOpen}
           onToggle={(e) => setAdvancedOpen((e.target as HTMLDetailsElement).open)}
           style={{ borderTop: "1px solid #444", paddingTop: 8 }}
         >
-          <summary style={{ cursor: "pointer", fontSize: 12 }}>詳細(APIキー無しで使う)</summary>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
-            <p style={{ margin: 0, fontSize: 11, color: "#aaa" }}>
-              外部のAIチャット(ChatGPT等)にプロンプト仕様をコピペして生成させ、返ってきたJSONをここに貼り付けて読み込めます(APIキー不要)。
-            </p>
-            <button type="button" data-testid="btn-ai-copy-prompt-spec" onClick={handleCopyPromptSpec}>
-              プロンプト仕様をコピー
-            </button>
-            {copyNotice && (
-              <p style={{ margin: 0, fontSize: 11, color: "#9cf" }} data-testid="ai-copy-notice">
-                {copyNotice}
-              </p>
-            )}
+          <summary style={{ cursor: "pointer", fontSize: 12 }}>APIキーで直接生成(上級者向け)</summary>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 8 }}>
             <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
-              JSONを直接貼り付け
-              <textarea
-                data-testid="ai-paste-json-textarea"
-                value={pasteJson}
-                onChange={(e) => setPasteJson(e.target.value)}
-                rows={6}
-                placeholder='{"sketches": [...], "features": [...]}'
+              プロバイダ
+              <select
+                data-testid="ai-provider-select"
+                value={provider}
+                onChange={(e) => handleProviderChange(e.target.value as Provider)}
+              >
+                {PROVIDERS.map((p) => (
+                  <option key={p} value={p}>
+                    {PROVIDER_LABEL[p]}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
+              APIキー({PROVIDER_LABEL[provider]})
+              <input
+                type="password"
+                data-testid="ai-api-key-input"
+                value={apiKey}
+                onChange={(e) => handleApiKeyChange(e.target.value)}
+                placeholder={API_KEY_PLACEHOLDER[provider]}
+                autoComplete="off"
               />
             </label>
-            <button type="button" data-testid="btn-ai-paste-load" onClick={handlePasteLoad}>
-              読み込む
+            <p style={{ margin: 0, fontSize: 11, color: "#aaa" }}>
+              キーはこの端末のlocalStorageにのみ保存され、選択中のプロバイダのAPI以外には送信されません。
+            </p>
+
+            {provider === "anthropic" ? (
+              <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
+                モデル
+                <select data-testid="ai-model-select" value={model} onChange={(e) => handleModelChange(e.target.value)}>
+                  {ANTHROPIC_MODEL_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
+                モデル(候補から選ぶか、直接入力できます)
+                <input
+                  type="text"
+                  data-testid="ai-model-input"
+                  list="ai-openai-model-options"
+                  value={model}
+                  onChange={(e) => handleModelChange(e.target.value)}
+                  placeholder="gpt-5.5"
+                  autoComplete="off"
+                />
+                <datalist id="ai-openai-model-options">
+                  {OPENAI_MODEL_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </datalist>
+              </label>
+            )}
+
+            <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
+              プロンプト
+              <textarea
+                data-testid="ai-prompt-textarea"
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                rows={4}
+                placeholder="例: 幅100 高さ50 厚み10の板の中央にφ20の穴"
+              />
+            </label>
+
+            <button type="button" data-testid="btn-ai-generate-submit" onClick={handleGenerate} disabled={busy}>
+              {busy ? "生成中…" : "生成"}
             </button>
-            {pasteError && (
+
+            {progress && (
+              <p data-testid="ai-generate-progress" style={{ margin: 0, fontSize: 12, color: "#9cf" }}>
+                試行 {progress.attempt}/{progress.maxAttempts} — {PHASE_LABEL[progress.phase]}
+              </p>
+            )}
+            {errorMessage && (
               <p
-                data-testid="ai-paste-error"
+                data-testid="ai-generate-error"
                 role="alert"
                 style={{ margin: 0, fontSize: 12, color: "#ff6b6b", whiteSpace: "pre-wrap" }}
               >
-                {pasteError}
+                {errorMessage}
               </p>
+            )}
+
+            {questions && (
+              <div
+                data-testid="ai-questions-panel"
+                style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: "1px solid #444", paddingTop: 8 }}
+              >
+                <p style={{ margin: 0, fontSize: 12, color: "#9cf" }} data-testid="ai-generate-awaiting-answers">
+                  質問に回答待ち — 設計を確定するためにいくつか確認させてください
+                </p>
+                {questions.map((q, i) => (
+                  <div key={i} data-testid={`ai-question-${i}`} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <p style={{ margin: 0, fontSize: 12 }}>
+                      {i + 1}. {q.question}
+                    </p>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                      {q.options.map((opt, j) => {
+                        const selected = answers[i] === opt;
+                        return (
+                          <button
+                            key={j}
+                            type="button"
+                            data-testid={`ai-question-${i}-option-${j}`}
+                            onClick={() => setAnswers((a) => ({ ...a, [i]: opt }))}
+                            style={{
+                              fontSize: 11,
+                              padding: "4px 8px",
+                              borderRadius: 12,
+                              border: selected ? "1px solid #9cf" : "1px solid #555",
+                              background: selected ? "#2c4a5e" : "transparent",
+                              color: "#eee",
+                              cursor: "pointer",
+                            }}
+                          >
+                            {opt}
+                          </button>
+                        );
+                      })}
+                      <button
+                        type="button"
+                        data-testid={`ai-question-${i}-omakase`}
+                        onClick={() => setAnswers((a) => ({ ...a, [i]: "おまかせ" }))}
+                        style={{
+                          fontSize: 11,
+                          padding: "4px 8px",
+                          borderRadius: 12,
+                          border: answers[i] === "おまかせ" ? "1px solid #9cf" : "1px dashed #777",
+                          background: answers[i] === "おまかせ" ? "#2c4a5e" : "transparent",
+                          color: "#ccc",
+                          cursor: "pointer",
+                        }}
+                      >
+                        おまかせ
+                      </button>
+                    </div>
+                    <details style={{ fontSize: 11 }}>
+                      <summary style={{ cursor: "pointer", color: "#888" }}>自由回答で上書き</summary>
+                      <input
+                        type="text"
+                        data-testid={`ai-question-${i}-freetext`}
+                        value={freeText[i] ?? ""}
+                        onChange={(e) => setFreeText((f) => ({ ...f, [i]: e.target.value }))}
+                        style={{ width: "100%", marginTop: 4 }}
+                      />
+                    </details>
+                  </div>
+                ))}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button type="button" data-testid="btn-ai-answer-submit" onClick={() => handleAnswerSubmit(false)} disabled={busy}>
+                    回答して生成
+                  </button>
+                  <button type="button" data-testid="btn-ai-answer-all-omakase" onClick={() => handleAnswerSubmit(true)} disabled={busy}>
+                    全部おまかせで生成
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {loaded && (
+              <div
+                data-testid="ai-generate-loaded"
+                style={{ display: "flex", flexDirection: "column", gap: 6, borderTop: "1px solid #444", paddingTop: 8 }}
+              >
+                <p style={{ margin: 0, fontSize: 12, color: "#8f8" }}>読み込み完了 — ドキュメントに反映しました</p>
+                {design && (
+                  <details
+                    data-testid="ai-design-details"
+                    open={designOpen}
+                    onToggle={(e) => setDesignOpen((e.target as HTMLDetailsElement).open)}
+                  >
+                    <summary style={{ cursor: "pointer", fontSize: 12 }}>設計メモを表示</summary>
+                    <pre
+                      data-testid="ai-design-text"
+                      style={{ whiteSpace: "pre-wrap", fontSize: 11, color: "#ccc", margin: "6px 0 0", fontFamily: "inherit" }}
+                    >
+                      {design}
+                    </pre>
+                  </details>
+                )}
+              </div>
             )}
           </div>
         </details>
