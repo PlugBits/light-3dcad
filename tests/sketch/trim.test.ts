@@ -4,8 +4,9 @@ import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { createArcSegment, createCircleEntity, createLineSegment, createRectangleEntity, type SketchConstraint } from "../../src/model";
+import { arcGeometryFromBulge } from "../../src/sketch/bulge";
 import * as gcsAdapter from "../../src/sketch/gcsAdapter";
-import { registerGcsAdapter, solveSketch } from "../../src/sketch/solver";
+import { getSketchDiagnostics, registerGcsAdapter, solveSketch } from "../../src/sketch/solver";
 import { trimEntityAtPoint, trimSegmentAtPoint, trimSegmentWithConstraints } from "../../src/sketch/trim";
 
 describe("trimSegmentAtPoint", () => {
@@ -449,5 +450,183 @@ describe("トリム断点のcoincidentがsolveSketch()経由でも維持され�
     const matchEnd: [number, number] = closeTo(leftUpper.p1, [-4, 3], 1) ? leftUpper.p1 : leftUpper.p2;
     expect(matchEnd[0]).toBeCloseTo(solvedLineLeft.p1[0], 6);
     expect(matchEnd[1]).toBeCloseTo(solvedLineLeft.p1[1], 6);
+  });
+});
+
+/**
+ * ユーザー報告バグ(Phase 42)の再現・修正確認。円entityに fixEntity(円は固定)・tangent(接線)・
+ * distanceEntityOrigin が付いた状態でトリムすると、以前はentityIdを参照するこれらの拘束が
+ * 参照切れのまま残り(拘束一覧に生IDが表示される・過拘束の誤矛盾判定・自由度爆発の原因になっていた)。
+ * trimEntityAtPoint()はmigrateEntityConstraintsForReplace()でfixEntityを全断片の両端点への
+ * fix拘束へ移行し、他の参照(tangent/distanceEntityOrigin等)は凍結により自動的に満たされ続けるため
+ * 無害に削除する(pruneDanglingConstraints()の安全網と合わせて、参照切れの拘束が一切残らない)。
+ */
+describe("entityトリムでの拘束移行・ダングリング拘束の掃除(実機報告バグ対応、Phase 42)", () => {
+  beforeAll(async () => {
+    gcsAdapter.setGcsWasmPathForTests(path.resolve("node_modules/@salusoft89/planegcs/dist/planegcs_dist/planegcs.wasm"));
+    registerGcsAdapter(gcsAdapter);
+    await gcsAdapter.initGcs();
+  });
+
+  /** 100x100の矩形状チェーン(4本の線分、水平/垂直/長さ/一致で完全拘束)+その角に内接する固定円を作る。 */
+  function makeFixedCircleScene() {
+    const l1 = createLineSegment({ p1: [0, 0], p2: [100, 0] }); // bottom
+    const l2 = createLineSegment({ p1: [100, 0], p2: [100, 100] }); // right
+    const l3 = createLineSegment({ p1: [100, 100], p2: [0, 100] }); // top
+    const l4 = createLineSegment({ p1: [0, 100], p2: [0, 0] }); // left
+    // l1(y=0)・l2(x=100)の両方に接する半径20の円: center=(100-20, 20)=(80,20)。
+    const circle = createCircleEntity({ center: [80, 20], radius: 20 });
+    const constraints: SketchConstraint[] = [
+      { id: "coin-1", kind: "coincident", a: { segmentId: l1.id, end: "p2" }, b: { segmentId: l2.id, end: "p1" } },
+      { id: "coin-2", kind: "coincident", a: { segmentId: l2.id, end: "p2" }, b: { segmentId: l3.id, end: "p1" } },
+      { id: "coin-3", kind: "coincident", a: { segmentId: l3.id, end: "p2" }, b: { segmentId: l4.id, end: "p1" } },
+      { id: "coin-4", kind: "coincident", a: { segmentId: l4.id, end: "p2" }, b: { segmentId: l1.id, end: "p1" } },
+      { id: "h1", kind: "horizontal", segmentId: l1.id },
+      { id: "v2", kind: "vertical", segmentId: l2.id },
+      { id: "h3", kind: "horizontal", segmentId: l3.id },
+      { id: "v4", kind: "vertical", segmentId: l4.id },
+      { id: "len1", kind: "length", segmentId: l1.id, value: 100 },
+      { id: "len4", kind: "length", segmentId: l4.id, value: 100 },
+      { id: "fix-p1", kind: "fix", point: { segmentId: l1.id, end: "p1" } },
+      { id: "fix-circle", kind: "fixEntity", entity: { entityId: circle.id } },
+      { id: "tan-1", kind: "tangent", entity: { entityId: circle.id }, target: { kind: "segment", segmentId: l1.id } },
+      { id: "tan-2", kind: "tangent", entity: { entityId: circle.id }, target: { kind: "segment", segmentId: l2.id } },
+      {
+        id: "dist-origin",
+        kind: "distanceEntityOrigin",
+        entity: { entityId: circle.id },
+        value: Math.hypot(80, 20),
+      },
+    ];
+    return { l1, l2, l3, l4, circle, constraints, segments: [l1, l2, l3, l4] };
+  }
+
+  it("固定円(fixEntity)をトリムすると、fixEntity/tangent/distanceEntityOriginが円IDへの参照切れのまま残らない", () => {
+    const { circle, constraints, segments } = makeFixedCircleScene();
+    // 円の頂上(80,40)近辺をクリックしてトリム(接線点[(80,0)・(100,20)]とは無関係な区間)。
+    const result = trimEntityAtPoint([circle], circle.id, segments, [80, 40], constraints);
+
+    expect(result.entities).toHaveLength(0);
+    // 削除されたentityIdを参照する拘束は一切残らない(fixEntity/tangent/distanceEntityOriginいずれも)。
+    for (const c of result.constraints) {
+      expect(JSON.stringify(c)).not.toContain(circle.id);
+    }
+    // fixEntityは「移行」であり実質的な喪失ではないため、除去件数には数えない。
+    expect(result.removedConstraintCount).toBe(0);
+
+    // 残った円弧片の全てに、両端点を固定するfix拘束が付与されている(=元の円の形状[中心・半径]が
+    // 完全に凍結される。既存の"fix"拘束語彙のみで表現、新規拘束種別なし)。
+    const arcs = result.segments.filter((s) => s.kind === "arc" && !segments.some((orig) => orig.id === s.id));
+    expect(arcs.length).toBeGreaterThan(0);
+    for (const arc of arcs) {
+      const hasFixP1 = result.constraints.some(
+        (c) => c.kind === "fix" && c.point.segmentId === arc.id && c.point.end === "p1",
+      );
+      const hasFixP2 = result.constraints.some(
+        (c) => c.kind === "fix" && c.point.segmentId === arc.id && c.point.end === "p2",
+      );
+      expect(hasFixP1).toBe(true);
+      expect(hasFixP2).toBe(true);
+    }
+  });
+
+  it("トリム後も解けて、円弧片が元の円(中心(80,20)・半径20)の上に留まり続ける(fixEntity移行の効果、寸法矛盾なし)", () => {
+    const { circle, constraints, segments } = makeFixedCircleScene();
+    const result = trimEntityAtPoint([circle], circle.id, segments, [80, 40], constraints);
+
+    const solved = solveSketch(result.segments, result.constraints, result.entities);
+    expect(solved.ok).toBe(true);
+    if (!solved.ok) return;
+
+    const diag = getSketchDiagnostics(result.segments, result.constraints, result.entities);
+    expect(diag?.conflicting ?? []).toHaveLength(0);
+
+    const arcs = solved.segments.filter((s) => s.kind === "arc" && !segments.some((orig) => orig.id === s.id));
+    for (const arc of arcs) {
+      const geom = arcGeometryFromBulge(arc.p1, arc.p2, arc.bulge!);
+      expect(geom).not.toBeNull();
+      if (!geom) continue;
+      expect(geom.center[0]).toBeCloseTo(80, 4);
+      expect(geom.center[1]).toBeCloseTo(20, 4);
+      expect(geom.radius).toBeCloseTo(20, 4);
+    }
+
+    // 無関係な寸法(l1の長さ)を編集して再度solveしても、fix拘束により円弧片の位置は不変
+    // (=元の円に留まり続ける。「トリム後の編集でも固定が保たれる」ことの確認)。
+    const editedConstraints: SketchConstraint[] = result.constraints.map((c) =>
+      c.kind === "length" && c.value === 100 ? { ...c, value: 130 } : c,
+    );
+    const resolved = solveSketch(result.segments, editedConstraints, result.entities);
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    // getSketchDiagnostics()は呼び出し時点のsegments/entitiesの座標に対して残差を再計算する設計
+    // (gcsAdapter.tsのコメント参照)なので、直前のsolveSketch()結果(resolved)を渡す
+    // (実運用でもApp.tsxは常にsolveDocumentSketches()の結果をドキュメントへ書き戻してから
+    // 診断バッジを再計算する、同じ順序)。
+    const diag2 = getSketchDiagnostics(resolved.segments, editedConstraints, resolved.entities);
+    expect(diag2?.conflicting ?? []).toHaveLength(0);
+    const arcsAfterEdit = resolved.segments.filter((s) => s.kind === "arc" && !segments.some((orig) => orig.id === s.id));
+    for (const arc of arcsAfterEdit) {
+      const geom = arcGeometryFromBulge(arc.p1, arc.p2, arc.bulge!);
+      expect(geom).not.toBeNull();
+      if (!geom) continue;
+      expect(geom.center[0]).toBeCloseTo(80, 3);
+      expect(geom.center[1]).toBeCloseTo(20, 3);
+      expect(geom.radius).toBeCloseTo(20, 3);
+    }
+  });
+
+  it("固定されていない(fixEntity無し)円のtangentをトリムすると、移行不能なため削除され件数に数えられる(item4フォールバック)", () => {
+    const circle = createCircleEntity({ center: [80, 20], radius: 20 });
+    const line = createLineSegment({ p1: [-50, 0], p2: [200, 0] });
+    const constraints: SketchConstraint[] = [
+      { id: "tan-1", kind: "tangent", entity: { entityId: circle.id }, target: { kind: "segment", segmentId: line.id } },
+    ];
+    const result = trimEntityAtPoint([circle], circle.id, [line], [80, 40], constraints);
+
+    expect(result.entities).toHaveLength(0);
+    for (const c of result.constraints) {
+      expect(JSON.stringify(c)).not.toContain(circle.id);
+    }
+    // fixEntityが無いため凍結されず、tangentは再現不能 → 削除され件数に数えられる。
+    expect(result.removedConstraintCount).toBe(1);
+  });
+
+  it("2回目のトリム(セグメント全体削除)でも、参照していたcoincident/fixが参照切れのまま残らない(pruneDanglingConstraintsの安全網)", () => {
+    // 円entityトリムで生じた円弧片(仮想: 単純な自由セグメントで代用)をさらにトリムして
+    // 丸ごと削除するケース(trimSegmentWithConstraintsのpieces.length<=1分岐、実機報告の
+    // 「2回目のトリムでダングリングが残る」ケースの単体再現)。
+    const arcPiece = createArcSegment({ p1: [60, 0], p2: [100, 20], bulge: -0.5 });
+    const chainNeighbor = createLineSegment({ p1: [100, 20], p2: [100, 100] });
+    const constraints: SketchConstraint[] = [
+      { id: "coin", kind: "coincident", a: { segmentId: arcPiece.id, end: "p2" }, b: { segmentId: chainNeighbor.id, end: "p1" } },
+      { id: "fix-p1", kind: "fix", point: { segmentId: arcPiece.id, end: "p1" } },
+      { id: "fix-p2", kind: "fix", point: { segmentId: arcPiece.id, end: "p2" } },
+    ];
+    // arcPieceと交差する境界が無いため、クリックすると区間1つ=セグメント全体が削除される
+    // (pieces.length<=1分岐)。
+    const result = trimSegmentWithConstraints([arcPiece, chainNeighbor], constraints, arcPiece.id, [80, 10]);
+
+    expect(result.segments.some((s) => s.id === arcPiece.id)).toBe(false);
+    for (const c of result.constraints) {
+      expect(JSON.stringify(c)).not.toContain(arcPiece.id);
+    }
+    expect(result.removedLengthConstraintCount).toBe(0);
+    // coincident(相手側chainNeighborは生きているが、arcPiece側が消えたため参照切れ)・
+    // fix-p1・fix-p2の3件がpruneDanglingConstraints()で掃除される。
+    expect(result.removedDanglingConstraintCount).toBe(3);
+    expect(result.constraints).toHaveLength(0);
+  });
+
+  it("回帰確認: Phase 36のトリム断点coincident自動付与は引き続き機能する(entityトリム、複数拘束が絡んでも壊れない)", () => {
+    const { circle, constraints, segments } = makeFixedCircleScene();
+    const lineLeft = createLineSegment({ p1: [80, 40], p2: [60, 60] }); // 円周上の点(80,40)に端点タッチ
+    const result = trimEntityAtPoint([circle], circle.id, [...segments, lineLeft], [80, 0], constraints);
+
+    // lineLeftの端点(80,40)と一致する弧片の端点にcoincidentが自動付与される(Phase 36)。
+    const coincidentsWithLineLeft = result.constraints.filter(
+      (c) => c.kind === "coincident" && (c.a.segmentId === lineLeft.id || c.b.segmentId === lineLeft.id),
+    );
+    expect(coincidentsWithLineLeft.length).toBeGreaterThan(0);
   });
 });
