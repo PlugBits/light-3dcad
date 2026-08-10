@@ -16,10 +16,6 @@ export const THREAD_PRESET_TABLE: Record<ThreadPreset, { nominal: number; pitch:
 /** UIのプリセット選択肢用の並び順(呼び径の昇順)。 */
 export const THREAD_PRESET_LIST: ThreadPreset[] = ["M3", "M4", "M5", "M6", "M8", "M10", "M12"];
 
-/** 雄ねじの長さ上限(mm)。スパイク検証(実測)により、これを超えるとヘリカルsweepの評価時間が
- * 実用的でなくなる(数十秒〜)ため、UI・evaluatorの両方でこの値を上限とする。 */
-export const MALE_THREAD_MAX_LENGTH = 20;
-
 /** 呼び径(mm)。 */
 export function threadNominalDiameter(preset: ThreadPreset): number {
   return THREAD_PRESET_TABLE[preset].nominal;

@@ -1,5 +1,4 @@
 import type { CadDocument, Feature, FeatureId, PointRef, PolygonCorner, SketchConstraint, SketchEntity, SketchSegment } from "./types";
-import { MALE_THREAD_MAX_LENGTH } from "./threadPresets";
 
 /** ドキュメント/フィーチャーのバリデーションエラー。featureId が特定できる場合のみ付与する。 */
 export interface ValidationError {
@@ -517,11 +516,6 @@ export function validateFeature(feature: Feature, allFeatures: readonly Feature[
   } else if (feature.type === "thread") {
     if (!isPositiveFiniteNumber(feature.length)) {
       errors.push({ featureId: feature.id, message: "ねじの長さは正の数である必要があります" });
-    } else if (feature.hand === "male" && feature.length > MALE_THREAD_MAX_LENGTH) {
-      errors.push({
-        featureId: feature.id,
-        message: `雄ねじの長さは${MALE_THREAD_MAX_LENGTH}mm以下である必要があります(実ねじ山の評価時間が実用的でなくなるため)`,
-      });
     }
     if (feature.hand !== "male" && feature.hand !== "female") {
       errors.push({ featureId: feature.id, message: "ねじの種別(雄/雌)が不正です" });

@@ -430,14 +430,14 @@ export interface ThreadFaceRef {
 }
 
 /**
- * ねじフィーチャー(Phase 25c)。事前スパイクの結論により、雄ねじ(hand:"male")は実際の
- * ヘリカルねじ山ソリッド(呼び径の円柱+三角プロファイルのヘリカルsweep)をボディにfuseする。
+ * ねじフィーチャー(Phase 25c、Phase 41で簡易表示化)。雄ねじ(hand:"male")は呼び径の単純円柱を
+ * ボディにfuseする(旧v1のヘリカルねじ山loftソリッドはPhase 41で廃止、評価は事実上瞬時)。
  * 雌ねじ(hand:"female")は実ねじ山を切らず、規格の下穴径(呼び径−ピッチ)の円柱をボディから
- * cutする簡易表現にとどめる(雌ねじの実ねじ山cutは3回転超で評価時間が破綻的に悪化することが
- * スパイクで判明したため)。
+ * cutする簡易表現(変更なし)。両方とも、見た目上の「ねじらしさ」はWorker評価応答の
+ * threadAnnotations(src/protocol/messages.ts)経由でビューアが描く二重円+ヘリックスの
+ * 線オーバーレイが担う(このFeature自体・B-Repには含まれない)。
  *
- * preset(呼び径・ピッチ)はsrc/model/threadPresets.tsのテーブルを参照する。lengthはmm、
- * 雄ねじはMALE_THREAD_MAX_LENGTH(20mm)が上限(evaluator.tsで検証、超過時はfeatureId付きエラー)。
+ * preset(呼び径・ピッチ)はsrc/model/threadPresets.tsのテーブルを参照する。lengthはmm。
  * faceは配置面のスナップショット(evaluator.tsのresolveFaceGeometryで再解決する、ShellFeatureと
  * 同様に直前までの「現在ボディ」に対して解決する。特定のfeatureIdを参照しない)。
  * positionは配置面ローカル2D座標(faceのcenter/normalから求めた平面基底上の、配置クリック点)。

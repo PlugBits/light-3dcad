@@ -3,7 +3,7 @@
 // ねじ配置ツールを再選択モードで起動できる。面選択ツールと異なりクリック1回で即座に確定する
 // (「適用」ボタンは無い、通常のねじ配置ツールと同じ操作感)。
 import { patchThreadFeature } from "../model/document";
-import { MALE_THREAD_MAX_LENGTH, THREAD_PRESET_LIST, threadDrillDiameter, threadPitch } from "../model/threadPresets";
+import { THREAD_PRESET_LIST, threadDrillDiameter, threadPitch } from "../model/threadPresets";
 import type { ThreadFeature, ThreadPreset } from "../model/types";
 import { useCadStore } from "../state/store";
 
@@ -56,8 +56,7 @@ export function ThreadEditor({ thread, hasError, isReselecting, onStartReselect,
           value={thread.hand}
           onChange={(e) => {
             const hand = e.target.value as "male" | "female";
-            const length = hand === "male" ? Math.min(thread.length, MALE_THREAD_MAX_LENGTH) : thread.length;
-            patch({ hand, length });
+            patch({ hand });
           }}
         >
           <option value="male">雄(ボス・実ねじ山)</option>
@@ -66,18 +65,16 @@ export function ThreadEditor({ thread, hasError, isReselecting, onStartReselect,
       </label>
 
       <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
-        長さ (mm){thread.hand === "male" ? `(上限${MALE_THREAD_MAX_LENGTH}mm)` : ""}
+        長さ (mm)
         <input
           type="number"
           value={thread.length}
           data-testid="thread-length-input"
           min={0.1}
-          max={thread.hand === "male" ? MALE_THREAD_MAX_LENGTH : undefined}
           step="any"
           onChange={(e) => {
             const num = Number(e.target.value);
             if (!Number.isFinite(num) || num <= 0) return;
-            if (thread.hand === "male" && num > MALE_THREAD_MAX_LENGTH) return;
             patch({ length: num });
           }}
         />
@@ -85,8 +82,8 @@ export function ThreadEditor({ thread, hasError, isReselecting, onStartReselect,
 
       <p style={{ fontSize: 11, opacity: 0.6, margin: 0 }}>
         {thread.hand === "male"
-          ? `${thread.preset}(呼び径・ピッチ${threadPitch(thread.preset)}mmのISO並目)の実ねじ山です。`
-          : `${thread.preset}ねじ穴(簡易表現・下穴φ${drillDiameter.toFixed(1)}mm)。ねじ山は作成されません。`}
+          ? `${thread.preset}(呼び径・ピッチ${threadPitch(thread.preset)}mmのISO並目)の簡易表示です。実体は呼び径円柱、ねじ山は線表示のみです。`
+          : `${thread.preset}ねじ穴(簡易表現・下穴φ${drillDiameter.toFixed(1)}mm)。ねじ山は線表示のみです。`}
       </p>
 
       {hasError && !isReselecting && (
