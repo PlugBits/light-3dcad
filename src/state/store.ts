@@ -43,6 +43,7 @@ import type {
   ReferenceEdgeSet,
   SketchPlaneInfo,
   SolvedPlacement,
+  ThreadAnnotation,
   WorkerResponse,
 } from "../protocol/messages";
 import { deserializeProject, serializeProject } from "../project/serialization";
@@ -368,6 +369,8 @@ interface CadStoreState {
   referenceEdges: ReferenceEdgeSet[];
   /** 各ボディを構成する面IDの集合(Phase 28a、部品ドラッグ配置ツールのヒット判定に使う派生状態)。 */
   bodyGroups: BodyGroup[];
+  /** ねじフィーチャーの簡易表示用メタデータ(Phase 41、ビューアの二重円+ヘリックス線オーバーレイに使う派生状態)。 */
+  threadAnnotations: ThreadAnnotation[];
   errorMessage: string | null;
   errorFeatureId: FeatureId | null;
   /** 現在表示中のmesh/faceInfo/errorに対応する最新のevaluateリクエストID(古い応答の破棄に使う)。 */
@@ -615,6 +618,7 @@ function applyEvaluated(
       sketchPlanes: response.sketchPlanes,
       referenceEdges: response.referenceEdges,
       bodyGroups: response.bodyGroups,
+      threadAnnotations: response.threadAnnotations,
       errorMessage: null,
       errorFeatureId: null,
       kernelCrashed: false,
@@ -645,6 +649,7 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   sketchPlanes: [],
   referenceEdges: [],
   bodyGroups: [],
+  threadAnnotations: [],
   errorMessage: null,
   errorFeatureId: null,
   latestEvaluateRequestId: null,
@@ -1087,6 +1092,7 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
         faceInfo: response.faceInfo,
         edgeInfo: response.edgeInfo,
         bodyGroups: response.bodyGroups,
+        threadAnnotations: response.threadAnnotations,
       });
     });
   },

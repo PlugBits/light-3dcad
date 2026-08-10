@@ -17,9 +17,10 @@
 //   - extrude/revolve: operation "newBody"(常に新しい独立ボディを作る。複数回可、Phase 27a) /
 //     "cut"・"add"(targetBodyId省略時は最後に作られたボディが対象。指定時はそのボディのみに適用)
 //   - fillet3d/shell/thread: エッジ/面の幾何マッチングを全ボディ横断で行い、最良マッチのボディに適用する
-//     - thread(雄、Phase 29a): ローカル座標系のねじ山ソリッド(loft+fuseの重い部分)を
-//       "preset:length"キーでWorkerメモリにLRUキャッシュし(上限5件、部品キャッシュと同じ方式)、
-//       配置(面・位置・向き)の変換のみ毎回適用する。
+//     - thread(Phase 41でloft+fuseの実ねじ山ソリッドを廃止し簡易表示化): 雄は呼び径円柱を
+//       fuseするだけ(旧v1のヘリカルloftは削除、評価は事実上瞬時)。雌ねじは従来どおり下穴円柱の
+//       cut。見た目上の「ねじらしさ」はthreadAnnotations(位置・軸・呼び径・谷径)をビューアへ渡し、
+//       ビューア側が二重円+ヘリックスの線オーバーレイとして描画する(実ソリッドには含めない)。
 //   - direction: -1 は逆向き押し出し(面参照の場合は面法線の逆方向)
 //   - partInstance(簡易アセンブリ、Phase 27b): 埋め込まれた部品CadDocument(part)をevaluateDocument()で
 //     評価し(部品内にpartInstanceを含めることは禁止、入れ子なし=再帰は最大1段)、結果compoundを
@@ -36,7 +37,6 @@
 // checkInterference()(ボディをペアごとにintersect()して交差体積>1e-6mm³のペアを報告)の両方から
 // 使う。オンデマンド実行専用(Worker/UI側は明示的な要求時のみ呼ぶ)。
 import {
-  loft,
   makeCompound,
   makeCylinder,
   measureVolume,
@@ -47,9 +47,7 @@ import {
   type Drawing,
   type Edge,
   type Face,
-  type Sketch,
   type Shape3D,
-  type Wire,
 } from "replicad";
 
 import type {
@@ -75,8 +73,15 @@ import { classifySketchEntities } from "../sketch/containment";
 import { computeFacePlaneBasis, facePlaneRawXDir } from "../sketch/facePlaneBasis";
 import { findClosedRegions, loopPolyline } from "../sketch/regions";
 import { regularPolygonVertices, slotAxisNormal, SLOT_CAP_BULGE } from "../sketch/shapeFromPoints";
-import { MALE_THREAD_MAX_LENGTH, THREAD_PRESET_TABLE, threadDrillDiameter } from "../model/threadPresets";
-import type { BodyGroup, ReferenceEdgeLine, ReferenceEdgeSet, SketchPlaneInfo, SolvedPlacement } from "../protocol/messages";
+import { THREAD_PRESET_TABLE, threadDrillDiameter } from "../model/threadPresets";
+import type {
+  BodyGroup,
+  ReferenceEdgeLine,
+  ReferenceEdgeSet,
+  SketchPlaneInfo,
+  SolvedPlacement,
+  ThreadAnnotation,
+} from "../protocol/messages";
 
 export interface EvaluationSuccess {
   ok: true;
@@ -116,6 +121,12 @@ export interface EvaluationSuccess {
    * (履歴は積まない。src/sketch/solver.tsの拘束ソルバの書き戻しと同じ設計)。
    */
   solvedPlacements: SolvedPlacement[];
+  /**
+   * ねじフィーチャーの簡易表示(コスメティック表示、Phase 41)用メタデータ。doc.features中の
+   * 全threadフィーチャーが対象(出現順)。ビューアがB-Repに含まれない「二重円+ヘリックス」の
+   * 線オーバーレイを描くために使う(src/protocol/messages.tsのThreadAnnotation参照)。
+   */
+  threadAnnotations: ThreadAnnotation[];
 }
 
 export interface EvaluationFailure {
@@ -835,122 +846,30 @@ function applyShell3DToBodies(bodies: Map<FeatureId, Shape3D>, feature: ShellFea
 
 /**
  * ISO並目ねじの外ねじ実効かみ合い深さ係数(h3 ≈ 0.61343*pitch)。理論山高さ(0.866*pitch、鋭いV形状)
- * ではなくISO 68-1の外ねじ実用値に近い、より浅い値を使う(Phase 25c)。事前スパイクで理論山高さの
- * 鋭いV形状を使うと、ヘリカル形状の構築(後述のbuildMaleThreadSolidLocal)が自己交差ぎみになり
- * 体積計算・ブーリアン演算が不安定になる(バウンディングボックスが理論値の2倍以上に膨らむ、
- * 体積が負値になる等)ことが判明したため、浅い実用値を採用した。
+ * ではなくISO 68-1の外ねじ実用値に近い、より浅い値を使う(Phase 25c)。Phase 41で雄ねじの実体
+ * ソリッド(ヘリカルloft)自体は廃止したが、この係数は簡易表示(threadAnnotations)の谷径線の半径
+ * 計算に引き続き使う(呼び径円柱の表面よりわずかに内側に谷径の円・ヘリックス線を描き、
+ * 「二重円」の見た目を作るため)。
  */
 const THREAD_ENGAGEMENT_FACTOR = 0.61343;
 
 /**
- * 雄ねじの実ねじ山リブを離散断面のloft(輪列、replicadのloft()=BRepOffsetAPI_ThruSections)で
- * 近似する際の、ねじ山1回転あたりの断面数(Phase 25c)。
- *
- * 事前スパイクの結論は「sketchHelix()でヘリックスを作りSketch#sweepSketch()でスパインに沿って
- * 三角プロファイルを掃引する」方式だったが、実装検証の結果、このプロジェクトが使用する
- * replicad/OpenCascade WASMの組み合わせでは実際の掃引結果(sweepSketch内部でtwistExtrude()を
- * 使う経路も含む)が幾何的に破綻する(バウンディングボックスが理論値の2倍以上に膨らむ、
- * 体積が負値になる等。半径・ピッチの値に関わらず再現)ことが確認されたため、この実装では
- * 採用していない。代わりに、三角プロファイル(底辺=ピッチ、根本=谷径、先端=呼び径)を
- * 少しずつ回転・上昇させた断面群を作り、loft(ruled: true)で結んでリブ形状を作る方式にした。
- * 16は実装検証で「10以下では隣接断面の間隔が広すぎてリブが自己交差し、体積が負値・過小値になる」
- * ことを確認した上での安全側の値(16回転で常に正しい形状[外形半径どおりのbounding box、
- * 体積が円柱単体より大きい]になることを確認済み)。
+ * ねじの簡易表示(threadAnnotations、Phase 41)用の谷径(minorRadius)を計算する。
+ * 雄ねじは実ソリッドが呼び径円柱そのものになったため、谷径はISO実用値の係数
+ * (THREAD_ENGAGEMENT_FACTOR)で表示専用に計算する。雌ねじは実際に穴として削られている
+ * 下穴半径(threadDrillDiameter/2、applyThreadToBodies()のcutで使う値と同じ)をそのまま使う
+ * (実穴の縁と表示上の谷径円が一致するようにするため)。
  */
-const THREAD_SECTIONS_PER_TURN = 16;
-
-/**
- * 雄ねじの実ねじ山ソリッドを、ローカル座標系(原点=ねじ開始点、+Z=ねじが伸びる方向、
- * 谷径の円柱がz=0〜lengthに乗る)で構築する(Phase 25c)。呼び出し側でワールド座標
- * (配置面の位置・法線)へtranslate/rotate()して配置する。
- * 実測(M6×5mm、16断面/回転): loft構築が数百ms、rod.fuse()がoptimisation:"sameFace"で
- * 十数秒程度(ねじが長い=断面数が多いほど比例して増える。MALE_THREAD_MAX_LENGTHで上限を設けている)。
- */
-function buildMaleThreadSolidLocal(preset: ThreadFeature["preset"], length: number): Shape3D {
+function threadMinorRadiusForAnnotation(preset: ThreadFeature["preset"], hand: ThreadFeature["hand"]): number {
   const { nominal, pitch } = THREAD_PRESET_TABLE[preset];
-  const majorRadius = nominal / 2;
-  const threadHeight = THREAD_ENGAGEMENT_FACTOR * pitch;
-  const minorRadius = majorRadius - threadHeight;
-
-  const rod = makeCylinder(minorRadius, length, [0, 0, 0], [0, 0, 1]);
-
-  const nTurns = length / pitch;
-  const totalSections = Math.max(2, Math.round(THREAD_SECTIONS_PER_TURN * nTurns) + 1);
-  const wires: Wire[] = [];
-  for (let i = 0; i < totalSections; i += 1) {
-    const frac = i / (totalSections - 1);
-    const z = frac * length;
-    const angleDeg = frac * nTurns * 360;
-    const plane = new Plane([0, 0, z], [1, 0, 0], [0, 0, 1]);
-    // 単一の閉ループ(コンパウンドではない)の.sketchOnPlane(Plane)は常に具象のSketchを返すため、
-    // .wire(具象クラスのみが持つプロパティ、SketchInterfaceには無い)を使うためにキャストする。
-    const sketch = draw([minorRadius, -pitch / 2])
-      .lineTo([majorRadius, 0])
-      .lineTo([minorRadius, pitch / 2])
-      .close()
-      .rotate(angleDeg, [0, 0])
-      .sketchOnPlane(plane) as Sketch;
-    wires.push(sketch.wire.clone());
-    sketch.delete();
-    plane.delete();
+  if (hand === "male") {
+    return nominal / 2 - THREAD_ENGAGEMENT_FACTOR * pitch;
   }
-
-  let threadRidge: Shape3D;
-  try {
-    threadRidge = loft(wires, { ruled: true });
-  } finally {
-    wires.forEach((w) => w.delete());
-  }
-
-  try {
-    const fused = rod.fuse(threadRidge, { optimisation: "sameFace" });
-    return fused;
-  } finally {
-    rod.delete();
-    threadRidge.delete();
-  }
+  return threadDrillDiameter(preset) / 2;
 }
 
 /**
- * 雄ねじソリッド生成キャッシュ(Phase 29a)の上限件数(LRU)。部品配置キャッシュ
- * (PART_CACHE_MAX_SIZE、後述のpartShapeCache)と同じ方式・同じ上限値を使う。
- */
-const THREAD_CACHE_MAX_SIZE = 5;
-
-/**
- * buildMaleThreadSolidLocal()の結果(ローカル座標系、位置・向きを含まない)を、
- * キー="preset:length"(ローカル形状を決める値のみ。配置面・位置・方向は含まない)で
- * Workerメモリへキャッシュする(Phase 29a)。同一プリセット・同一長さの雄ねじが
- * 複数箇所に配置される場合(またはUndo/Redo・拘束再解決等で同一ドキュメントが再評価される場合)、
- * 最も重い処理(THREAD_SECTIONS_PER_TURN断面のloft+fuse)を毎回やり直さずに済む。
- * partShapeCache(下記)と同じ「取り出し時にclone()して返し、原本はdelete()しない」方針・
- * 同じ単純LRU(Map挿入順=最終アクセス順)を使う。
- */
-const maleThreadShapeCache = new Map<string, Shape3D>();
-
-function buildMaleThreadSolidLocalCached(preset: ThreadFeature["preset"], length: number): Shape3D {
-  const key = `${preset}:${length}`;
-  const cached = maleThreadShapeCache.get(key);
-  if (cached) {
-    maleThreadShapeCache.delete(key);
-    maleThreadShapeCache.set(key, cached);
-    return cached.clone();
-  }
-
-  const shape = buildMaleThreadSolidLocal(preset, length);
-  maleThreadShapeCache.set(key, shape);
-  if (maleThreadShapeCache.size > THREAD_CACHE_MAX_SIZE) {
-    const oldestKey = maleThreadShapeCache.keys().next().value;
-    if (oldestKey !== undefined) {
-      maleThreadShapeCache.get(oldestKey)?.delete();
-      maleThreadShapeCache.delete(oldestKey);
-    }
-  }
-  return shape.clone();
-}
-
-/**
- * ローカル座標系(原点=配置基準点、+Z=軸方向)で構築した回転体(円柱・ねじ山ソリッド等)を、
+ * ローカル座標系(原点=配置基準点、+Z=軸方向)で構築した回転体(円柱等)を、
  * ワールド座標(position/axisDir)へ配置する(Phase 25c)。+Zをaxisdir(単位ベクトル)へ向ける
  * 回転(axis-angle、cross(+Z, axisDir)を回転軸に取る。ほぼ平行/反平行の場合はそれぞれ
  * 無回転/垂直な軸まわり180度回転にフォールバックする)を行った後、positionへ平行移動する。
@@ -980,11 +899,12 @@ function orientLocalSolidToWorld(shape: Shape3D, position: Tuple3, axisDir: Tupl
  * 最良マッチのボディに適用する(Phase 25c、Phase 27aで複数ボディ対応に変更。bodiesマップを
  * 直接書き換える)。配置面はShellFeatureと同様、featureId参照ではなく直前までの各ボディに対して
  * 幾何マッチングして解決する。
- * 雄(hand:"male")は呼び径の谷径円柱+実ねじ山リブ(buildMaleThreadSolidLocal)をfuseで追加する。
- * 雌(hand:"female")は規格の下穴径(呼び径−ピッチ)の円柱をcutする簡易表現にとどめる(v1では
- * 雌ねじの実ねじ山cutは評価時間が実用的でなくなることがスパイクで判明したため、下穴のみ)。
+ * 雄(hand:"male")は呼び径の単純円柱をfuseする(Phase 41、旧v1のヘリカルねじ山loftは廃止。
+ * 見た目のねじらしさはビューア側のオーバーレイ線[threadAnnotations]が担う)。
+ * 雌(hand:"female")は規格の下穴径(呼び径−ピッチ)の円柱をcutする簡易表現(変更なし)。
+ * 戻り値は、ビューアが二重円+ヘリックス線オーバーレイを描くためのthreadAnnotation1件。
  */
-function applyThreadToBodies(bodies: Map<FeatureId, Shape3D>, feature: ThreadFeature): void {
+function applyThreadToBodies(bodies: Map<FeatureId, Shape3D>, feature: ThreadFeature): ThreadAnnotation {
   const resolved = resolveFaceGeometryAcrossBodies(bodies, feature.face.faceId, feature.face.center, feature.face.normal);
   const basis = computeFacePlaneBasis(resolved.center, resolved.normal);
   const [u, v] = feature.position;
@@ -999,12 +919,20 @@ function applyThreadToBodies(bodies: Map<FeatureId, Shape3D>, feature: ThreadFea
     resolved.normal[2] * feature.direction,
   ];
   const body = bodies.get(resolved.bodyId) as Shape3D;
+  const { nominal } = THREAD_PRESET_TABLE[feature.preset];
+  const majorRadius = nominal / 2;
+  const minorRadius = threadMinorRadiusForAnnotation(feature.preset, feature.hand);
+  const annotation: ThreadAnnotation = {
+    kind: feature.hand,
+    position,
+    axisDir: normalize(axisDir),
+    majorRadius,
+    minorRadius,
+    length: feature.length,
+  };
 
   if (feature.hand === "male") {
-    if (feature.length > MALE_THREAD_MAX_LENGTH) {
-      throw new Error(`雄ねじの長さは${MALE_THREAD_MAX_LENGTH}mm以下である必要があります`);
-    }
-    const localSolid = buildMaleThreadSolidLocalCached(feature.preset, feature.length);
+    const localSolid = makeCylinder(majorRadius, feature.length, [0, 0, 0], [0, 0, 1]);
     const worldSolid = orientLocalSolidToWorld(localSolid, position, axisDir);
     try {
       const newBody = body.fuse(worldSolid);
@@ -1013,10 +941,10 @@ function applyThreadToBodies(bodies: Map<FeatureId, Shape3D>, feature: ThreadFea
     } finally {
       worldSolid.delete();
     }
-    return;
+    return annotation;
   }
 
-  // hand === "female": 下穴径の円柱をcutする簡易表現(実ねじ山は作らない)。
+  // hand === "female": 下穴径の円柱をcutする簡易表現(実ねじ山は作らない、変更なし)。
   const drillRadius = threadDrillDiameter(feature.preset) / 2;
   const localHole = makeCylinder(drillRadius, feature.length, [0, 0, 0], [0, 0, 1]);
   const worldHole = orientLocalSolidToWorld(localHole, position, axisDir);
@@ -1027,6 +955,7 @@ function applyThreadToBodies(bodies: Map<FeatureId, Shape3D>, feature: ThreadFea
   } finally {
     worldHole.delete();
   }
+  return annotation;
 }
 
 /**
@@ -1783,6 +1712,8 @@ interface FeatureEvalSuccess {
   referenceEdgesById: Map<FeatureId, ReferenceEdgeLine[]>;
   /** 合致(メイト、Phase 28c)ソルバが解いた配置(合致が無ければ空配列)。 */
   solvedPlacements: SolvedPlacement[];
+  /** ねじフィーチャーの簡易表示用メタデータ(Phase 41、ねじが無ければ空配列)。 */
+  threadAnnotations: ThreadAnnotation[];
 }
 
 type FeatureEvalResult = FeatureEvalSuccess | EvaluationFailure;
@@ -1823,6 +1754,8 @@ function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
   // ループ内では収集のみ行い、全フィーチャー評価後にまとめて解く(spec: 全フィーチャー評価後、
   // bodiesが揃った時点でmateフィーチャー群をまとめて解く)。
   const mateFeatures: MateFeature[] = [];
+  // ねじフィーチャーの簡易表示用メタデータ(Phase 41)。ループ中に出現したthreadフィーチャーの順で積む。
+  const threadAnnotations: ThreadAnnotation[] = [];
   let currentFeatureId: FeatureId | undefined;
   let solvedPlacements: SolvedPlacement[] = [];
 
@@ -1885,7 +1818,7 @@ function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
         if (bodies.size === 0) {
           throw new Error("ねじの対象となるボディがありません");
         }
-        applyThreadToBodies(bodies, feature);
+        threadAnnotations.push(applyThreadToBodies(bodies, feature));
         snapshots.set(feature.id, buildBodiesCompound(bodies));
         continue;
       }
@@ -1954,7 +1887,7 @@ function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
   // 全スケッチ(world/faceいずれも)の平面基底が解決済みである。bodies(bodies.size===0は
   // newBodyフィーチャーが1つも無い、空ドキュメント/スケッチのみの正常なケース。Phase 13)は
   // 生きたまま返す(delete()は呼び出し側の責務)。
-  return { ok: true, bodies, sketches, resolvedFacePlanes, referenceEdgesById, solvedPlacements };
+  return { ok: true, bodies, sketches, resolvedFacePlanes, referenceEdgesById, solvedPlacements, threadAnnotations };
 }
 
 /**
@@ -1965,7 +1898,7 @@ function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
 export function evaluateDocument(doc: CadDocument): EvaluationResult {
   const result = evaluateFeatures(doc);
   if (!result.ok) return result;
-  const { bodies, sketches, resolvedFacePlanes, referenceEdgesById, solvedPlacements } = result;
+  const { bodies, sketches, resolvedFacePlanes, referenceEdgesById, solvedPlacements, threadAnnotations } = result;
 
   // 各ボディの面ID集合(Phase 28a)を、compound化してbodiesをdelete()する前に集めておく。
   const bodyGroups: BodyGroup[] = [];
@@ -1997,7 +1930,7 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
     referenceEdges.push({ sketchId, edges });
   }
 
-  return { ok: true, shape, sketchPlanes, referenceEdges, bodyGroups, solvedPlacements };
+  return { ok: true, shape, sketchPlanes, referenceEdges, bodyGroups, solvedPlacements, threadAnnotations };
 }
 
 /**

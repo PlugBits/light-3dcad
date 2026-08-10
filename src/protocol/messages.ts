@@ -154,6 +154,30 @@ export interface ReferenceEdgeSet {
 }
 
 /**
+ * ねじフィーチャー1件分の簡易表示(コスメティック表示)用メタデータ(Phase 41)。
+ * Phase 40までは雄ねじは実ヘリカルねじ山ソリッド(loft+fuse)を生成していたが、評価が重く
+ * (数秒〜十数秒)見た目も破綻しやすいため、Phase 41で雄ねじも呼び径円柱(majorRadius)の
+ * 単純ソリッドへ簡素化した。その代わり、ビューア側が実際のB-Repに描く「二重円+ヘリックス線」の
+ * オーバーレイ描画に必要な情報をここに集約する(src/viewer/CadViewer.tsが読む)。
+ * position/axisDirはワールド座標(evaluator.tsのapplyThreadToBodies()が実際のソリッド配置に
+ * 使うのと同じposition/axisDir、position=ねじ開始点、axisDir=ねじが伸びる方向の単位ベクトル)。
+ * majorRadius=呼び径/2。minorRadiusは種別で意味が異なる:
+ *   - male: ISO実用値の谷径相当(nominal/2 - THREAD_ENGAGEMENT_FACTOR*pitch)。実ソリッドは
+ *     majorRadius円柱のままなので、minorRadiusはあくまで表示専用の線の半径。
+ *   - female: 実際に穴として削られている下穴半径(threadDrillDiameter/2)と同じ値。
+ *     majorRadius(呼び径/2)の円をエントランス面に描くことで、実穴の縁(minorRadius)に対する
+ *     「二重円」効果になる。
+ */
+export interface ThreadAnnotation {
+  kind: "male" | "female";
+  position: [number, number, number];
+  axisDir: [number, number, number];
+  majorRadius: number;
+  minorRadius: number;
+  length: number;
+}
+
+/**
  * 干渉ペア1件の情報(Phase 28b)。a/bはボディを作ったフィーチャー(newBody操作のextrude/revolve、
  * またはpartInstance)のid・名前。volumeは交差体積(mm³、1e-6mm³超のペアのみ報告される。
  * src/worker/evaluator.tsのINTERFERENCE_VOLUME_THRESHOLD参照)。
@@ -203,6 +227,8 @@ export type WorkerResponse =
       bodyGroups: BodyGroup[];
       /** 合致(メイト、Phase 28c)ソルバが解いた配置(合致が無ければ空配列)。 */
       solvedPlacements: SolvedPlacement[];
+      /** ねじフィーチャーの簡易表示用メタデータ(Phase 41)。ねじが無ければ空配列。 */
+      threadAnnotations: ThreadAnnotation[];
     }
   | { kind: "stl"; requestId: string; blob: Blob }
   /** STEPエクスポート応答(Phase 26)。 */
