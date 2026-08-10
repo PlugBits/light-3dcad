@@ -2,9 +2,20 @@
 // ①寸法ラベル(実測)をドラッグ→寸法線ごと移動→リロード(自動保存)後も位置が維持される。
 // ②一致+水平+垂直+寸法(長さ)が付いた線分チェーンをトリム→水平・垂直・一致・(残せる)長さ寸法
 //   (トリム対象外のsegB)は残る、トリムで断片化したsegAの長さ寸法だけが通知付きで消える。
+// ④実機報告(Phase 42c): 線分が円への接線拘束を解いた直後、接点はソルバの1e-6mmグリッド丸めで
+//   厳密な接触から僅かにずれる。以前はこのずれのせいでintersections.tsが接点を交点として
+//   見つけられず、トリムで接点をまたぐ区間全体(円が丸ごと)が消えていた
+//   (「トリムで途切れなく、全て消えてしまう」)。src/sketch/intersections.tsのTANGENT_CONTACT_EPS
+//   (接触バンド)導入により、接点間の短い弧だけがトリムされ、残りの弧が生き残ることを確認する。
 import { expect, type Page, test } from "@playwright/test";
 
 import { collectPageErrors, gotoApp, screenPointForWorld, waitForReady } from "./helpers";
+
+type SegSnapshot = { id: string; p1: [number, number]; p2: [number, number]; kind: "line" | "arc"; bulge?: number };
+
+async function dimensionSegmentsSnapshot(page: Page): Promise<SegSnapshot[]> {
+  return page.evaluate(() => window.__cadViewerDebug?.dimensionToolSegmentsSnapshot() ?? []);
+}
 
 /** 線分ツールで2点チェーン(1本)を描く(click→dblclick)。point-dimension.spec.tsと同じパターン。 */
 async function drawSingleSegment(page: Page, p0: [number, number], p1: [number, number]) {
@@ -399,5 +410,144 @@ test("③実機報告(Phase 42): 固定円(fixEntity)+2本の線分への接線�
   await expect(page.getByTestId("eval-error")).toHaveCount(0);
 
   await page.screenshot({ path: "test-results/trim-fixed-circle-3-extruded.png" });
+  expect(pageErrors).toEqual([]);
+});
+
+test("④実機報告(Phase 42c): 接線拘束を解いた直後に接点をまたぐ区間をトリムしても、境界の丸め誤差を吸収して接点間の弧だけが消え、押し出しも成功する", async ({
+  page,
+}) => {
+  const pageErrors = collectPageErrors(page);
+
+  await gotoApp(page);
+  await waitForReady(page);
+
+  await page.getByTestId("btn-add-sketch").click();
+  await expect(page.getByTestId("feature-item-Sketch2")).toBeVisible();
+  await waitForReady(page);
+  await page.getByTestId("btn-align-to-plane").click();
+
+  // 半径6の円を(20,-3)へ配置し、固定する(接点計算を単純にするため中心・半径は既知のまま動かさない)。
+  await page.getByTestId("btn-add-circle").click();
+  await waitForReady(page);
+  await page.getByTestId("entity-circle-0-radius").fill("6");
+  await waitForReady(page);
+  await page.getByTestId("entity-circle-0-center-x").fill("20");
+  await waitForReady(page);
+  await page.getByTestId("entity-circle-0-center-y").fill("-3");
+  await waitForReady(page);
+  await page.getByTestId("entity-circle-0-fixed").check();
+  await waitForReady(page);
+  await expect(page.getByTestId("eval-error")).toHaveCount(0);
+  const circleCenter: [number, number] = [20, -3];
+  const circleRadius = 6;
+
+  // 意図的に軸に平行でない(水平・垂直の自動ロックが掛からない)2本の独立した線分を描く
+  // (水平・垂直な線への接線は距離式が単純になり、ソルバの丸め誤差が生じにくい[=既存のE2Eの
+  // ような接続チェーンでは本バグを再現しにくい]。斜めの線にすることで、接線を満たすための
+  // 回転・並進の解が一般に「きれいな数値」に丸まらないようにする)。
+  await page.getByTestId("btn-draw-segment").click();
+  await drawSingleSegment(page, [2, -15], [29, -7]);
+  await expect(page.getByTestId("btn-draw-segment")).toHaveText("線分");
+  await page.getByTestId("btn-draw-segment").click();
+  await drawSingleSegment(page, [2, 15], [29, 4]);
+  await expect(page.getByTestId("btn-draw-segment")).toHaveText("線分");
+
+  // 拘束ツール: 円周上の点→線分1、円周上の点→線分2の順に「接線」を適用する。
+  await page.getByTestId("btn-constraint").click();
+  const circleLeftRim = await screenPointForWorld(page, [circleCenter[0] - circleRadius, circleCenter[1], 0]);
+
+  await page.mouse.click(circleLeftRim.x, circleLeftRim.y);
+  await expect(page.getByTestId("constraint-pending-status")).toContainText("円");
+  const line1Pt = await screenPointForWorld(page, [15.5, -11, 0]);
+  await page.mouse.click(line1Pt.x, line1Pt.y);
+  await expect(page.getByTestId("constraint-tool-popup-tangent")).toBeVisible();
+  await page.getByTestId("constraint-tool-popup-tangent").click();
+  await waitForReady(page);
+  await expect(page.getByTestId("constraint-conflict-toast")).toHaveCount(0);
+  await expect(page.getByTestId("eval-error")).toHaveCount(0);
+
+  await page.mouse.click(circleLeftRim.x, circleLeftRim.y);
+  await expect(page.getByTestId("constraint-pending-status")).toContainText("円");
+  const line2Pt = await screenPointForWorld(page, [15.5, 9.5, 0]);
+  await page.mouse.click(line2Pt.x, line2Pt.y);
+  await expect(page.getByTestId("constraint-tool-popup-tangent")).toBeVisible();
+  await page.getByTestId("constraint-tool-popup-tangent").click();
+  await waitForReady(page);
+  await expect(page.getByTestId("constraint-conflict-toast")).toHaveCount(0);
+  await expect(page.getByTestId("eval-error")).toHaveCount(0);
+  await page.getByTestId("btn-constraint").click(); // 拘束ツールを終了する。
+
+  await page.screenshot({ path: "test-results/trim-tangent-band-1-before.png" });
+
+  // 解いた後の2本の線分の座標を取得し、円中心からの垂線の足(=接点)を実測する
+  // (斜めの線分のため、接点は解いてみないと座標が分からない)。
+  await page.getByTestId("btn-dimension").click();
+  const solved = await dimensionSegmentsSnapshot(page);
+  await page.getByTestId("btn-dimension").click();
+  const lines = solved.filter((s) => s.kind === "line");
+  expect(lines).toHaveLength(2);
+  const line1 = lines.find((s) => (s.p1[1] + s.p2[1]) / 2 < 0)!; // 下側(y平均<0)
+  const line2 = lines.find((s) => (s.p1[1] + s.p2[1]) / 2 > 0)!; // 上側(y平均>0)
+  expect(line1).toBeDefined();
+  expect(line2).toBeDefined();
+
+  const footOfPerpendicular = (p: [number, number], a: [number, number], b: [number, number]): [number, number] => {
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const lenSq = dx * dx + dy * dy;
+    const t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / lenSq;
+    return [a[0] + t * dx, a[1] + t * dy];
+  };
+  const foot1 = footOfPerpendicular(circleCenter, line1.p1, line1.p2);
+  const foot2 = footOfPerpendicular(circleCenter, line2.p1, line2.p2);
+
+  // トリムツール: 2つの接点に挟まれた短い方の弧(円の左側)の内側、弦の中点付近をクリックし、
+  // その短い弧だけを削除する(実機報告バグでは接点が交点として見つからず、この操作で
+  // 円全体が消えていた)。
+  await page.getByTestId("btn-trim").click();
+  // クリックは実際の円周上(半径ぶん中心から離れた位置)である必要がある(ヒットテストの許容誤差は
+  // 画面上のごく僅かな距離のため、中心寄りの弦の中点をそのまま使うと何もヒットしない)。
+  // 2接点への方向ベクトルの和(=短い弧側を向く二等分線方向)を単位化し、半径倍して円周上へ乗せる。
+  const dirSum: [number, number] = [foot1[0] + foot2[0] - 2 * circleCenter[0], foot1[1] + foot2[1] - 2 * circleCenter[1]];
+  const dirLen = Math.hypot(dirSum[0], dirSum[1]);
+  const chordMid: [number, number] = [
+    circleCenter[0] + (dirSum[0] / dirLen) * circleRadius,
+    circleCenter[1] + (dirSum[1] / dirLen) * circleRadius,
+  ];
+  const trimClick = await screenPointForWorld(page, [chordMid[0], chordMid[1], 0]);
+  await page.mouse.click(trimClick.x, trimClick.y);
+  await waitForReady(page);
+  await page.getByTestId("btn-trim").click(); // トリムツールを終了する。
+
+  await page.screenshot({ path: "test-results/trim-tangent-band-2-after.png" });
+
+  await expect(page.getByTestId("constraint-conflict-toast")).toHaveCount(0);
+  await expect(page.getByTestId("eval-error")).toHaveCount(0);
+  await expect(page.getByTestId("sketch-definition-badge-conflicting")).toHaveCount(0);
+
+  // 修正確認の核心: 円は完全には消えず、残りの弧(kind:"arc")がスケッチ要素として残っている
+  // (実機報告バグでは接点をまたぐ区間全体が「途切れなく全て消えてしまう」)。
+  await page.getByTestId("btn-dimension").click();
+  const afterTrim = await dimensionSegmentsSnapshot(page);
+  await page.getByTestId("btn-dimension").click();
+  const remainingArcs = afterTrim.filter((s) => s.kind === "arc");
+  expect(remainingArcs.length).toBeGreaterThan(0);
+
+  // 残った弧の端点が、実測した接点(foot1・foot2)の近傍に存在する(=接点が区切り点として
+  // 機能した裏付け。全消去バグでは弧自体が存在しないため、このアサーション自体が成立しない)。
+  const arcEndpoints: [number, number][] = remainingArcs.flatMap((s) => [s.p1, s.p2]);
+  const distTo = (a: [number, number], b: [number, number]) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  const hasNear = (p: [number, number]) => arcEndpoints.some((q) => distTo(q, p) < 0.5);
+  expect(hasNear(foot1)).toBe(true);
+  expect(hasNear(foot2)).toBe(true);
+
+  // 押し出し用の閉ループ(20x20矩形、原点)を追加し、押し出しが成功することを確認する。
+  await page.getByTestId("btn-add-rectangle").click();
+  await waitForReady(page);
+  await page.getByTestId("btn-add-extrude").click();
+  await waitForReady(page);
+  await expect(page.getByTestId("eval-error")).toHaveCount(0);
+
+  await page.screenshot({ path: "test-results/trim-tangent-band-3-extruded.png" });
   expect(pageErrors).toEqual([]);
 });
