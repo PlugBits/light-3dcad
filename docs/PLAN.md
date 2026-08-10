@@ -1094,3 +1094,18 @@ Node製ロジックをvitestで単体テスト、実際のAction実行はこの�
 gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 636→638件通過+1skip(ヘリカルloft関連
 テスト3件を撤去し、threadAnnotations検証2件+高速化検証1件を追加)、`vite build`+`npm run size`で
 メインバンドルgzip 263.7KB(変化なし、上限350KB内)、E2E 47件全通過(2分割でBash同期実行)。
+
+## Phase 42: entityトリムでのfixEntity/tangent等の参照切れ拘束を修正
+
+実機報告(固定円[fixEntity]+2辺への接線[tangent]をトリム→拘束一覧に生ID表示、拘束矛盾)を
+再現・修正。原因はentityトリム(`trimEntityAtPoint`)・分解(`explodeSketchEntity`)が、
+削除されたentityIdを参照する拘束(fixEntity/tangent/distanceEntityLine等)をそのまま残す
+バグ(gcsAdapter上は無害[残差0で無視]だが、意図した固定/接線が消えて自由度が跳ね上がり、
+複雑な実データでは2段階solveが収束せず矛盾誤検出につながる)、および`trimSegmentWithConstraints`の
+セグメント全体削除分岐がlength拘束以外の参照切れ(coincident/fix等)を掃除していなかったこと。
+`src/sketch/trim.ts`に`migrateEntityConstraintsForReplace`(fixEntityは全断片の両端点への
+`fix`拘束[既存語彙のみ、新規種別なし]へ移行、tangent等は凍結により無害化した場合のみ削除)と
+`pruneDanglingConstraints`(参照切れの一括掃除、両トリム経路+分解で共通利用)を追加した。
+gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 638→645件通過+1skip(entityトリムの
+拘束移行・ダングリング掃除5件を追加)、`vite build`+`npm run size`でメインバンドルgzip
+264.0KB(+0.3KB、上限350KB内)、E2E 47→48件全通過(2分割でBash同期実行)。
