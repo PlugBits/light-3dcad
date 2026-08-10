@@ -21,6 +21,8 @@ declare global {
       dimensionToolSegmentsSnapshot: () => { id: string; p1: [number, number]; p2: [number, number]; kind: "line" | "arc"; bulge?: number }[];
       /** ねじの簡易表示(Phase 41)オーバーレイの現在の線本数(円+ヘリックス)。 */
       threadAnnotationLineCount: () => number;
+      /** 地面の無限グリッド(Phase 44)の現在の可視状態。 */
+      groundGridVisible: () => boolean;
     };
     /**
      * Workerへ「故意にthrowする」メッセージを送り、実際のWorkerクラッシュ(Workerのerrorイベント)を

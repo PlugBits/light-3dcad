@@ -411,6 +411,10 @@ interface CadStoreState {
   /** スケッチ表示チェックボックス操作時に呼ぶ。現在のモードに対する手動オーバーライドを設定する。 */
   setSketchVisibilityOverride: (visible: boolean | null) => void;
 
+  /** 地面の無限グリッド(Phase 44)の表示トグル。既定はON。永続化はしない(スナップ等と同様)。 */
+  showGrid: boolean;
+  setShowGrid: (visible: boolean) => void;
+
   exporting: boolean;
   exportError: string | null;
 
@@ -705,6 +709,9 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
 
   sketchVisibilityOverride: null,
   setSketchVisibilityOverride: (visible) => set({ sketchVisibilityOverride: visible }),
+
+  showGrid: true,
+  setShowGrid: (visible) => set({ showGrid: visible }),
 
   exporting: false,
   exportError: null,

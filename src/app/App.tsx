@@ -235,6 +235,8 @@ export default function App() {
   const newProject = useCadStore((s) => s.newProject);
   const previewFeatureContext = useCadStore((s) => s.previewFeatureContext);
   const setSketchVisibilityOverride = useCadStore((s) => s.setSketchVisibilityOverride);
+  const showGrid = useCadStore((s) => s.showGrid);
+  const setShowGrid = useCadStore((s) => s.setShowGrid);
   const updateDocument = useCadStore((s) => s.updateDocument);
   const undo = useCadStore((s) => s.undo);
   const redo = useCadStore((s) => s.redo);
@@ -611,6 +613,11 @@ export default function App() {
   useEffect(() => {
     viewerRef.current?.setSketchDragSnap(gridSnap);
   }, [gridSnap]);
+
+  // 地面の無限グリッド表示トグル(Phase 44)をビューアへ同期する。
+  useEffect(() => {
+    viewerRef.current?.setGridVisible(showGrid);
+  }, [showGrid]);
 
   // 選択中の面が再評価後のfaceInfoに存在しなくなった場合(トポロジカルネーミングのずれ等)は
   // 選択状態をクリアする。
@@ -2412,6 +2419,15 @@ export default function App() {
                 onChange={(e) => setSketchVisibilityOverride(e.target.checked)}
               />
               スケッチ表示
+            </label>
+            <label className="ribbon-toggle">
+              <input
+                type="checkbox"
+                data-testid="toggle-grid-visibility"
+                checked={showGrid}
+                onChange={(e) => setShowGrid(e.target.checked)}
+              />
+              グリッド表示
             </label>
           </div>
 

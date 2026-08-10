@@ -1161,3 +1161,10 @@ gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 674件通過+1
 E2E 50件全通過(3分割でBash同期実行、スケッチ表示自動化に伴い`sketch-overlay.spec.ts`を
 新セマンティクスへ書き換え、十字パッドとの画面座標衝突を避けるため
 `dimension-drag-and-trim.spec.ts`④の作図座標を平行移動)。
+
+## Phase 44: 地面グリッドを無限グリッド化+表示トグルを追加
+
+有限の`THREE.GridHelper(200,20)`をカメラ追従クアッド+シェーダ(fwidthアンチエイリアス、
+10mm補助線/100mm主線、距離フェード)による無限グリッドへ置き換え、「グリッド表示」トグル
+(既定ON、`showGrid`)をトップバーへ追加した。gate結果: tsc/Vitest(674+1skip)/E2E(51件)
+全通過、UIバンドルgzip262.0KB(+0.9KB、上限350KB内)。

@@ -207,6 +207,26 @@ const CLOSE_TO_START_PX = 10;
 const SNAP_TOLERANCE_PX = 12;
 /** 描画モードのグリッドスナップ間隔(mm)。 */
 const DRAWING_GRID_SPACING = 1;
+/**
+ * 地面の無限グリッド(Phase 44)のパラメータ。旧`THREE.GridHelper(200, 20)`と同じ10mm間隔を
+ * 「補助線」として残し、100mm間隔を「主線」として新設する(旧グリッドは中心の2本のみ暗色・
+ * 残りは明色という配色だったため、色そのものは踏襲しつつ「主線=明色/補助線=暗色」という
+ * 一般的なCADの意味付けへ割り当て直す)。
+ */
+const GROUND_GRID_MINOR_SPACING_MM = 10;
+const GROUND_GRID_MAJOR_SPACING_MM = 100;
+/** 旧GridHelperの中心線色(暗)。無限グリッドでは補助線(10mm)に割り当てる。 */
+const GROUND_GRID_MINOR_COLOR = new THREE.Color(0x444444);
+/** 旧GridHelperの通常線色(明)。無限グリッドでは主線(100mm)に割り当てる。 */
+const GROUND_GRID_MAJOR_COLOR = new THREE.Color(0x888888);
+/** カメラからの水平距離(mm)。この距離からフェードが始まり、GROUND_GRID_FADE_END_MMで完全に透明になる。 */
+const GROUND_GRID_FADE_START_MM = 400;
+const GROUND_GRID_FADE_END_MM = 2000;
+/**
+ * グリッド用クアッドの一辺の半分(mm)。カメラのXY位置に毎フレーム追従させるため、
+ * フェード完了距離(GROUND_GRID_FADE_END_MM)より余裕を持たせておけば端が見えることはない。
+ */
+const GROUND_GRID_QUAD_HALF_SIZE_MM = GROUND_GRID_FADE_END_MM + 500;
 /** X軸(赤系)/Y軸(緑系)の線色。原点マーカーの色。 */
 const AXIS_X_COLOR = 0xff5252;
 const AXIS_Y_COLOR = 0x66bb6a;
@@ -710,6 +730,8 @@ declare global {
        * (雄1本あたり3本[両端面の谷径円2+ヘリックス1]、雌1本あたり2本[入口面の呼び径円1+ヘリックス1])。
        */
       threadAnnotationLineCount: () => number;
+      /** 地面の無限グリッド(Phase 44)の現在の可視状態(開発ビルド限定、E2E用)。 */
+      groundGridVisible: () => boolean;
     };
   }
 }
@@ -1005,6 +1027,90 @@ function buildViewportBackgroundTexture(): THREE.CanvasTexture {
 }
 
 /**
+ * 地面(ワールドZ=0平面、Z-up)の無限グリッド(Phase 44)。旧`THREE.GridHelper`(有限・200mm四方)を
+ * シェーダ製の「カメラ追従クアッド」に置き換える。手法は定番の無限グリッド実装
+ * (例: Fyrestar/THREE.InfiniteGridHelper)を踏襲: 大きな平面ジオメトリをカメラのXY位置へ
+ * 毎フレーム追従させ(animate()内でposition.x/yのみ更新、割り当ては無し)、フラグメントシェーダ側で
+ * ワールド座標から`fract`ベースのグリッド線を`fwidth`でアンチエイリアスしつつ計算し、
+ * カメラからの水平距離でフェードアウトさせて地平線に固い境界が出ないようにする。
+ * - 主線(100mm)/補助線(10mm)の2段階。`fwidth`基準のため遠方で線同士が画素未満に詰まっても
+ *   モアレにならず自然に薄い塗りへ収束し、かつ距離フェードがそれより手前で0にするため実際には
+ *   モアレ帯へ到達しない。
+ * - ピッキング対象外: raycastを無効化し(念のため。実際のレイキャストはthis.meshなど個別
+ *   オブジェクト指定のintersectObjectのみで、シーン全体を辿らないため元々ヒットしない)。
+ * - Z=0に乗るボディ底面とのZファイティング対策として、旧`createFaceMaterial()`と同じ
+ *   `polygonOffset`(奥へ押し出す)を使う。加えて`depthWrite: false`+`transparent: true`により
+ *   不透明パス(ボディ)の後にブレンドされるだけになるため、同一深度でのチラつきが出ない。
+ */
+function buildGroundGrid(): THREE.Mesh {
+  const geometry = new THREE.PlaneGeometry(GROUND_GRID_QUAD_HALF_SIZE_MM * 2, GROUND_GRID_QUAD_HALF_SIZE_MM * 2);
+  const material = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    polygonOffset: true,
+    polygonOffsetFactor: 1,
+    polygonOffsetUnits: 1,
+    uniforms: {
+      uMinorSpacing: { value: GROUND_GRID_MINOR_SPACING_MM },
+      uMajorSpacing: { value: GROUND_GRID_MAJOR_SPACING_MM },
+      uMinorColor: { value: GROUND_GRID_MINOR_COLOR },
+      uMajorColor: { value: GROUND_GRID_MAJOR_COLOR },
+      uFadeStart: { value: GROUND_GRID_FADE_START_MM },
+      uFadeEnd: { value: GROUND_GRID_FADE_END_MM },
+    },
+    vertexShader: /* glsl */ `
+      varying vec3 vWorldPos;
+      void main() {
+        vec4 worldPos = modelMatrix * vec4(position, 1.0);
+        vWorldPos = worldPos.xyz;
+        gl_Position = projectionMatrix * viewMatrix * worldPos;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      varying vec3 vWorldPos;
+      uniform float uMinorSpacing;
+      uniform float uMajorSpacing;
+      uniform vec3 uMinorColor;
+      uniform vec3 uMajorColor;
+      uniform float uFadeStart;
+      uniform float uFadeEnd;
+
+      // fwidthベースのアンチエイリアス済みグリッド線カバレッジ(0=線無し、1=線上)。
+      // 線同士の間隔が画面上で1px未満に詰まると自動的に一様な塗りへ収束するため、
+      // 遠方でもモアレにならない(標準的な手法)。
+      float gridCoverage(vec2 coord) {
+        vec2 g = abs(fract(coord - 0.5) - 0.5) / fwidth(coord);
+        return 1.0 - clamp(min(g.x, g.y), 0.0, 1.0);
+      }
+
+      void main() {
+        vec2 minorCoord = vWorldPos.xy / uMinorSpacing;
+        vec2 majorCoord = vWorldPos.xy / uMajorSpacing;
+        float minorCoverage = gridCoverage(minorCoord);
+        float majorCoverage = gridCoverage(majorCoord);
+
+        vec3 color = mix(uMinorColor, uMajorColor, majorCoverage);
+        float coverage = max(minorCoverage, majorCoverage);
+
+        float dist = length(vWorldPos.xy - cameraPosition.xy);
+        float fade = 1.0 - smoothstep(uFadeStart, uFadeEnd, dist);
+
+        float alpha = coverage * fade;
+        if (alpha <= 0.003) discard;
+        gl_FragColor = vec4(color, alpha);
+      }
+    `,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.name = "groundInfiniteGrid";
+  // ピッキングはthis.meshなど個別オブジェクト指定のintersectObjectのみで行っており
+  // シーン全体を辿らないため実際には影響しないが、意図を明示するため無効化しておく。
+  mesh.raycast = () => {};
+  return mesh;
+}
+
+/**
  * Three.jsシーンの命令的なラッパー。React stateにシーンを持たせず、
  * DOMコンテナに対して直接マウント/更新/破棄する。
  */
@@ -1013,6 +1119,8 @@ export class CadViewer {
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
   private controls: FreeOrbitControls;
+  /** 地面の無限グリッド(Phase 44)。カメラ追従のため毎フレームanimate()内でXY位置のみ更新する。 */
+  private groundGrid!: THREE.Mesh;
   private mesh: THREE.Mesh | null = null;
   /** ソリッドのエッジ線(setMesh()でmesh.edgesから構築)。メッシュ更新時に破棄・再構築する。 */
   private edgesMesh: THREE.LineSegments | null = null;
@@ -1468,9 +1576,8 @@ export class CadViewer {
     fillLight.position.set(-150, -80, -100);
     this.scene.add(hemiLight, keyLight, fillLight);
 
-    const grid = new THREE.GridHelper(200, 20);
-    grid.rotation.x = Math.PI / 2;
-    this.scene.add(grid);
+    this.groundGrid = buildGroundGrid();
+    this.scene.add(this.groundGrid);
 
     this.sketchOverlayGroup = new THREE.Group();
     this.scene.add(this.sketchOverlayGroup);
@@ -1620,13 +1727,22 @@ export class CadViewer {
         dimensionToolSegmentsSnapshot: () =>
           this.dimensionToolSegments.map((s) => ({ id: s.id, p1: s.p1, p2: s.p2, kind: s.kind, bulge: s.bulge })),
         threadAnnotationLineCount: () => this.threadAnnotationGroup.children.length,
+        groundGridVisible: () => this.groundGrid.visible,
       };
     }
+  }
+
+  /** グリッド表示トグル(Phase 44)。地面の無限グリッドの可視状態を切り替える。 */
+  setGridVisible(visible: boolean) {
+    this.groundGrid.visible = visible;
   }
 
   private animate = () => {
     this.animationFrameId = requestAnimationFrame(this.animate);
     this.controls.update();
+    // 無限グリッド(Phase 44)をカメラのXY直下へ追従させる(Z=0固定、割り当てはposition.setのみで
+    // 毎フレームの新規オブジェクト生成は無し)。非表示中もコストは軽微なため無条件に更新する。
+    this.groundGrid.position.set(this.camera.position.x, this.camera.position.y, 0);
     this.renderer.render(this.scene, this.camera);
     this.updateAxisIndicator();
     // render()内でcamera.matrixWorldが最新化されるため、その後にフレームコールバックを呼ぶ
