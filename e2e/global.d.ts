@@ -14,8 +14,11 @@ declare global {
       drawingPointsSnapshot: () => [number, number][];
       /** カメラ〜注視点の距離(mm、Phase 29a、自動フィット検証用)。 */
       cameraDistance: () => number;
-      /** 寸法ツール中のヒット判定対象セグメントの現在の座標スナップショット(Phase 30、頂点ベースの寸法指定検証用)。 */
-      dimensionToolSegmentsSnapshot: () => { id: string; p1: [number, number]; p2: [number, number] }[];
+      /**
+       * 寸法ツール中のヒット判定対象セグメントの現在の座標スナップショット(Phase 30、頂点ベースの
+       * 寸法指定検証用)。kind/bulge(Phase 42b)は円弧セグメントの識別・接線検証のE2Eで使う。
+       */
+      dimensionToolSegmentsSnapshot: () => { id: string; p1: [number, number]; p2: [number, number]; kind: "line" | "arc"; bulge?: number }[];
       /** ねじの簡易表示(Phase 41)オーバーレイの現在の線本数(円+ヘリックス)。 */
       threadAnnotationLineCount: () => number;
     };

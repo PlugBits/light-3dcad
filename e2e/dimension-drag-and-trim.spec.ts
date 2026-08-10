@@ -378,12 +378,14 @@ test("③実機報告(Phase 42): 固定円(fixEntity)+2本の線分への接線�
   // (fixEntity/tangentが円entityIdへの参照切れのまま残っていた、というのがバグの根本原因だった)。
   const afterTrim = await constraintListTexts(page);
   expect(afterTrim.some((t) => t.includes("entity-"))).toBe(false);
-  // fixEntityは全断片の両端点へのfix拘束に移行され、tangentは凍結により無害に削除されるため、
-  // 「円の固定」「接線」表記は消え、代わりに「固定」(fix、断片の両端点分)が複数残る。
+  // fixEntityはトリムで生じた円弧片へ移行され、tangentは凍結により無害に削除されるため、
+  // 「円の固定」「接線」表記は消える。
   expect(afterTrim.filter((t) => t.includes("円の固定"))).toHaveLength(0);
   expect(afterTrim.filter((t) => t.includes("接線"))).toHaveLength(0);
-  // fixEntityは全断片の両端点への"fix"拘束(表記「固定: …」)に移行されるため、複数件残る。
-  expect(afterTrim.filter((t) => t.startsWith("固定:")).length).toBeGreaterThan(0);
+  // Phase 42b: 円弧がPlaneGCSのネイティブarcプリミティになったため、fixEntityの移行先は
+  // 「断片の両端点をfix」ではなく「断片(円弧)の中心・半径をfixArc」に変わった(端点は元の円の
+  // 上を自由に滑れる、= 円弧の固定)。「円弧の固定」表記が断片数分残る。
+  expect(afterTrim.filter((t) => t.startsWith("円弧の固定:")).length).toBeGreaterThan(0);
 
   // 押し出し用の閉ループ(20x20矩形、原点)を追加する(L字チェーン+トリム後の円弧片は開いた
   // ままで領域を構成しないため、押し出し可能な形状にはこの矩形が必要。本題は「トリムが
