@@ -1631,13 +1631,34 @@ export default function App() {
           if (!feature || feature.type !== "sketch") return;
           if (isEntity) {
             // entity(円・矩形・多角形・スロット等)輪郭のトリム: entities/segmentsの置き換えを1回の更新にまとめる。
-            useCadStore.getState().updateDocument((d) => trimSketchEntityAtPoint(d, sketchId, targetId, clickPoint));
+            // Phase 42: entityId自体を参照していた拘束(fixEntity/tangent等)の移行・削除件数が
+            // 1件以上あれば一時トーストで通知する(実機報告バグ対応)。
+            const { doc: nextDoc, removedConstraintCount } = trimSketchEntityAtPoint(currentDoc, sketchId, targetId, clickPoint);
+            useCadStore.getState().updateDocument(() => nextDoc);
+            if (removedConstraintCount > 0) {
+              showTransientMessage(`トリムにより不要になった拘束${removedConstraintCount}件を削除しました`);
+            }
             return;
           }
-          const { doc: nextDoc, removedLengthConstraintCount } = trimSketchSegmentAtPoint(currentDoc, sketchId, targetId, clickPoint);
+          const { doc: nextDoc, removedLengthConstraintCount, removedDanglingConstraintCount } = trimSketchSegmentAtPoint(
+            currentDoc,
+            sketchId,
+            targetId,
+            clickPoint,
+          );
           useCadStore.getState().updateDocument(() => nextDoc);
-          if (removedLengthConstraintCount > 0) {
+          // Phase 42: 長さ寸法の削除(意味が変わるため常に削除)と、参照切れ拘束の掃除(セグメント
+          // 全体削除で付け替え先が無くなったcoincident/fix等)の両方をまとめて通知する
+          // (既存e2e[dimension-drag-and-trim.spec.ts]は長さ寸法のみのケースの文言に依存するため、
+          // 単独の場合は既存文言を維持する)。
+          if (removedLengthConstraintCount > 0 && removedDanglingConstraintCount === 0) {
             showTransientMessage(`トリムにより長さ寸法${removedLengthConstraintCount}件を削除しました`);
+          } else if (removedDanglingConstraintCount > 0 && removedLengthConstraintCount === 0) {
+            showTransientMessage(`トリムにより不要になった拘束${removedDanglingConstraintCount}件を削除しました`);
+          } else if (removedLengthConstraintCount > 0 && removedDanglingConstraintCount > 0) {
+            showTransientMessage(
+              `トリムにより長さ寸法${removedLengthConstraintCount}件・不要になった拘束${removedDanglingConstraintCount}件を削除しました`,
+            );
           }
         },
         onCancel: () => {

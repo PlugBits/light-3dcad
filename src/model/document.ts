@@ -2,7 +2,14 @@
 import { generateId } from "./id";
 import { extendSegmentAtPoint, findExtensionTarget, type ExtendBoundary } from "../sketch/extend";
 import { applySegmentCorner, findSharedEndpoint } from "../sketch/segmentCorner";
-import { trimEntityAtPoint, trimSegmentWithConstraints, type Point2 } from "../sketch/trim";
+import {
+  constraintReferencesId,
+  migrateEntityConstraintsForReplace,
+  pruneDanglingConstraints,
+  trimEntityAtPoint,
+  trimSegmentWithConstraints,
+  type Point2,
+} from "../sketch/trim";
 import type {
   CadDocument,
   ExtrudeFeature,
@@ -10,7 +17,6 @@ import type {
   FeatureId,
   Fillet3DFeature,
   FilletEdgeRef,
-  LineRef,
   MateFaceRef,
   MateFeature,
   PartInstanceFeature,
@@ -552,38 +558,58 @@ export function applySegmentCornerToSketch(
  * 1回のフィーチャー更新にまとめることで、undo1回で元に戻せるようにする。
  * Phase 36: trimEntityAtPoint() がトリム断点に自動付与するcoincident拘束(実機報告バグの根本原因
  * 修正)を反映するため、sketch.constraintsを渡し、戻り値のconstraintsで置き換える。
+ * Phase 42: entityId自体を参照していた拘束(fixEntity/tangent/distanceEntityLine等)の移行・削除
+ * 件数をremovedConstraintCountで返す(呼び出し側[App.tsx]の一時トースト表示に使う。実機報告バグ
+ * ―トリムしたentityを参照する拘束が参照切れのまま残り、拘束一覧に生IDが表示され続けたり
+ * 過拘束が誤って矛盾判定されたりする―の根本原因修正)。
  */
-export function trimSketchEntityAtPoint(doc: CadDocument, sketchId: FeatureId, entityId: string, clickPoint: Point2): CadDocument {
-  return updateFeature<SketchFeature>(doc, sketchId, (sketch) => {
-    const result = trimEntityAtPoint(sketch.entities, entityId, sketch.segments ?? [], clickPoint, sketch.constraints ?? []);
-    return { ...sketch, entities: result.entities, segments: result.segments, constraints: result.constraints };
-  });
+export function trimSketchEntityAtPoint(
+  doc: CadDocument,
+  sketchId: FeatureId,
+  entityId: string,
+  clickPoint: Point2,
+): { doc: CadDocument; removedConstraintCount: number } {
+  const feature = findFeature(doc, sketchId);
+  if (!feature || feature.type !== "sketch") return { doc, removedConstraintCount: 0 };
+  const result = trimEntityAtPoint(feature.entities, entityId, feature.segments ?? [], clickPoint, feature.constraints ?? []);
+  const nextDoc = updateFeature<SketchFeature>(doc, sketchId, (sketch) => ({
+    ...sketch,
+    entities: result.entities,
+    segments: result.segments,
+    constraints: result.constraints,
+  }));
+  return { doc: nextDoc, removedConstraintCount: result.removedConstraintCount };
 }
 
 /**
  * targetId のセグメント(自由な線分・円弧、entity由来ではない)を、clickPoint(ローカル2D、mm)に
  * 最も近い区間だけ削除する(実機報告対応、Phase 31a)。src/sketch/trim.ts の
  * trimSegmentWithConstraints() が、削除で生じる断片へのID引き継ぎ・拘束の付け替え(座標一致)・
- * 意味が変わるlength拘束の削除を一括して行う。segments・constraintsの置き換えを1回のフィーチャー
- * 更新にまとめることで、undo1回で元に戻せるようにする。
- * removedLengthConstraintCount(削除されたlength拘束の件数)は呼び出し側(App.tsx)が一時トースト
- * 表示に使う。sketchIdが見つからない場合は元のドキュメント・件数0をそのまま返す。
+ * 意味が変わるlength拘束の削除・参照切れ拘束の掃除(Phase 42)を一括して行う。segments・
+ * constraintsの置き換えを1回のフィーチャー更新にまとめることで、undo1回で元に戻せるようにする。
+ * removedLengthConstraintCount(削除されたlength拘束の件数)・removedDanglingConstraintCount
+ * (Phase 42、削除された断片を参照していた他の参照切れ拘束の件数)は呼び出し側(App.tsx)が
+ * 一時トースト表示に使う。sketchIdが見つからない場合は元のドキュメント・件数0をそのまま返す。
  */
 export function trimSketchSegmentAtPoint(
   doc: CadDocument,
   sketchId: FeatureId,
   targetId: string,
   clickPoint: Point2,
-): { doc: CadDocument; removedLengthConstraintCount: number } {
+): { doc: CadDocument; removedLengthConstraintCount: number; removedDanglingConstraintCount: number } {
   const feature = findFeature(doc, sketchId);
-  if (!feature || feature.type !== "sketch") return { doc, removedLengthConstraintCount: 0 };
+  if (!feature || feature.type !== "sketch") return { doc, removedLengthConstraintCount: 0, removedDanglingConstraintCount: 0 };
   const result = trimSegmentWithConstraints(feature.segments ?? [], feature.constraints ?? [], targetId, clickPoint, feature.entities ?? []);
   const nextDoc = updateFeature<SketchFeature>(doc, sketchId, (sketch) => ({
     ...sketch,
     segments: result.segments,
     constraints: result.constraints,
   }));
-  return { doc: nextDoc, removedLengthConstraintCount: result.removedLengthConstraintCount };
+  return {
+    doc: nextDoc,
+    removedLengthConstraintCount: result.removedLengthConstraintCount,
+    removedDanglingConstraintCount: result.removedDanglingConstraintCount,
+  };
 }
 
 /**
@@ -625,64 +651,12 @@ export function removeSketchEntity(doc: CadDocument, sketchId: FeatureId, entity
   }));
 }
 
-/** LineRefがtargetId(segmentId/entityId)を参照しているか判定する(constraintReferencesId()のヘルパー)。 */
-function lineRefReferencesId(line: LineRef, targetId: string): boolean {
-  if (line.kind === "entityEdge") return line.entityId === targetId;
-  if (line.kind === "segmentEdge") return line.segmentId === targetId;
-  return false; // refEdge: ピック時点のスナップショット座標のみを持ち、生きたidを参照しない。
-}
-
 /**
  * 拘束cがsegments/entitiesのid(targetId)を参照しているか判定する(個別削除のカスケード用の
- * 純粋関数、実機報告対応Phase 32②)。segmentIdとentityIdは別々の名前空間だが、generateId()で
- * 採番されるため衝突しない前提で1つのtargetIdとして扱える。SketchConstraintの全種別を網羅する
- * (switchがconstraint.kindで分岐し尽くしていない場合はTypeScriptの型チェックでnever型エラーに
- * なるため、新しい拘束種別を追加した際にここの更新漏れがコンパイル時に検出される)。
+ * 純粋関数、実機報告対応Phase 32②)。実体はsrc/sketch/trim.tsのconstraintReferencesId()
+ * (Phase 42でトリムのダングリング拘束掃除と共通化のため移設)を再エクスポートしたもの。
  */
-export function constraintReferencesId(constraint: SketchConstraint, targetId: string): boolean {
-  switch (constraint.kind) {
-    case "coincident":
-      return constraint.a.segmentId === targetId || constraint.b.segmentId === targetId;
-    case "horizontal":
-    case "vertical":
-    case "length":
-    case "radius":
-    case "distanceLineRefEdge":
-    case "angleLineRefEdge":
-      return constraint.segmentId === targetId;
-    case "distance":
-      return constraint.a.segmentId === targetId || constraint.b.segmentId === targetId;
-    case "fix":
-      return constraint.point.segmentId === targetId;
-    case "distanceEntityOrigin":
-    case "fixEntity":
-      return constraint.entity.entityId === targetId;
-    case "distancePointOrigin":
-      return constraint.point.segmentId === targetId;
-    case "coincidentOrigin":
-      return "segmentId" in constraint.point ? constraint.point.segmentId === targetId : constraint.point.entityId === targetId;
-    case "distanceEntityEntity":
-    case "concentric":
-      return constraint.a.entityId === targetId || constraint.b.entityId === targetId;
-    case "distanceEntityLine":
-      return constraint.entity.entityId === targetId || lineRefReferencesId(constraint.line, targetId);
-    case "distancePointLine":
-      return constraint.point.segmentId === targetId || lineRefReferencesId(constraint.line, targetId);
-    case "perpendicular":
-    case "distanceLineLine":
-    case "angleLineLine":
-      return constraint.a === targetId || constraint.b === targetId;
-    case "tangent":
-      return (
-        constraint.entity.entityId === targetId ||
-        (constraint.target.kind === "segment" ? constraint.target.segmentId === targetId : constraint.target.entityId === targetId)
-      );
-    default: {
-      const exhaustive: never = constraint;
-      return exhaustive;
-    }
-  }
-}
+export { constraintReferencesId };
 
 /**
  * sketchからsegments/entitiesいずれかの1件(id指定、種類は自動判定)を削除し、それを参照する
@@ -792,13 +766,31 @@ export function addSketchSegments(
 /**
  * sketch のentityを削除し、代わりに等価なsegments(src/sketch/explode.ts の explodeEntity())を
  * 既存segmentsへ追記する(「分解」ボタン、Phase 19b)。分解後はトリムツールの対象になる。
+ * Phase 42: entityトリム(trimSketchEntityAtPoint)と同じく、entityIdを参照していた拘束
+ * (fixEntity/tangent/distanceEntityLine等)をmigrateEntityConstraintsForReplace()で移行/削除し、
+ * pruneDanglingConstraints()で残る参照切れを一掃する(分解もentityが丸ごとsegmentsへ置き換わる
+ * 点はentityトリムと同じため、同じ根本原因のバグを持っていた)。removedConstraintCountは
+ * 呼び出し側(SketchEditor.tsx)の一時トースト表示に使う。
  */
-export function explodeSketchEntity(doc: CadDocument, sketchId: FeatureId, entityId: string, segments: SketchSegment[]): CadDocument {
-  return updateFeature<SketchFeature>(doc, sketchId, (sketch) => ({
+export function explodeSketchEntity(
+  doc: CadDocument,
+  sketchId: FeatureId,
+  entityId: string,
+  segments: SketchSegment[],
+): { doc: CadDocument; removedConstraintCount: number } {
+  const feature = findFeature(doc, sketchId);
+  if (!feature || feature.type !== "sketch") return { doc, removedConstraintCount: 0 };
+  const nextEntities = feature.entities.filter((entity) => entity.id !== entityId);
+  const nextSegments = [...(feature.segments ?? []), ...segments];
+  const migrated = migrateEntityConstraintsForReplace(entityId, segments, feature.constraints ?? []);
+  const swept = pruneDanglingConstraints(migrated.constraints, nextSegments, nextEntities);
+  const nextDoc = updateFeature<SketchFeature>(doc, sketchId, (sketch) => ({
     ...sketch,
-    entities: sketch.entities.filter((entity) => entity.id !== entityId),
-    segments: [...(sketch.segments ?? []), ...segments],
+    entities: nextEntities,
+    segments: nextSegments,
+    constraints: swept.constraints,
   }));
+  return { doc: nextDoc, removedConstraintCount: migrated.removedConstraintCount + swept.removedCount };
 }
 
 /** 指定IDのフィーチャーを削除する(依存フィーチャーはそのまま残る=参照切れの可能性あり)。 */

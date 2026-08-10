@@ -154,10 +154,18 @@ export function SketchEditor({
     updateDocument((doc) => removeSketchEntity(doc, sketch.id, entityId));
   }
 
-  /** エンティティを等価なsegments(線分・円弧、Phase 19a)に変換して置き換える(「分解」、Phase 19b)。 */
+  /**
+   * エンティティを等価なsegments(線分・円弧、Phase 19a)に変換して置き換える(「分解」、Phase 19b)。
+   * Phase 42: entityIdを参照していた拘束(fixEntity/tangent等)の移行・削除件数が1件以上あれば
+   * 一時トーストで通知する(実機報告バグ対応、trimと同じ根本原因の修正)。
+   */
   function handleExplodeEntity(entity: SketchEntity) {
     const segments = explodeEntity(entity);
-    updateDocument((doc) => explodeSketchEntity(doc, sketch.id, entity.id, segments));
+    updateDocument((doc) => {
+      const { doc: nextDoc, removedConstraintCount } = explodeSketchEntity(doc, sketch.id, entity.id, segments);
+      if (removedConstraintCount > 0) onNotice?.(`分解により関連する拘束${removedConstraintCount}件を削除しました`);
+      return nextDoc;
+    });
   }
 
   /** sketchのsegments(Phase 19a)を全削除する。 */
