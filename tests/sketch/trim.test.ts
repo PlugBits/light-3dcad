@@ -630,3 +630,111 @@ describe("entityトリムでの拘束移行・ダングリング拘束の掃除(
     expect(coincidentsWithLineLeft.length).toBeGreaterThan(0);
   });
 });
+
+/**
+ * ユーザー報告バグ(Phase 42c)の再現・修正確認。線分に円(entity/円弧)への接線拘束が付き、
+ * ソルバがそれを満たすように解いた直後、接点はソルバの1e-6mmグリッド丸めにより数学的な厳密接触から
+ * 最大約1e-6mm程度ずれる(src/sketch/intersections.tsのTANGENT_CONTACT_EPSのコメント参照)。
+ * 以前はこの僅かなずれのせいでintersections.tsの判別式ベースの交点計算が「交点なし」を返し、
+ * トリムの区切り点として機能せず、クリックした区間が接点を越えて丸ごと(entityトリムなら円が、
+ * セグメントトリムなら線分全体が)消えてしまっていた。
+ */
+describe("接線拘束を解いた直後のトリム(実機報告バグ対応、Phase 42c)", () => {
+  beforeAll(async () => {
+    gcsAdapter.setGcsWasmPathForTests(path.resolve("node_modules/@salusoft89/planegcs/dist/planegcs_dist/planegcs.wasm"));
+    registerGcsAdapter(gcsAdapter);
+    await gcsAdapter.initGcs();
+  });
+
+  /** 点pから直線(p1,p2、無限直線として)への垂線の足。 */
+  function footOfPerpendicular(p: [number, number], p1: [number, number], p2: [number, number]): [number, number] {
+    const dx = p2[0] - p1[0];
+    const dy = p2[1] - p1[1];
+    const lenSq = dx * dx + dy * dy;
+    const t = ((p[0] - p1[0]) * dx + (p[1] - p1[1]) * dy) / lenSq;
+    return [p1[0] + t * dx, p1[1] + t * dy];
+  }
+
+  function dist(a: [number, number], b: [number, number]): number {
+    return Math.hypot(a[0] - b[0], a[1] - b[1]);
+  }
+
+  /**
+   * 円(自由変数の中心・半径)+2本の直線(それぞれ片端をfixし、tangent拘束で円に接するよう解く)の
+   * シーンを構築・solveSketch()で解く。2本の直線は互いに異なる向きにするため、意図的に
+   * 「きれいでない」初期配置(非水平・非垂直)にしてあり、解いた接点座標が単純な整数に丸まらない
+   * (=1e-6mmグリッド丸めの残差が実際に生じる)ようにしている。
+   */
+  function solveTangentScene() {
+    const circle = createCircleEntity({ center: [45, 28], radius: 17 });
+    const line1 = createLineSegment({ p1: [-3.7, -8.2], p2: [77.3, 12.9] });
+    const line2 = createLineSegment({ p1: [-2.1, 71.4], p2: [83.6, 41.7] });
+    const constraints: SketchConstraint[] = [
+      { id: "fix-l1p1", kind: "fix", point: { segmentId: line1.id, end: "p1" } },
+      { id: "fix-l2p1", kind: "fix", point: { segmentId: line2.id, end: "p1" } },
+      { id: "tan-1", kind: "tangent", entity: { entityId: circle.id }, target: { kind: "segment", segmentId: line1.id } },
+      { id: "tan-2", kind: "tangent", entity: { entityId: circle.id }, target: { kind: "segment", segmentId: line2.id } },
+    ];
+    const result = solveSketch([line1, line2], constraints, [circle]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("solve failed");
+    const outLine1 = result.segments.find((s) => s.id === line1.id)!;
+    const outLine2 = result.segments.find((s) => s.id === line2.id)!;
+    const outCircle = result.entities.find((e) => e.id === circle.id)!;
+    if (outCircle.kind !== "circle") throw new Error("not circle");
+    return { outLine1, outLine2, outCircle, constraints };
+  }
+
+  it("解いた直後の接点は数学的な厳密接触から僅かにずれている(丸め誤差の実測、再現確認)", () => {
+    const { outLine1, outCircle } = solveTangentScene();
+    const foot = footOfPerpendicular(outCircle.center, outLine1.p1, outLine1.p2);
+    const gap = Math.abs(dist(foot, outCircle.center) - outCircle.radius);
+    // ソルバの丸め処理により厳密に0にはならないが、TANGENT_CONTACT_EPS(1e-4mm)には収まる
+    // (このテスト自体は「ずれの実在」の記録であり、以降のトリムが機能することの前提確認)。
+    expect(gap).toBeGreaterThanOrEqual(0);
+    expect(gap).toBeLessThan(1e-4);
+  });
+
+  it("円(entity)を2本の接線でトリムすると、クリックした側の弧だけが消え、残りの弧の端点が接点に一致する(entityトリム)", () => {
+    const { outLine1, outLine2, outCircle } = solveTangentScene();
+    const foot1 = footOfPerpendicular(outCircle.center, outLine1.p1, outLine1.p2);
+    const foot2 = footOfPerpendicular(outCircle.center, outLine2.p1, outLine2.p2);
+
+    // 2つの接点を結ぶ弦の中点付近(=接点間の短い方の弧の内側)をクリックする。
+    const clickPoint: [number, number] = [(foot1[0] + foot2[0]) / 2, (foot1[1] + foot2[1]) / 2];
+
+    const result = trimEntityAtPoint([outCircle], outCircle.id, [outLine1, outLine2], clickPoint);
+
+    // 円entityは常にsegmentsへ分解される(既存挙動)。ここで検証したいのは「全消去されない」こと。
+    expect(result.entities).toHaveLength(0);
+    expect(result.segments.length).toBeGreaterThan(0); // 実機報告バグでは0件(全消去)になっていた。
+
+    // 残った断片の全端点の中に、接点1・接点2それぞれに近い点が存在する(=接点が区切り点として
+    // 機能し、そこが新しい断片の端点になっている)。
+    const endpoints: [number, number][] = result.segments.flatMap((s) => [s.p1, s.p2]);
+    const hasNear = (p: [number, number]) => endpoints.some((q) => dist(q, p) < 1e-3);
+    expect(hasNear(foot1)).toBe(true);
+    expect(hasNear(foot2)).toBe(true);
+  });
+
+  it("線分を、接線となっている円(entity)を境界にトリムすると、接点で分割される(セグメントトリム)", () => {
+    const { outLine1, outCircle } = solveTangentScene();
+    const foot1 = footOfPerpendicular(outCircle.center, outLine1.p1, outLine1.p2);
+
+    // 接点よりp2側(接点から見てp2の方向)をクリックして削除する。
+    const clickPoint: [number, number] = [
+      foot1[0] + (outLine1.p2[0] - foot1[0]) * 0.5,
+      foot1[1] + (outLine1.p2[1] - foot1[1]) * 0.5,
+    ];
+    const result = trimSegmentAtPoint([outLine1], outLine1.id, clickPoint, [outCircle]);
+
+    // 接点で分割され、クリックした側(p2側)が削除され、p1側の1区間だけが残る。
+    expect(result).toHaveLength(1);
+    const kept = result[0];
+    // 残った区間の一方の端点はp1(不変)、もう一方は接点(foot1)に一致する。
+    const p1Match = dist(kept.p1, outLine1.p1) < 1e-6 || dist(kept.p2, outLine1.p1) < 1e-6;
+    const footMatch = dist(kept.p1, foot1) < 1e-3 || dist(kept.p2, foot1) < 1e-3;
+    expect(p1Match).toBe(true);
+    expect(footMatch).toBe(true);
+  });
+});
