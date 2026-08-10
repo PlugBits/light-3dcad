@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 
 import type { SketchEntity, SketchSegment } from "../../src/model/types";
 import {
+  addConcentricConstraint,
+  addTangentArcLineConstraint,
   addTangentSegmentConstraint,
   computeConstraintDimensions,
   distanceBetweenRefs,
@@ -35,6 +37,62 @@ describe("upsertRadiusConstraint", () => {
     const result = upsertRadiusConstraint([], "arc-1", 12);
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({ kind: "radius", segmentId: "arc-1", value: 12 });
+  });
+});
+
+describe("addConcentricConstraint(Phase 42b: circleエンティティ・円弧セグメントの両対応)", () => {
+  it("circleエンティティ同士(EntityRef)のconcentric拘束を追加する", () => {
+    const result = addConcentricConstraint([], { entityId: "c1" }, { entityId: "c2" });
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ kind: "concentric", a: { entityId: "c1" }, b: { entityId: "c2" } });
+  });
+
+  it("円弧セグメント(ArcRef)↔circleエンティティのconcentric拘束を追加する", () => {
+    const result = addConcentricConstraint([], { segmentId: "arc1" }, { entityId: "c1" });
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ kind: "concentric", a: { segmentId: "arc1" }, b: { entityId: "c1" } });
+  });
+
+  it("円弧セグメント同士(ArcRef)のconcentric拘束を追加する", () => {
+    const result = addConcentricConstraint([], { segmentId: "arcA" }, { segmentId: "arcB" });
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ kind: "concentric", a: { segmentId: "arcA" }, b: { segmentId: "arcB" } });
+  });
+
+  it("同じ組み合わせ(順不同)が既にあれば追加しない(冪等)", () => {
+    const existing = addConcentricConstraint([], { segmentId: "arc1" }, { entityId: "c1" });
+    const again = addConcentricConstraint(existing, { entityId: "c1" }, { segmentId: "arc1" });
+    expect(again).toHaveLength(1);
+  });
+
+  it("EntityRefとArcRefが同じidを偶然共有していても別対象として扱う(entityId/segmentIdの型で判別)", () => {
+    const existing = addConcentricConstraint([], { entityId: "x1" }, { entityId: "c1" });
+    const again = addConcentricConstraint(existing, { segmentId: "x1" }, { entityId: "c1" });
+    expect(again).toHaveLength(2);
+  });
+});
+
+describe("addTangentArcLineConstraint(Phase 42b新設: 円弧↔直線のtangent拘束)", () => {
+  it("円弧↔直線のtangent拘束を追加する", () => {
+    const result = addTangentArcLineConstraint([], "arc1", "s1");
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      kind: "tangent",
+      entity: { segmentId: "arc1" },
+      target: { kind: "segment", segmentId: "s1" },
+    });
+  });
+
+  it("同じ組み合わせが既にあれば追加しない(冪等)", () => {
+    const once = addTangentArcLineConstraint([], "arc1", "s1");
+    const twice = addTangentArcLineConstraint(once, "arc1", "s1");
+    expect(twice).toHaveLength(1);
+  });
+
+  it("circleエンティティのtangent拘束(EntityRef)とは別物として共存する(entityId/segmentIdが同じ値でも混同しない)", () => {
+    const withCircleTangent = addTangentSegmentConstraint([], "x1", "s1");
+    const result = addTangentArcLineConstraint(withCircleTangent, "x1", "s1");
+    expect(result).toHaveLength(2);
   });
 });
 

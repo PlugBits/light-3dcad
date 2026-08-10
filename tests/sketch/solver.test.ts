@@ -261,7 +261,13 @@ describe("solveSketch", () => {
     expect(outA.p1[1]).toBeCloseTo(0, 8);
   });
 
-  it("⑭ 円弧セグメントのkind/id/bulgeは解いた後もそのまま保たれる(位置のみ更新)", () => {
+  it("⑭ 円弧セグメントのkind/idは解いた後も保たれ、length拘束は端点間距離(弦長)を満たす(Phase 42b: 円弧はネイティブGCS arcのため、bulgeも中心・半径同様に自由変数として解かれる)", () => {
+    // Phase 42bより前(rigid-bulge時代)は、length拘束は「bulge[挟角]を固定したまま端点を
+    // 引き離す」剛体変換で解かれ、出力bulgeは常に入力と完全一致していた。円弧がPlaneGCSの
+    // ネイティブarcプリミティになった今は、bulge(=中心・半径・掃引角から決まる)も他の劣拘束
+    // 変数と同じく正則化(現在値に留まろうとする弱い誘導)の対象になり、length拘束(弦長=20のみ)
+    // 単独では中心・半径・両端点の全てに自由度が残るため、一般には元のbulgeとは異なる値に解かれる
+    // (「弦長は変える・見た目は保つ」という決め打ちの規約は無くなった、これは意図した仕様変更)。
     const seg: SketchSegment = { id: "arc-x", kind: "arc", p1: [0, 0], p2: [10, 0], bulge: 0.5 };
     const constraints: SketchConstraint[] = [{ id: "c1", kind: "length", segmentId: "arc-x", value: 20 }];
     const result = solveSketch([seg], constraints);
@@ -270,7 +276,10 @@ describe("solveSketch", () => {
     const out = result.segments[0];
     expect(out.id).toBe("arc-x");
     expect(out.kind).toBe("arc");
-    expect(out.bulge).toBe(0.5);
+    expect(out.bulge).toBeTypeOf("number");
+    expect(Number.isFinite(out.bulge)).toBe(true);
+    // 弦長(端点間のユークリッド距離、length拘束の実体)は20を満たす。
+    expect(dist(out.p1, out.p2)).toBeCloseTo(20, 4);
   });
 });
 
@@ -1019,6 +1028,136 @@ describe("solveSketch 幾何拘束(perpendicular/concentric/tangent、Phase 23)"
   });
 });
 
+// 円弧の一級化(Phase 42b)。円弧セグメント(kind:"arc"かつbulgeあり)がPlaneGCSのネイティブarc
+// プリミティ(中心・半径・start/end角が実変数)になったことに伴う新規拘束マッピングの単体テスト。
+describe("solveSketch 円弧のネイティブGCS化(Phase 42b)", () => {
+  function circle(id: string, center: [number, number], radius: number): Extract<SketchEntity, { kind: "circle" }> {
+    return { kind: "circle", id, center, radius };
+  }
+
+  it("① tangent(円弧↔直線): 直線が回転して円弧に接するように解ける", () => {
+    // 半径5の円弧(中心(10,3)付近)+ほぼ水平だがわずかに傾いた直線。直線が回転し、
+    // 中心↔直線の距離が円弧の半径に一致するところで接する。
+    const arc: SketchSegment = { id: "arc1", kind: "arc", p1: [5, 3], p2: [15, 3.5], bulge: 0.3 };
+    const line: SketchSegment = { id: "s1", kind: "line", p1: [0, 0], p2: [20, 1] };
+    const constraints: SketchConstraint[] = [
+      { id: "t1", kind: "tangent", entity: { segmentId: "arc1" }, target: { kind: "segment", segmentId: "s1" } },
+    ];
+    const result = solveSketch([arc, line], constraints);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outArc = result.segments.find((s) => s.id === "arc1")!;
+    const outLine = result.segments.find((s) => s.id === "s1")!;
+    const geo = arcGeometryFromBulge(outArc.p1, outArc.p2, outArc.bulge ?? 0);
+    expect(geo).not.toBeNull();
+    if (!geo) return;
+    const dx = outLine.p2[0] - outLine.p1[0];
+    const dy = outLine.p2[1] - outLine.p1[1];
+    const len = Math.hypot(dx, dy);
+    const cross = (geo.center[0] - outLine.p1[0]) * dy - (geo.center[1] - outLine.p1[1]) * dx;
+    const distToLine = Math.abs(cross) / len;
+    expect(distToLine).toBeCloseTo(geo.radius, 3);
+  });
+
+  it("② radius拘束: 円弧の半径変数(arc_radius)が直接指定値に解ける(端点は円周上で動いてよい)", () => {
+    const arc: SketchSegment = { id: "arc1", kind: "arc", p1: [-5, 0], p2: [5, 0], bulge: 0.5 };
+    const constraints: SketchConstraint[] = [{ id: "r1", kind: "radius", segmentId: "arc1", value: 12 }];
+    const result = solveSketch([arc], constraints);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.segments[0];
+    const geo = arcGeometryFromBulge(out.p1, out.p2, out.bulge ?? 0);
+    expect(geo).not.toBeNull();
+    if (!geo) return;
+    expect(geo.radius).toBeCloseTo(12, 3);
+  });
+
+  it("③ concentric(円弧↔円): 中心が一致するように解ける", () => {
+    const arc: SketchSegment = { id: "arc1", kind: "arc", p1: [3, 3], p2: [3, -3], bulge: -0.3 };
+    const c = circle("c1", [20, 8], 4);
+    const constraints: SketchConstraint[] = [
+      { id: "cc1", kind: "concentric", a: { segmentId: "arc1" }, b: { entityId: "c1" } },
+    ];
+    const result = solveSketch([arc], constraints, [c]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outArc = result.segments[0];
+    const outC = result.entities[0];
+    if (outC.kind !== "circle") throw new Error("not circle");
+    const geo = arcGeometryFromBulge(outArc.p1, outArc.p2, outArc.bulge ?? 0);
+    expect(geo).not.toBeNull();
+    if (!geo) return;
+    expect(dist(geo.center, outC.center)).toBeLessThan(1e-3);
+  });
+
+  it("④ concentric(円弧↔円弧): 中心が一致するように解ける", () => {
+    const arcA: SketchSegment = { id: "arcA", kind: "arc", p1: [0, 5], p2: [0, -5], bulge: 0.4 };
+    const arcB: SketchSegment = { id: "arcB", kind: "arc", p1: [20, 3], p2: [20, -3], bulge: -0.4 };
+    const constraints: SketchConstraint[] = [
+      { id: "cc1", kind: "concentric", a: { segmentId: "arcA" }, b: { segmentId: "arcB" } },
+    ];
+    const result = solveSketch([arcA, arcB], constraints);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const [outA, outB] = result.segments;
+    const geoA = arcGeometryFromBulge(outA.p1, outA.p2, outA.bulge ?? 0);
+    const geoB = arcGeometryFromBulge(outB.p1, outB.p2, outB.bulge ?? 0);
+    expect(geoA).not.toBeNull();
+    expect(geoB).not.toBeNull();
+    if (!geoA || !geoB) return;
+    expect(dist(geoA.center, geoB.center)).toBeLessThan(1e-3);
+  });
+
+  it("④b 実機報告の回帰: fixArcで固定された、直線に厳密接する円弧のbulgeは高精度(誤差1e-8未満)で解ける(1e-6粒度の丸めは接線判定を壊すほどの誤差を生む、実機確認)", () => {
+    // 実機報告バグの再現条件: 半径5の円が2本の線分(水平y=-14・垂直x=27)に接する位置(中心22,-9)に
+    // 固定され、トリムで円弧片へ分解される(トリムのmigrateEntityConstraintsForReplace()が
+    // fixArcへ移行する、trim.test.ts参照)。円弧の片方の端点(27,-9)は垂直線の上、もう片方(22,-14)は
+    // 水平線の上に、それぞれ「点が線の内部に厳密に接する」形で乗る。bulgeの書き戻しに粗い丸み
+    // (1e-6グリッド)を使うと、この接触がわずかに交差/非接触に転じ、後続の押し出し評価が
+    // replicad/OCCT側の例外で失敗する(tests/worker/evaluator.test.tsではなくこちらで検証するのは、
+    // 純粋にsolveSketch()の出力精度の問題であり、WASM[OpenCascade]初期化を伴う評価まで
+    // 行わなくても検出できるため)。
+    const arc: SketchSegment = { id: "arc0", kind: "arc", p1: [27, -9], p2: [22, -14], bulge: -0.41421356237309503 };
+    const centerFixConstraint: SketchConstraint = { id: "fixarc0", kind: "fixArc", segmentId: "arc0" };
+    const result = solveSketch([arc], [centerFixConstraint]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.segments[0];
+    expect(out.kind).toBe("arc");
+    // 入力のbulgeとの誤差が1e-8未満(実機で問題になった1e-6グリッドの丸め[最大5e-7誤差]より
+    // 一桁以上小さい)であること。
+    expect(Math.abs((out.bulge ?? 0) - -0.41421356237309503)).toBeLessThan(1e-8);
+    // 端点自体は(fixArcにより中心・半径が固定されているため)ほぼ動かない。
+    expect(dist(out.p1, [27, -9])).toBeLessThan(1e-6);
+    expect(dist(out.p2, [22, -14])).toBeLessThan(1e-6);
+  });
+
+  it("⑤ 一致チェーン(直線↔円弧↔直線): 端点が一致で繋がったまま解ける", () => {
+    const a: SketchSegment = { id: "a", kind: "line", p1: [0, 0], p2: [10, 0] };
+    const arc: SketchSegment = { id: "arc1", kind: "arc", p1: [10, 0], p2: [10, 10], bulge: 0.4142135623730951 };
+    const b: SketchSegment = { id: "b", kind: "line", p1: [10, 10], p2: [0, 10] };
+    const constraints: SketchConstraint[] = [
+      { id: "fix1", kind: "fix", point: { segmentId: "a", end: "p1" } },
+      { id: "co1", kind: "coincident", a: { segmentId: "a", end: "p2" }, b: { segmentId: "arc1", end: "p1" } },
+      { id: "co2", kind: "coincident", a: { segmentId: "arc1", end: "p2" }, b: { segmentId: "b", end: "p1" } },
+      { id: "len1", kind: "length", segmentId: "a", value: 15 },
+      { id: "h1", kind: "horizontal", segmentId: "a" },
+    ];
+    const result = solveSketch([a, arc, b], constraints);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outA = result.segments.find((s) => s.id === "a")!;
+    const outArc = result.segments.find((s) => s.id === "arc1")!;
+    const outB = result.segments.find((s) => s.id === "b")!;
+    expect(outA.kind).toBe("line");
+    expect(outArc.kind).toBe("arc");
+    // aが伸びた分、一致拘束で円弧・bの接続点が連動する。
+    expect(dist(outA.p2, outArc.p1)).toBeLessThan(1e-4);
+    expect(dist(outArc.p2, outB.p1)).toBeLessThan(1e-4);
+    expect(outA.p2[0]).toBeCloseTo(15, 3);
+  });
+});
+
 describe("solveSketch 接線拘束が解けるのに矛盾判定されるバグの修正(実機報告、Phase 32)", () => {
   function circle(id: string, center: [number, number], radius: number): Extract<SketchEntity, { kind: "circle" }> {
     return { kind: "circle", id, center, radius };
@@ -1436,6 +1575,25 @@ describe("solveSketch dragTarget(スケッチジオメトリのドラッグ編�
     const out = result.entities[0];
     if (out.kind !== "circle") throw new Error("not circle");
     expect(dist(out.center, [7, -3])).toBeLessThan(0.3);
+  });
+
+  it("⑥ 拘束の無い円弧の端点ドラッグ(Phase 42b: 円弧がネイティブGCS arcになっても、掴んだ端点は目標付近まで追従する)", () => {
+    // Phase 42b注記: 旧rigid-bulge実装ではp1・p2が互いに無関係な独立点だったため、p2だけを
+    // ドラッグしてもp1は(他に何も参照する拘束が無い限り)全く動かなかった。円弧がPlaneGCSの
+    // ネイティブarc(中心・半径・start/end角を介してp1・p2が連動)になった今、ドラッグ中は
+    // 正則化を意図的に行わない設計(addDragConstraintsのコメント参照)のため、p1側にも
+    // 円弧としての整合性を保つための追従が起こりうる(=以前の「無関係な点は一切動かない」という
+    // 保証は円弧の反対側の端点には及ばなくなった、意図した仕様変更)。ここでは「掴んだ側が
+    // 目標へ追従すること」「結果が引き続き有効な円弧であること」のみを検証する。
+    const arc: SketchSegment = { id: "arc1", kind: "arc", p1: [0, 0], p2: [10, 0], bulge: 0.5 };
+    const dragTarget: DragTarget = { kind: "point", point: { segmentId: "arc1", end: "p2" }, grabPoint: [10, 0], target: [10, 8] };
+    const result = solveSketch([arc], [], [], { dragTarget });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.segments[0];
+    expect(out.kind).toBe("arc");
+    expect(dist(out.p2, [10, 8])).toBeLessThan(0.3);
+    expect(Number.isFinite(out.bulge)).toBe(true);
   });
 });
 
