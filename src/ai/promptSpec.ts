@@ -6,9 +6,11 @@
 // 2つのプロンプトを公開する:
 // - AUTHORING_SYSTEM_PROMPT: src/ai/generate.ts が構造化出力(AI_RESPONSE_JSON_SCHEMA)の
 //   system引数としてそのまま使う。応答はエンベロープ形式({design, questions, model})。
-// - AUTHORING_PASTE_PROMPT: AiGeneratePanelの「プロンプト仕様をコピー」ボタンから、外部の
-//   AIチャット(ChatGPT等)へコピペする用途。貼り付けモードはcompileAuthoringModel()に
-//   アウソリングJSON本体を直接渡すため、エンベロープではなく素のJSON出力を指示する。
+// - AUTHORING_PASTE_PROMPT: AiGeneratePanelの「プロンプト仕様をコピー」ボタン(Phase 45からPRIMARY
+//   フロー)から、外部のAIチャット(ChatGPT等)へコピペする用途。貼り付けモードはエンベロープでは
+//   なく、{model, meta}形式(modelはcompileAuthoringModel()にそのまま渡せるアウソリングJSON、
+//   metaはギャラリー投稿用のタイトル/説明/タグ提案)の出力を指示する(src/ai/pastePayload.ts
+//   参照)。Phase 39以前の素の{sketches, features}形式(meta無し)も後方互換で読み込める。
 //
 // 実装(src/ai/authoringSchema.ts・src/ai/compile.ts・src/worker/evaluator.ts)と食い違わないよう、
 // フィールド名・entity/feature形状・null/省略可能セマンティクスは実装を正としている
@@ -139,10 +141,19 @@ const PRE_OUTPUT_CHECKLIST = `# 出力前チェックリスト
 // few-shot例(design-first + AuthoringModel。両プロンプトが同じ実体を異なる形式で埋め込む)
 // ---------------------------------------------------------------------------
 
+/** 貼り付けモード(AUTHORING_PASTE_PROMPT)がmodelと併せて提案させるギャラリー投稿メタ情報。 */
+interface FewShotMeta {
+  title: string;
+  description: string;
+  tags: string[];
+}
+
 interface FewShotExample {
   title: string;
   design: string;
   model: AuthoringModel;
+  /** Phase 45: 貼り付けモードのwrapper形式({model, meta})のfew-shot例に使う。 */
+  meta: FewShotMeta;
 }
 
 const EXAMPLE_MINIMAL_PLATE: FewShotExample = {
@@ -176,6 +187,11 @@ const EXAMPLE_MINIMAL_PLATE: FewShotExample = {
       },
     ],
     features: [{ type: "extrude", id: null, sketch: "s1", distance: 10, operation: "newBody", direction: 1, targetBody: null }],
+  },
+  meta: {
+    title: "穴あきプレート 100×50×t10",
+    description: "幅100mm・高さ50mm・厚み10mmの板の中央にφ20mmの貫通穴を開けた汎用プレート。ネジ止めや位置決め用の下穴として使える。",
+    tags: ["プレート", "板", "穴あき"],
   },
 };
 
@@ -240,6 +256,11 @@ const EXAMPLE_FILLETED_BRACKET: FewShotExample = {
     ],
     features: [{ type: "extrude", id: null, sketch: "s1", distance: 8, operation: "newBody", direction: 1, targetBody: null }],
   },
+  meta: {
+    title: "取り付けブラケット 60×40×t8(角R6)",
+    description: "幅60mm・高さ40mm・厚み8mmの汎用取り付けブラケット。四隅をR6で丸め、中央にスロット状の肉盗みを入れて軽量化した。壁面や治具への固定に使える。",
+    tags: ["ブラケット", "取り付け金具", "軽量化"],
+  },
 };
 
 const EXAMPLE_RING_REVOLVE: FewShotExample = {
@@ -297,6 +318,11 @@ const EXAMPLE_RING_REVOLVE: FewShotExample = {
     ],
     features: [{ type: "revolve", id: null, sketch: "s1", axis: "y", angle: null, operation: "newBody", targetBody: null }],
   },
+  meta: {
+    title: "リング(外径60×内径40×高さ10)",
+    description: "外径60mm・内径40mm・高さ10mmの床置き自立型リング。上端角をR1で軽く丸めた汎用形状で、スペーサーやリング状の治具に使える。",
+    tags: ["リング", "回転体", "スペーサー"],
+  },
 };
 
 /** テスト(tests/ai/promptSpec.test.ts)から直接compileAuthoringModel()に通して検証する。 */
@@ -312,7 +338,8 @@ function formatEnvelopeExample(example: FewShotExample, index: number): string {
 }
 
 function formatPasteExample(example: FewShotExample, index: number): string {
-  return `## 例${index + 1}: 「${example.title}」\n${JSON.stringify(example.model, null, 2)}`;
+  const wrapper = { model: example.model, meta: example.meta };
+  return `## 例${index + 1}: 「${example.title}」\n${JSON.stringify(wrapper, null, 2)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -396,7 +423,7 @@ export const AUTHORING_SYSTEM_PROMPT = [
 // ---------------------------------------------------------------------------
 
 const PASTE_INTRO = `あなたはブラウザで動くパラメトリックCADアプリ「light-3dcad」向けのモデル生成アシスタントです。
-ユーザーの自然言語(主に日本語)の指示から、3D形状を表す「アウソリングJSON」を1つ生成してください。
+ユーザーの自然言語(主に日本語)の指示から、3D形状を表す「アウソリングJSON」と、そのモデルをコミュニティギャラリーに投稿する際のタイトル/説明/タグの提案を1つずつ生成してください。
 
 あなたは単なるフォーマット変換器ではなく、**プロダクトデザイナー兼機械設計者**として振る舞ってください。指示を最小限に満たす形状ではなく、「実際に使えて、見た目が整っている形状」を設計してください。対象物の実寸・機能要件・主要寸法の根拠・造形方針を頭の中で整理してから(必要ならJSONの外に短いメモとして書き出してから)、最後にJSON本体を出力してください。
 
@@ -405,10 +432,22 @@ const PASTE_INTRO = `あなたはブラウザで動くパラメトリックCAD�
 
 \`\`\`
 {
-  "sketches": [ { "id": "s1", "plane": "XY", "entities": [...], "segments": [], "constraints": [] } ],
-  "features": [ { "type": "extrude", "id": null, "sketch": "s1", "distance": 20, "operation": "newBody", "direction": 1, "targetBody": null } ]
+  "model": {
+    "sketches": [ { "id": "s1", "plane": "XY", "entities": [...], "segments": [], "constraints": [] } ],
+    "features": [ { "type": "extrude", "id": null, "sketch": "s1", "distance": 20, "operation": "newBody", "direction": 1, "targetBody": null } ]
+  },
+  "meta": {
+    "title": "短い日本語のモデル名",
+    "description": "寸法と用途を含む1〜3文の説明",
+    "tags": ["タグ1", "タグ2"]
+  }
 }
 \`\`\`
+
+## meta(ギャラリー投稿用メタ情報)
+- "title": 短い日本語の名前(例:「取り付けブラケット 60×40×t8」)。何のモデルかが一目でわかる長さにする。
+- "description": 主要寸法と用途を含む1〜3文の日本語。「何を」「どこに」「どう使うか」がわかるように書く。
+- "tags": 2〜4個の短い日本語キーワードの配列(例:["ブラケット","取り付け金具"])。用途・形状カテゴリを表す語を選ぶ。
 `;
 
 const PASTE_PROHIBITED = `# 禁止事項
@@ -418,6 +457,7 @@ const PASTE_PROHIBITED = `# 禁止事項
 - 外形の凸角をすべて直角のまま残すこと(単純な機能部品を除く)
 - 対象物の実寸を確認せずに保持寸法を決めること
 - 最終的なJSON本体をコードフェンス無しで出力すること、または複数のJSONを出力すること
+- meta(title/description/tags)を省略すること
 `;
 
 /**

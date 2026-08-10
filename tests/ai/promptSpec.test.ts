@@ -40,12 +40,27 @@ describe("promptSpec: プロンプト文字列の整合性", () => {
     }
   });
 
-  it("AUTHORING_PASTE_PROMPT(貼り付け版)はエンベロープではなく素のsketches/featuresのみを要求する", () => {
+  it("AUTHORING_PASTE_PROMPT(貼り付け版)はエンベロープではなく{model, meta}形式を要求する", () => {
     expect(AUTHORING_PASTE_PROMPT).not.toContain('"questions"');
+    expect(AUTHORING_PASTE_PROMPT).toContain('"model"');
     expect(AUTHORING_PASTE_PROMPT).toContain('"sketches"');
     expect(AUTHORING_PASTE_PROMPT).toContain('"features"');
+    expect(AUTHORING_PASTE_PROMPT).toContain('"meta"');
+    expect(AUTHORING_PASTE_PROMPT).toContain('"title"');
+    expect(AUTHORING_PASTE_PROMPT).toContain('"description"');
+    expect(AUTHORING_PASTE_PROMPT).toContain('"tags"');
     for (const example of FEW_SHOT_EXAMPLES) {
-      expect(AUTHORING_PASTE_PROMPT).toContain(JSON.stringify(example.model, null, 2));
+      const wrapper = { model: example.model, meta: example.meta };
+      expect(AUTHORING_PASTE_PROMPT).toContain(JSON.stringify(wrapper, null, 2));
+    }
+  });
+
+  it("AUTHORING_PASTE_PROMPTのfew-shot例のmetaは、compileAuthoringModel()に渡さずとも読み取れる形(title/description/tags)を持つ", () => {
+    for (const example of FEW_SHOT_EXAMPLES) {
+      expect(example.meta.title.length).toBeGreaterThan(0);
+      expect(example.meta.description.length).toBeGreaterThan(0);
+      expect(example.meta.tags.length).toBeGreaterThanOrEqual(2);
+      expect(example.meta.tags.length).toBeLessThanOrEqual(4);
     }
   });
 
