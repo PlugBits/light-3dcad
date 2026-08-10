@@ -22,19 +22,42 @@
 // 全primitiveを再構築する(スパイクの計測で複合ケースでも1ms未満、毎フレームのドラッグでも
 // 十分高速なことを確認済み。sketch_param経由の差分更新は複雑さに見合わないため採用しない)。
 import { Algorithm, GcsWrapper, make_gcs_wrapper, type SketchPrimitive } from "@salusoft89/planegcs";
-import type { EntityRef, LineRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
+import type { ArcRef, EntityRef, LineRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
+import { arcGeometryFromBulge } from "./bulge";
 import { constraintDisplayText } from "./displayNames";
 import { rectangleEdgePointsAtCenter, resolveLineRefPoints } from "./entityEdges";
 import type { DragTarget, Point2, SolveOptions, SolveResult } from "./solver";
 
 /** solver.tsのROUND_GRIDと同じ意図(丸め誤差の累積ドリフト対策)。値も同じにして挙動を揃える。 */
 const ROUND_GRID = 1e-6;
+/**
+ * 円弧のbulge(Phase 42b、arcBulgeFromGcs参照)専用の丸め粒度。ROUND_GRID(1e-6、mm座標向け)を
+ * そのまま流用すると、実機で以下の破綻が確認された: 直線に厳密接線(tangent_la)なfixArc円弧を
+ * トリム→無関係な矩形を追加→押し出し、という何気ない操作で評価が失敗する(replicad/OCCT側の
+ * 例外、エラーメッセージはポインタらしき数値のみで非可読)。原因はbulgeの1e-6丸めが生む
+ * 約4e-7の誤差で、円弧が直線とちょうど接する(交点1つ)幾何がわずかに交差(交点2つ)または
+ * 非接触に転じ、regions.ts/replicadの閉ループ構築が退化した極小面積の領域に躓くため
+ * (mm単位の座標では1e-6の誤差は無害だが、bulge=tan(挟角/4)は無次元の三角関数値であり、
+ * 同じ絶対誤差でも接触判定のような境界鋭敏な条件を崩しうる)。PlaneGCSの収束閾値
+ * (set_convergence_threshold、1e-10)に対して十分な余裕を保ちつつ実機の破綻閾値
+ * (1e-6は壊れる/1e-7は壊れない、実機確認)より2桁以上小さくして安全側に倒す。
+ */
+const BULGE_ROUND_GRID = 1e-9;
 /** solver.tsのEARLY_RETURN_TOLERANCEと同じ意図・同じ値(既に満たされているなら入力をそのまま返す)。 */
 const EARLY_RETURN_TOLERANCE = 1e-7;
 /** ドラッグ中(temporary拘束あり)の緩和後の最大反復回数(スパイクの06-drag-tuning.mjsで確認)。 */
 const DRAG_MAX_ITERATIONS = 1000;
 
 type MovableEntity = Extract<SketchEntity, { kind: "circle" | "rectangle" | "polygon" | "regularPolygon" | "slot" }>;
+
+/**
+ * segmentがPlaneGCSのネイティブarcプリミティとして構築されるべき「本物の円弧」かどうか
+ * (Phase 42b)。kind:"arc"でもbulgeが0/null/undefinedのものは他の箇所[bulgeArcPoints等]と
+ * 同じ慣習でただの直線として扱い、chordLineのみを作る(arcプリミティは作らない)。
+ */
+function isArcSegment(seg: SketchSegment): boolean {
+  return seg.kind === "arc" && !!seg.bulge;
+}
 
 function isMovableEntity(entity: SketchEntity): entity is MovableEntity {
   return (
@@ -49,6 +72,10 @@ function isMovableEntity(entity: SketchEntity): entity is MovableEntity {
 // ------- id命名規則(GCSのidは全primitive[点・線・拘束]を通じてユニークな文字列) -------
 const pointId = (segmentId: string, end: "p1" | "p2") => `SP:${segmentId}:${end}`;
 const chordLineId = (segmentId: string) => `SL:${segmentId}`;
+/** 円弧セグメント(kind:"arc"かつbulgeあり)のネイティブGCS arcプリミティのid(Phase 42b)。 */
+const arcId = (segmentId: string) => `SA:${segmentId}`;
+/** 円弧セグメントの中心点(GCSの"point"プリミティ、arcのc_idが参照する。Phase 42b)。 */
+const arcCenterPointId = (segmentId: string) => `AC:${segmentId}`;
 const repPointId = (entityId: string) => `EP:${entityId}`;
 const cornerPointId = (entityId: string, i: number) => `EC:${entityId}:${i}`;
 const edgeLineId = (entityId: string, edgeIndex: number) => `EE:${entityId}:${edgeIndex}`;
@@ -124,6 +151,8 @@ interface BuildContext {
   movableEntities: MovableEntity[];
   points: Map<string, GcsPointPrim>;
   lines: Map<string, SketchPrimitive>;
+  /** kind:"arc"かつbulgeありのセグメントごとのネイティブGCS arcプリミティ(Phase 42b)。 */
+  arcs: Map<string, SketchPrimitive>;
   constraints: SketchPrimitive[];
 }
 
@@ -268,6 +297,25 @@ function pointRefId(ref: PointRef): string {
   return pointId(ref.segmentId, ref.end);
 }
 
+/** EntityRef|ArcRef(concentric.a/b・tangent.entity、Phase 42b)の判別。"entityId"の有無で判定する。 */
+function isArcRef(ref: EntityRef | ArcRef): ref is ArcRef {
+  return "segmentId" in ref;
+}
+
+/** concentric.a/b・tangent.entity(EntityRef|ArcRef)の「中心点」のGCS点id。存在チェックは呼び出し側の責務。 */
+function curveRepId(ref: EntityRef | ArcRef): string {
+  return isArcRef(ref) ? arcCenterPointId(ref.segmentId) : repPointId(ref.entityId);
+}
+
+/** refが指す先が実在するか(circleエンティティ、またはbulgeありのネイティブarcとして構築済みの円弧セグメント)。 */
+function curveRefExists(ctx: BuildContext, ref: EntityRef | ArcRef): boolean {
+  if (isArcRef(ref)) {
+    const seg = ctx.segmentsById.get(ref.segmentId);
+    return !!seg && isArcSegment(seg) && ctx.arcs.has(arcId(ref.segmentId));
+  }
+  return ctx.entitiesById.has(ref.entityId);
+}
+
 /** distance/distanceEntityEntity/distancePointOriginのaxis指定(signed省略時)の符号を、現在の座標から決める。 */
 function signOf(delta: number): 1 | -1 {
   return delta >= 0 ? 1 : -1;
@@ -303,14 +351,17 @@ function buildContext(
     movableEntities,
     points: new Map(),
     lines: new Map(),
+    arcs: new Map(),
     constraints: [],
   };
 
   const fixedPointIds = new Set<string>();
   const fixedEntityIds = new Set<string>();
+  const fixedArcSegmentIds = new Set<string>();
   for (const c of constraints) {
     if (c.kind === "fix") fixedPointIds.add(pointRefId(c.point));
     if (c.kind === "fixEntity") fixedEntityIds.add(c.entity.entityId);
+    if (c.kind === "fixArc") fixedArcSegmentIds.add(c.segmentId);
   }
 
   const addRegularizer = (pointGcsId: string, value: Point2) => {
@@ -331,6 +382,23 @@ function buildContext(
     } as SketchPrimitive);
   };
 
+  /**
+   * スカラー値の正則化(Phase 42b、円弧のradius/start_angle/end_angleはGCSの"point"ではなく
+   * arcプリミティ自身が持つスカラーpropのため、addRegularizer[coordinate_x/y、p_id経由]は使えない。
+   * "equal"拘束(param1=対象のObjectParam、param2=現在値の数値リテラル)を低scaleで積むことで
+   * 同じ効果[劣拘束方向を現在値に誘導]を得る。
+   */
+  const addScalarRegularizer = (idSuffix: string, oid: string, prop: "radius" | "start_angle" | "end_angle", value: number) => {
+    if (!regularize) return;
+    ctx.constraints.push({
+      id: gcsConstraintId(`reg:${idSuffix}`, 0),
+      type: "equal",
+      param1: { o_id: oid, prop },
+      param2: value,
+      scale: REGULARIZATION_SCALE,
+    } as SketchPrimitive);
+  };
+
   for (const seg of segments) {
     const p1Fixed = fixedPointIds.has(pointId(seg.id, "p1"));
     const p2Fixed = fixedPointIds.has(pointId(seg.id, "p2"));
@@ -339,6 +407,37 @@ function buildContext(
     addLine(ctx, chordLineId(seg.id), pointId(seg.id, "p1"), pointId(seg.id, "p2"));
     if (!p1Fixed) addRegularizer(pointId(seg.id, "p1"), seg.p1);
     if (!p2Fixed) addRegularizer(pointId(seg.id, "p2"), seg.p2);
+
+    // ネイティブGCS arcプリミティ(Phase 42b、円弧の一級化)。中心点(GCSの"point")+radius/
+    // start_angle/end_angle(arcプリミティ自身のスカラーprop)を持ち、arc_rules拘束で
+    // start_id/end_id(=このセグメントのp1/p2そのもの)の座標と整合させる。bulgeが0/null/
+    // undefinedのkind:"arc"は他の箇所と同じ慣習で直線として扱い、arcプリミティは作らない。
+    if (isArcSegment(seg) && seg.bulge) {
+      const geo = arcGeometryFromBulge(seg.p1, seg.p2, seg.bulge);
+      if (geo) {
+        const centerFixed = fixedArcSegmentIds.has(seg.id);
+        const cid = arcCenterPointId(seg.id);
+        addPoint(ctx, cid, geo.center[0], geo.center[1], centerFixed);
+        if (!centerFixed) addRegularizer(cid, geo.center);
+        const aid = arcId(seg.id);
+        ctx.arcs.set(aid, {
+          id: aid,
+          type: "arc",
+          c_id: cid,
+          radius: geo.radius,
+          start_angle: geo.startAngle,
+          end_angle: geo.startAngle + geo.sweep,
+          start_id: pointId(seg.id, "p1"),
+          end_id: pointId(seg.id, "p2"),
+        } as SketchPrimitive);
+        ctx.constraints.push({ id: gcsConstraintId(`arcrules:${seg.id}`), type: "arc_rules", a_id: aid } as SketchPrimitive);
+        if (!centerFixed) {
+          addScalarRegularizer(`${seg.id}#r`, aid, "radius", geo.radius);
+          addScalarRegularizer(`${seg.id}#sa`, aid, "start_angle", geo.startAngle);
+          addScalarRegularizer(`${seg.id}#ea`, aid, "end_angle", geo.startAngle + geo.sweep);
+        }
+      }
+    }
   }
 
   for (const e of movableEntities) {
@@ -416,21 +515,27 @@ function addConstraint(ctx: BuildContext, c: SketchConstraint) {
     }
     case "radius": {
       const segment = ctx.segmentsById.get(c.segmentId);
-      if (!segment || segment.kind !== "arc" || !segment.bulge) return;
-      const theta = 4 * Math.atan(segment.bulge);
-      const chord = 2 * c.value * Math.abs(Math.sin(theta / 2));
-      ctx.constraints.push({
-        id: gcsConstraintId(c.id),
-        type: "p2p_distance",
-        p1_id: pointId(c.segmentId, "p1"),
-        p2_id: pointId(c.segmentId, "p2"),
-        distance: chord,
-      });
+      if (!segment || !isArcSegment(segment) || !ctx.arcs.has(arcId(c.segmentId))) return;
+      // Phase 42b: 円弧はネイティブGCS arcプリミティになったため、半径変数(radius prop)を
+      // arc_radiusで直接拘束する(以前のrigid-bulge時代は弦長[p2p_distance]へ変換していたが、
+      // 今は端点が円周上を自由に滑れるため弦長は不定であり、半径そのものを拘束する必要がある)。
+      ctx.constraints.push({ id: gcsConstraintId(c.id), type: "arc_radius", a_id: arcId(c.segmentId), radius: c.value } as SketchPrimitive);
       break;
     }
     case "fix":
     case "fixEntity": {
       // 値を持たない: 該当点をfixed:trueで作ることで表現済み(buildContext参照)。
+      break;
+    }
+    case "fixArc": {
+      // 値を持たない: 中心点はbuildContextでfixed:trueとして作成済み。半径はここで
+      // 現在の入力形状(p1・p2・bulge)から都度計算した値をarc_radiusで固定する(fix/fixEntityと
+      // 同じく「拘束追加時点の現在位置」を都度読む設計、値を拘束自体には持たない)。
+      const segment = ctx.segmentsById.get(c.segmentId);
+      if (!segment || !isArcSegment(segment) || !segment.bulge || !ctx.arcs.has(arcId(c.segmentId))) return;
+      const geo = arcGeometryFromBulge(segment.p1, segment.p2, segment.bulge);
+      if (!geo) return;
+      ctx.constraints.push({ id: gcsConstraintId(c.id), type: "arc_radius", a_id: arcId(c.segmentId), radius: geo.radius } as SketchPrimitive);
       break;
     }
     case "distanceEntityOrigin": {
@@ -518,11 +623,27 @@ function addConstraint(ctx: BuildContext, c: SketchConstraint) {
       break;
     }
     case "concentric": {
-      if (!ctx.entitiesById.has(c.a.entityId) || !ctx.entitiesById.has(c.b.entityId)) return;
-      ctx.constraints.push({ id: gcsConstraintId(c.id), type: "p2p_coincident", p1_id: entityRepId(c.a), p2_id: entityRepId(c.b) });
+      // Phase 42b: a/bはcircleエンティティ(EntityRef)に加え円弧セグメント(ArcRef)も指定できる。
+      // どちらも「中心」の一致(p2p_coincident)として表現する(円弧側はネイティブarcの中心点)。
+      if (!curveRefExists(ctx, c.a) || !curveRefExists(ctx, c.b)) return;
+      ctx.constraints.push({ id: gcsConstraintId(c.id), type: "p2p_coincident", p1_id: curveRepId(c.a), p2_id: curveRepId(c.b) });
       break;
     }
     case "tangent": {
+      if (isArcRef(c.entity)) {
+        // Phase 42b: 円弧(ArcRef)の接線は「直線への接線」のみ対応(UI仕様、validation.tsも同様に
+        // 制限)。ネイティブarcプリミティ同士の接触判定であるtangent_laをそのまま使う
+        // (中心↔直線の距離=半径、という手組みの式は不要。半径が実変数のため式で書くより素直)。
+        if (!curveRefExists(ctx, c.entity) || c.target.kind !== "segment") return;
+        if (!ctx.segmentsById.has(c.target.segmentId)) return;
+        ctx.constraints.push({
+          id: gcsConstraintId(c.id),
+          type: "tangent_la",
+          l_id: chordLineId(c.target.segmentId),
+          a_id: arcId(c.entity.segmentId),
+        } as SketchPrimitive);
+        break;
+      }
       const entity = ctx.entitiesById.get(c.entity.entityId);
       if (!entity || entity.kind !== "circle") return;
       if (c.target.kind === "segment") {
@@ -639,8 +760,29 @@ function overrideInitCoords(ctx: BuildContext, coords: Map<string, Point2>) {
   }
 }
 
-function segmentsFromGcs(w: GcsWrapper, segments: readonly SketchSegment[]): SketchSegment[] {
-  return segments.map((seg) => ({ ...seg, p1: readPoint(w, pointId(seg.id, "p1")), p2: readPoint(w, pointId(seg.id, "p2")) }));
+/**
+ * 解いた後のネイティブGCS arc(Phase 42b)からbulgeを逆算する。start_angle/end_angleは
+ * 「実数のまま」(mod 2πに正規化せず)差を取る: buildContext()が毎回、直前に書き戻したbulgeから
+ * 導出したstartAngle/startAngle+sweepを初期値としてseedし、solve()は連続的な勾配法(LM/DogLeg)で
+ * その近傍を動くだけなので、実数差(=sweep、向きの符号を含む)がそのまま維持される
+ * (2πの跳躍は起きない、というのがPlaneGCSがNewton系ソルバである以上の設計上の前提。
+ * bulge.tsのarcGeometryFromBulge()と同じ符号規約: 正=反時計回り)。
+ */
+function arcBulgeFromGcs(w: GcsWrapper, segmentId: string): number {
+  const arc = w.sketch_index.get_sketch_arc(arcId(segmentId));
+  const sweep = arc.end_angle - arc.start_angle;
+  return Math.round(Math.tan(sweep / 4) / BULGE_ROUND_GRID) * BULGE_ROUND_GRID;
+}
+
+function segmentsFromGcs(w: GcsWrapper, segments: readonly SketchSegment[], ctx: BuildContext): SketchSegment[] {
+  return segments.map((seg) => {
+    const p1 = readPoint(w, pointId(seg.id, "p1"));
+    const p2 = readPoint(w, pointId(seg.id, "p2"));
+    if (isArcSegment(seg) && ctx.arcs.has(arcId(seg.id))) {
+      return { ...seg, p1, p2, bulge: arcBulgeFromGcs(w, seg.id) };
+    }
+    return { ...seg, p1, p2 };
+  });
 }
 
 function entitiesFromGcs(w: GcsWrapper, entities: readonly SketchEntity[]): SketchEntity[] {
@@ -677,6 +819,13 @@ function maxCoordDelta(
     const a = origSegments[i];
     const b = newSegments[i];
     m = Math.max(m, Math.abs(a.p1[0] - b.p1[0]), Math.abs(a.p1[1] - b.p1[1]), Math.abs(a.p2[0] - b.p2[0]), Math.abs(a.p2[1] - b.p2[1]));
+    // Phase 42b: 円弧は端点(p1・p2)が動かなくても半径/掃引角(=bulge)だけが変わりうる
+    // (例: 端点が別の拘束[coincident等]で既に固定されている状態でradius拘束の値だけ変える)。
+    // bulgeの変化を見逃すと、実際には形状が変わったのに「入力のまま」として早期リターンし、
+    // 新しいbulgeが反映されない(gcsAdapter.tsのEARLY_RETURN_TOLERANCE参照)。
+    if (isArcSegment(a) || isArcSegment(b)) {
+      m = Math.max(m, Math.abs((a.bulge ?? 0) - (b.bulge ?? 0)));
+    }
   }
   for (let i = 0; i < origEntities.length; i += 1) {
     const a = origEntities[i];
@@ -797,6 +946,25 @@ function repPointConcrete(entity: SketchEntity | undefined): Point2 {
   return [0, 0];
 }
 
+/**
+ * concentric.a/b・tangent.entity(EntityRef|ArcRef、Phase 42b)の「中心」を、解いた後の具体的な
+ * 座標から求める(残差再計算専用)。円弧セグメントはarcGeometryFromBulge()で中心を導出する。
+ * 参照先が見つからない場合はnull。
+ */
+function curveCenterConcrete(
+  ref: EntityRef | ArcRef,
+  entitiesById: Map<string, SketchEntity>,
+  segmentsById: Map<string, SketchSegment>,
+): Point2 | null {
+  if ("segmentId" in ref) {
+    const seg = segmentsById.get(ref.segmentId);
+    if (!seg || !isArcSegment(seg) || !seg.bulge) return null;
+    return arcGeometryFromBulge(seg.p1, seg.p2, seg.bulge)?.center ?? null;
+  }
+  const entity = entitiesById.get(ref.entityId);
+  return entity ? repPointConcrete(entity) : null;
+}
+
 /** 1件の拘束について、解いた後の座標での残差(絶対値、mmまたは度)を計算する。参照先が無ければ0。 */
 function evaluateResidual(
   c: SketchConstraint,
@@ -835,11 +1003,15 @@ function evaluateResidual(
     }
     case "radius": {
       const s = segmentsById.get(c.segmentId);
-      if (!s || s.kind !== "arc" || !s.bulge) return 0;
-      const theta = 4 * Math.atan(s.bulge);
-      const chord = 2 * c.value * Math.abs(Math.sin(theta / 2));
-      return Math.abs(ptDist(s.p1, s.p2) - chord);
+      if (!s || !isArcSegment(s) || !s.bulge) return 0;
+      // Phase 42b: 弦長ではなく実際の半径(中心・半径はarcGeometryFromBulgeで解いた後のp1・p2・
+      // bulgeから逆算)をvalueと直接比較する(ネイティブarcのarc_radiusと同じ量)。
+      const geo = arcGeometryFromBulge(s.p1, s.p2, s.bulge);
+      if (!geo) return 0;
+      return Math.abs(geo.radius - c.value);
     }
+    case "fixArc":
+      return 0;
     case "fix":
     case "fixEntity":
       return 0;
@@ -904,12 +1076,20 @@ function evaluateResidual(
       return Math.abs((da[0] * db[0] + da[1] * db[1]) / (la * lb));
     }
     case "concentric": {
-      const a = entitiesById.get(c.a.entityId);
-      const b = entitiesById.get(c.b.entityId);
+      const a = curveCenterConcrete(c.a, entitiesById, segmentsById);
+      const b = curveCenterConcrete(c.b, entitiesById, segmentsById);
       if (!a || !b) return 0;
-      return ptDist(repPointConcrete(a), repPointConcrete(b));
+      return ptDist(a, b);
     }
     case "tangent": {
+      if ("segmentId" in c.entity) {
+        const s = segmentsById.get(c.entity.segmentId);
+        if (!s || !isArcSegment(s) || !s.bulge || c.target.kind !== "segment") return 0;
+        const geo = arcGeometryFromBulge(s.p1, s.p2, s.bulge);
+        const target = segmentsById.get(c.target.segmentId);
+        if (!geo || !target) return 0;
+        return Math.abs(Math.abs(perpDistanceSigned(geo.center, target.p1, target.p2)) - geo.radius);
+      }
       const e = entitiesById.get(c.entity.entityId);
       if (!e || e.kind !== "circle") return 0;
       if (c.target.kind === "segment") {
@@ -983,7 +1163,7 @@ export function solveSketchGcs(
     // toBeCloseTo(0,3)相当のUIの表示精度に影響しうる)。仕上げ段階の精度を上げるため厳しめに設定する
     // (性能への影響は無視できる、スパイクの計測通りsolve自体は依然サブミリ秒)。
     w.set_convergence_threshold(1e-10);
-    const primitives: SketchPrimitive[] = [...ctx.points.values(), ...ctx.lines.values(), ...ctx.constraints];
+    const primitives: SketchPrimitive[] = [...ctx.points.values(), ...ctx.lines.values(), ...ctx.arcs.values(), ...ctx.constraints];
     w.push_primitives_and_params(primitives);
     w.solve(algorithm);
     w.apply_solution();
@@ -1003,7 +1183,7 @@ export function solveSketchGcs(
     const ctx = buildContext(segments, constraints, entities, false);
     addDragConstraints(ctx, dragTarget);
     runSolve(ctx, DRAG_MAX_ITERATIONS, Algorithm.DogLeg);
-    solvedSegments = segmentsFromGcs(w, segments);
+    solvedSegments = segmentsFromGcs(w, segments, ctx);
     solvedEntities = entitiesFromGcs(w, entities);
   } else {
     // 2段階solve(旧ソルバのwarmup+finishingと同じ考え方): ①正則化(低scaleのcoordinate_x/y)
@@ -1034,7 +1214,7 @@ export function solveSketchGcs(
       const finishCtx = buildContext(segments, constraints, entities, false);
       overrideInitCoords(finishCtx, warmCoords);
       runSolve(finishCtx, defaultMaxIterations, algorithm);
-      return { segments: segmentsFromGcs(w, segments), entities: entitiesFromGcs(w, entities) };
+      return { segments: segmentsFromGcs(w, segments, finishCtx), entities: entitiesFromGcs(w, entities) };
     };
     const worstResidualOf = (segs: readonly SketchSegment[], ents: readonly SketchEntity[]): number => {
       const segsById = new Map(segs.map((s) => [s.id, s]));
@@ -1126,7 +1306,7 @@ export function getSketchDiagnostics(
   const ctx = buildContext(segments, constraints, entities);
   w.clear_data();
   w.set_max_iterations(defaultMaxIterations);
-  const primitives: SketchPrimitive[] = [...ctx.points.values(), ...ctx.lines.values(), ...ctx.constraints];
+  const primitives: SketchPrimitive[] = [...ctx.points.values(), ...ctx.lines.values(), ...ctx.arcs.values(), ...ctx.constraints];
   w.push_primitives_and_params(primitives);
   w.solve(Algorithm.LevenbergMarquardt);
   w.apply_solution();

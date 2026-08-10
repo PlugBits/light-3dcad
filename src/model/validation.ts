@@ -1,4 +1,4 @@
-import type { CadDocument, Feature, FeatureId, PointRef, PolygonCorner, SketchConstraint, SketchEntity, SketchSegment } from "./types";
+import type { ArcRef, CadDocument, EntityRef, Feature, FeatureId, PointRef, PolygonCorner, SketchConstraint, SketchEntity, SketchSegment } from "./types";
 
 /** ドキュメント/フィーチャーのバリデーションエラー。featureId が特定できる場合のみ付与する。 */
 export interface ValidationError {
@@ -185,6 +185,31 @@ function findSegmentById(segments: readonly SketchSegment[], id: string): Sketch
 }
 
 /**
+ * concentric.a/b・tangent.entity(Phase 42bでEntityRef|ArcRefに拡張)が指す先が実在するか検証する。
+ * EntityRefはcircleエンティティ、ArcRefは円弧セグメント(kind:"arc"かつbulgeあり)であることを要求する。
+ * 見つからない/種類が違う場合のみエラーを返す(見つかった場合は空配列)。
+ */
+function validateCurveRef(
+  ref: EntityRef | ArcRef,
+  segments: readonly SketchSegment[],
+  entities: readonly SketchEntity[],
+  constraintId: string,
+  featureId: FeatureId,
+): ValidationError[] {
+  if ("segmentId" in ref) {
+    const seg = findSegmentById(segments, ref.segmentId);
+    if (!seg || seg.kind !== "arc" || !seg.bulge) {
+      return [{ featureId, message: `拘束(${constraintId})の参照先の円弧(${ref.segmentId})が見つかりません` }];
+    }
+    return [];
+  }
+  if (!entities.find((e) => e.id === ref.entityId && e.kind === "circle")) {
+    return [{ featureId, message: `拘束(${constraintId})の参照先の円(${ref.entityId})が見つかりません` }];
+  }
+  return [];
+}
+
+/**
  * extrude/revolveのtargetBodyId(Phase 27a複数ボディ対応)を検証する。指定されていなければ
  * (undefined)何もしない(省略時は「最後に作られたボディ」を自動的に対象にするため、評価時に
  * 常に有効)。指定されている場合は、参照先が「先行する(=このフィーチャーより前に登場する)
@@ -357,6 +382,18 @@ function validateConstraint(
       errors.push(...validatePointRef(constraint.point, segments, constraint.id, "point", featureId));
       break;
     }
+    case "fixArc": {
+      const segment = findSegmentById(segments, constraint.segmentId);
+      if (!segment) {
+        errors.push({
+          featureId,
+          message: `拘束(${constraint.id})の参照先スケッチ要素(${constraint.segmentId})が見つかりません`,
+        });
+      } else if (segment.kind !== "arc" || !segment.bulge) {
+        errors.push({ featureId, message: `拘束(${constraint.id})は円弧にのみ指定できます` });
+      }
+      break;
+    }
     case "perpendicular": {
       const a = findSegmentById(segments, constraint.a);
       const b = findSegmentById(segments, constraint.b);
@@ -411,23 +448,21 @@ function validateConstraint(
       break;
     }
     case "concentric": {
-      if (!entities.find((e) => e.id === constraint.a.entityId && e.kind === "circle")) {
-        errors.push({ featureId, message: `拘束(${constraint.id})の参照先の円(${constraint.a.entityId})が見つかりません` });
-      }
-      if (!entities.find((e) => e.id === constraint.b.entityId && e.kind === "circle")) {
-        errors.push({ featureId, message: `拘束(${constraint.id})の参照先の円(${constraint.b.entityId})が見つかりません` });
-      }
+      errors.push(...validateCurveRef(constraint.a, segments, entities, constraint.id, featureId));
+      errors.push(...validateCurveRef(constraint.b, segments, entities, constraint.id, featureId));
       break;
     }
     case "tangent": {
-      if (!entities.find((e) => e.id === constraint.entity.entityId && e.kind === "circle")) {
-        errors.push({ featureId, message: `拘束(${constraint.id})の参照先の円(${constraint.entity.entityId})が見つかりません` });
-      }
+      errors.push(...validateCurveRef(constraint.entity, segments, entities, constraint.id, featureId));
+      const isArcEntity = "segmentId" in constraint.entity;
       const target = constraint.target;
       if (target.kind === "segment") {
         const seg = findSegmentById(segments, target.segmentId);
         if (!seg) errors.push({ featureId, message: `拘束(${constraint.id})の参照先スケッチ要素(${target.segmentId})が見つかりません` });
         else if (seg.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は線分にのみ指定できます(${target.segmentId})` });
+      } else if (isArcEntity) {
+        // 円弧(ArcRef)は「線分への接線」のみ対応(円↔円の外接/内接は円エンティティ同士のみ)。
+        errors.push({ featureId, message: `拘束(${constraint.id})の円弧は線分への接線のみ指定できます` });
       } else {
         if (!entities.find((e) => e.id === target.entityId && e.kind === "circle")) {
           errors.push({ featureId, message: `拘束(${constraint.id})の参照先の円(${target.entityId})が見つかりません` });

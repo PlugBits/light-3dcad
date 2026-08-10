@@ -7,8 +7,18 @@
 // SketchEditor(セグメント一覧・拘束一覧パネル)・gcsAdapter.ts(拘束矛盾時のトーストメッセージ)の
 // 両方から使う(solver.ts自体はReact非依存の純粋TSでなければならないため、この切り出しは従来通り
 // 維持する)。
-import type { PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
+import type { ArcRef, EntityRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
 import { formatMm } from "./format";
+
+/** EntityRef|ArcRef判別(Phase 42b、concentric/tangentの円弧対応)。"entityId"の有無で判定する。 */
+function isArcRef(ref: EntityRef | ArcRef): ref is ArcRef {
+  return "segmentId" in ref;
+}
+
+/** EntityRef|ArcRefの表示名(circleエンティティ名、または円弧セグメント名)。 */
+function curveRefDisplayName(segments: readonly SketchSegment[] | undefined, entities: readonly SketchEntity[], ref: EntityRef | ArcRef): string {
+  return isArcRef(ref) ? segmentDisplayNameById(segments, ref.segmentId) : entityDisplayNameById(entities, ref.entityId);
+}
 
 /** entityのkindごとの日本語ラベル(SketchEditorの図形カードの見出しと同じ語彙)。 */
 const ENTITY_KIND_LABELS: Record<SketchEntity["kind"], string> = {
@@ -76,6 +86,7 @@ export const CONSTRAINT_KIND_LABELS: Record<SketchConstraint["kind"], string> = 
   distanceEntityLine: "中心↔辺距離",
   distancePointLine: "端点↔辺距離",
   fixEntity: "円の固定",
+  fixArc: "円弧の固定",
   perpendicular: "垂直",
   concentric: "同心",
   tangent: "接線",
@@ -132,6 +143,8 @@ export function describeConstraint(
       return `${pointRefDisplayName(segments, constraint.point)} ↔ 辺 = ${formatMm(constraint.value)}mm`;
     case "fixEntity":
       return entityDisplayNameById(entities, constraint.entity.entityId);
+    case "fixArc":
+      return segmentDisplayNameById(segments, constraint.segmentId);
     case "perpendicular":
       return `${segmentDisplayNameById(segments, constraint.a)} ⊥ ${segmentDisplayNameById(segments, constraint.b)}`;
     case "distanceLineLine":
@@ -143,9 +156,9 @@ export function describeConstraint(
     case "angleLineRefEdge":
       return `${segmentDisplayNameById(segments, constraint.segmentId)} ∠ 参照エッジ = ${formatMm(constraint.value)}°`;
     case "concentric":
-      return `${entityDisplayNameById(entities, constraint.a.entityId)} = ${entityDisplayNameById(entities, constraint.b.entityId)}`;
+      return `${curveRefDisplayName(segments, entities, constraint.a)} = ${curveRefDisplayName(segments, entities, constraint.b)}`;
     case "tangent": {
-      const from = entityDisplayNameById(entities, constraint.entity.entityId);
+      const from = curveRefDisplayName(segments, entities, constraint.entity);
       const to =
         constraint.target.kind === "segment"
           ? segmentDisplayNameById(segments, constraint.target.segmentId)

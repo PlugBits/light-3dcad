@@ -107,6 +107,14 @@ export type PointRef = { segmentId: string; end: "p1" | "p2" };
 export type EntityRef = { entityId: string };
 
 /**
+ * segments内の円弧セグメント(kind:"arc"かつbulgeが非0)を指す参照(Phase 42b、円弧の一級化)。
+ * EntityRef({entityId})と構造的に区別できるよう、あえてsegmentIdのみを持つ最小形にする
+ * (`"entityId" in ref`で判別する既存の慣習[coincidentOriginのpoint等]と同じ設計)。
+ * tangent.entity・concentric.a/bがcircleエンティティと並んで円弧セグメントも指せるようにするために使う。
+ */
+export type ArcRef = { segmentId: string };
+
+/**
  * 円の中心↔辺の距離拘束(distanceEntityLine)が参照する「辺」(Phase 22)。
  * "entityEdge" は rectangle/polygon エンティティの辺(edgeIndex: rectangleは0=下/1=右/2=上/3=左、
  * polygonはpoints[i]→points[i+1 mod n])を指し、エンティティが動けば辺も追従する(常に生値から解決)。
@@ -149,7 +157,13 @@ export type SketchConstraint =
    * (直線距離は常に非負)。
    */
   | { id: string; kind: "distance"; a: PointRef; b: PointRef; value: number; axis?: "direct" | "x" | "y"; signed?: boolean; labelOffset?: [number, number] }
-  /** kind:"arc" のセグメントにのみ指定できる半径拘束(mm)。bulge(挟角)は維持したまま端点間距離を調整して解く。 */
+  /**
+   * kind:"arc" のセグメントにのみ指定できる半径拘束(mm)。Phase 42bで円弧がPlaneGCSの
+   * ネイティブarcプリミティ(中心・半径・start/end角が実変数)になったため、この拘束は
+   * 円弧の実際の半径変数(arc_radius)を直接拘束する。端点は半径変更に応じて円周上を
+   * 自由に滑る(以前の「bulge=挟角を固定して弦長を調整する」rigid-bulge挙動とは異なる、
+   * gcsAdapter.tsのコメント参照)。
+   */
   | { id: string; kind: "radius"; segmentId: string; value: number; labelOffset?: [number, number] }
   /** 点を(拘束追加時点の)現在位置に固定する。値はsolveSketch呼び出し時の入力座標から都度求める(拘束自体には持たない)。 */
   | { id: string; kind: "fix"; point: PointRef }
@@ -236,12 +250,29 @@ export type SketchConstraint =
   | { id: string; kind: "distancePointLine"; point: PointRef; line: LineRef; value: number; labelOffset?: [number, number] }
   /** circleエンティティの中心を(拘束追加時点の)現在位置に固定する(Phase 22、固定トグル)。 */
   | { id: string; kind: "fixEntity"; entity: EntityRef }
+  /**
+   * 円弧セグメント(kind:"arc"かつbulgeあり)の中心座標・半径を(拘束追加時点の)現在の形状から
+   * 固定する(Phase 42b新設)。fix/fixEntityと同じく値は持たず、solveSketch呼び出し時の入力
+   * segments(p1・p2・bulge)から都度center・radiusを計算して固定する。端点(p1・p2)自体は
+   * 固定しない(=固定された円の上を自由に滑れる)点がfixEntity(旧来のrigid-bulge時代に
+   * 「両端点をfixする」ことで円弧全体を凍結していた移行先)との違い。
+   * trim.tsのmigrateEntityConstraintsForReplace()が、トリムでentity(円)が円弧セグメントへ
+   * 置き換わる際、旧fixEntityの意図(「元の円の上に留まる」)を継承するために生成する
+   * (ユーザーがこの拘束を直接選ぶUIは持たない)。
+   */
+  | { id: string; kind: "fixArc"; segmentId: string }
   /** 2本の直線セグメント(kind:"line"のみ対象)が垂直であること(Phase 23)。 */
   | { id: string; kind: "perpendicular"; a: string; b: string }
-  /** 2つのcircleエンティティの中心が一致すること(Phase 23)。 */
-  | { id: string; kind: "concentric"; a: EntityRef; b: EntityRef }
   /**
-   * circleエンティティが直線セグメント、または別のcircleエンティティに接すること(Phase 23)。
+   * 2つの中心が一致すること(Phase 23、Phase 42bでcircleエンティティに加え円弧セグメント
+   * [ArcRef]も指定可能に拡張。円弧側は中心点[GCSネイティブarcの中心変数]の一致として扱う)。
+   */
+  | { id: string; kind: "concentric"; a: EntityRef | ArcRef; b: EntityRef | ArcRef }
+  /**
+   * circleエンティティ、または円弧セグメント(Phase 42bでArcRefを追加)が直線セグメント、
+   * または別のcircleエンティティに接すること(Phase 23)。円弧(ArcRef)を指定できるのは
+   * target.kind:"segment"(直線)の場合のみ(UI上は「接線」は円弧+直線の組み合わせのみを許可し、
+   * 円弧+円/円弧+円弧は「同心」のみを提示する。gcsAdapter.tsのtangent_la実装参照)。
    * target.kind:"segment" は直線セグメント(kind:"line"のみ)への接線(円中心↔直線の距離=半径)。
    * side(実機報告対応、Phase 32)は円の中心が直線のどちら側にあるかを固定する符号(1|-1、
    * lineSideSign()と同じ規約: (中心-p1)×(p2-p1)の外積が負なら-1、それ以外は+1)。拘束作成時点の
@@ -257,7 +288,7 @@ export type SketchConstraint =
   | {
       id: string;
       kind: "tangent";
-      entity: EntityRef;
+      entity: EntityRef | ArcRef;
       target:
         | { kind: "segment"; segmentId: string; side?: 1 | -1 }
         | { kind: "entity"; entityId: string; mode: "external" | "internal" };
