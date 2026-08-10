@@ -622,6 +622,8 @@ aside select {
    ビューポートのフローティングヘッズアップツールバー(Phase 38b)。
    キャンバス中央上部に半透明の丸みを帯びたバーとして重ね、フィット・正対・標準ビューを
    タブに関わらず操作できるようにする(旧: リボン第2行の常設クラスタを移設)。
+   Phase 43: 標準ビューボタンをSolidWorks風の十字(ビューパッド、3x3グリッド)に変更、
+   フィット・正対はその左に縦並びの小さな列として添える。
    ============================================================ */
 .viewport-headsup {
   position: absolute;
@@ -630,23 +632,67 @@ aside select {
   transform: translateX(-50%);
   display: flex;
   align-items: center;
-  gap: 1px;
+  gap: 4px;
   padding: 3px;
   background: rgba(255, 255, 255, 0.82);
   backdrop-filter: blur(6px);
   border: 1px solid var(--cad-border);
   border-radius: var(--cad-radius-lg);
   box-shadow: var(--cad-shadow-md);
-  pointer-events: auto;
+  /* Phase 43: 十字配置化で縦に大きくなったため、透明な余白部分(グリッドの空セル・隙間)は
+     クリックを素通しし、下の寸法ラベル等を隠さないようにする(ボタン自体だけがpointer-eventsを
+     持つ、下の.ribbon-icon-btnルールで再度autoにする)。 */
+  pointer-events: none;
   z-index: 5;
 }
 .viewport-headsup .ribbon-icon-btn {
   border-color: transparent;
   background: transparent;
+  pointer-events: auto;
 }
 .viewport-headsup .ribbon-icon-btn:hover:not(:disabled) {
   background: var(--cad-hover);
   border-color: var(--cad-border);
+}
+
+/* フィット・正対の縦並び小クラスタ(ビューパッドの左に添える、Phase 43)。 */
+.viewport-headsup-side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding-right: 4px;
+  border-right: 1px solid var(--cad-border);
+}
+
+/* 標準ビューのビューパッド(SolidWorks風の十字配置、Phase 43)。
+   正面を中心に上下左右、等角(右上)・背面(左上)を角に置いた3x3グリッド。
+   左下・右下は空セル(視覚的に「十字」を強調するため意図的に空けている)。 */
+.viewport-headsup-pad {
+  display: grid;
+  grid-template-columns: repeat(3, 32px);
+  grid-template-rows: repeat(3, 32px);
+  grid-template-areas:
+    "back top iso"
+    "left front right"
+    ".    bottom .";
+  gap: 2px;
+}
+.viewport-headsup-pad .ribbon-icon-btn {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+}
+.viewport-pad-btn-back { grid-area: back; }
+.viewport-pad-btn-top { grid-area: top; }
+.viewport-pad-btn-iso { grid-area: iso; }
+.viewport-pad-btn-left { grid-area: left; }
+.viewport-pad-btn-front { grid-area: front; }
+.viewport-pad-btn-right { grid-area: right; }
+.viewport-pad-btn-bottom { grid-area: bottom; }
+/* 中心(正面)ボタンは目立たせるため、常時わずかに縁取りを付ける。 */
+.viewport-pad-btn-front {
+  border-color: var(--cad-border) !important;
 }
 
 @keyframes cad-spin {

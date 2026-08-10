@@ -448,8 +448,11 @@ test("④実機報告(Phase 42c): 接線拘束を解いた直後に接点をま�
   await page.getByTestId("btn-draw-segment").click();
   await drawSingleSegment(page, [2, -15], [29, -7]);
   await expect(page.getByTestId("btn-draw-segment")).toHaveText("線分");
+  // y座標は元々[2,15]-[29,4]だったが、正対ビューでのこの画面位置がPhase 43のビューパッド
+  // (フローティングヘッズアップの十字配置、画面上部中央)と重なりクリックを奪われるため、
+  // 同じ傾き(dy/dx)のまま4mm下へ平行移動した(接線・トリムの数学的検証内容には影響しない)。
   await page.getByTestId("btn-draw-segment").click();
-  await drawSingleSegment(page, [2, 15], [29, 4]);
+  await drawSingleSegment(page, [2, 11], [29, 0]);
   await expect(page.getByTestId("btn-draw-segment")).toHaveText("線分");
 
   // 拘束ツール: 円周上の点→線分1、円周上の点→線分2の順に「接線」を適用する。
@@ -468,7 +471,7 @@ test("④実機報告(Phase 42c): 接線拘束を解いた直後に接点をま�
 
   await page.mouse.click(circleLeftRim.x, circleLeftRim.y);
   await expect(page.getByTestId("constraint-pending-status")).toContainText("円");
-  const line2Pt = await screenPointForWorld(page, [15.5, 9.5, 0]);
+  const line2Pt = await screenPointForWorld(page, [15.5, 5.5, 0]);
   await page.mouse.click(line2Pt.x, line2Pt.y);
   await expect(page.getByTestId("constraint-tool-popup-tangent")).toBeVisible();
   await page.getByTestId("constraint-tool-popup-tangent").click();

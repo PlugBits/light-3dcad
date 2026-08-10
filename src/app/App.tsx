@@ -192,6 +192,9 @@ export default function App() {
   const sketches = doc.features.filter((f) => f.type === "sketch");
   const selectedFeature = selectedFeatureId ? findFeature(doc, selectedFeatureId) : undefined;
   const selectedSketchFeature = selectedFeature?.type === "sketch" ? selectedFeature : null;
+  // スケッチ編集モード中かどうか(選択中フィーチャーがスケッチかどうかと同義)。スケッチ表示の
+  // 自動デフォルト(Phase 43)・CommandManagerリボンのタブ自動切替の両方がこれを基準にする。
+  const isInSketchMode = selectedSketchFeature !== null;
   // 選択中スケッチの拘束診断(自由度[dof]・矛盾/冗長拘束id、拘束診断UI、Phase 35b-2)。solve後の
   // 状態から都度取得する(GCS未初期化中はnull=診断バッジ・スケッチ線の定義状態別配色は非表示)。
   // ビューア(setSketchOverlay、下のuseEffect)とSketchEditor(定義状態バッジ・拘束一覧の色分け)の
@@ -201,7 +204,10 @@ export default function App() {
     return getSketchDiagnostics(selectedSketchFeature.segments ?? [], selectedSketchFeature.constraints ?? [], selectedSketchFeature.entities);
   }, [selectedSketchFeature]);
   const selectedFace = useCadStore((s) => s.selectedFace);
-  const showSketches = useCadStore((s) => s.showSketches);
+  const sketchVisibilityOverride = useCadStore((s) => s.sketchVisibilityOverride);
+  // スケッチ表示の実効値(Phase 43): 手動オーバーライドがあればそれを優先し、無ければ
+  // 「スケッチ編集モード中は表示・それ以外は非表示」を自動適用する。
+  const showSketches = sketchVisibilityOverride ?? isInSketchMode;
   const exporting = useCadStore((s) => s.exporting);
   const exportError = useCadStore((s) => s.exportError);
   const interferenceResult = useCadStore((s) => s.interferenceResult);
@@ -228,7 +234,7 @@ export default function App() {
   const loadDocument = useCadStore((s) => s.loadDocument);
   const newProject = useCadStore((s) => s.newProject);
   const previewFeatureContext = useCadStore((s) => s.previewFeatureContext);
-  const setShowSketches = useCadStore((s) => s.setShowSketches);
+  const setSketchVisibilityOverride = useCadStore((s) => s.setSketchVisibilityOverride);
   const updateDocument = useCadStore((s) => s.updateDocument);
   const undo = useCadStore((s) => s.undo);
   const redo = useCadStore((s) => s.redo);
@@ -785,11 +791,15 @@ export default function App() {
   // 自動的にタブを切り替える(スケッチ選択→「スケッチ」タブ、スケッチ選択解除→「フィーチャー」タブ)。
   // アセンブリ/表示タブへは自動遷移しない(手動クリックのみ)ため、ユーザーの明示的なタブ選択は
   // スケッチへの出入り以外では維持される。
-  const isInSketchMode = selectedFeature?.type === "sketch";
   const wasInSketchModeRef = useRef(isInSketchMode);
   useEffect(() => {
     if (isInSketchMode && !wasInSketchModeRef.current) setRibbonTab("sketch");
     else if (!isInSketchMode && wasInSketchModeRef.current) setRibbonTab("feature");
+    if (isInSketchMode !== wasInSketchModeRef.current) {
+      // スケッチ表示の自動化(Phase 43): スケッチ編集モードへ入る/出る境界で、手動オーバーライドを
+      // リセットする。次のモードでは再び自動判定(スケッチ編集中=表示/外=非表示)に戻る。
+      useCadStore.getState().setSketchVisibilityOverride(null);
+    }
     wasInSketchModeRef.current = isInSketchMode;
   }, [isInSketchMode]);
 
@@ -2399,7 +2409,7 @@ export default function App() {
                 type="checkbox"
                 data-testid="toggle-sketch-visibility"
                 checked={showSketches}
-                onChange={(e) => setShowSketches(e.target.checked)}
+                onChange={(e) => setSketchVisibilityOverride(e.target.checked)}
               />
               スケッチ表示
             </label>
@@ -3260,39 +3270,48 @@ export default function App() {
           <div ref={viewerContainerRef} data-testid="viewer-container" style={{ width: "100%", height: "100%" }} />
           {/* ヘッズアップビュークラスタ(Phase 38b): SolidWorks同様、キャンバス上部中央に浮かべる
               半透明ツールバー。ボタン・testid・ハンドラは旧リボン第2行のものをそのまま移設した
-              (バーの外側はpointer-eventsを持たずスケッチクリックの邪魔をしない)。 */}
+              (バーの外側はpointer-eventsを持たずスケッチクリックの邪魔をしない)。
+              Phase 43: 標準ビューボタンを横一列から、SolidWorks風の十字(ビューパッド)配置に変更。
+              正面を中心に上下左右、等角(右上)・背面(左上)を角に置く3x3グリッド
+              (viewport-headsup-pad、CSSのgrid-template-areasでview種別ごとに配置)。
+              フィット・正対はパッドの左に縦並びの小さな列として添える(viewport-headsup-side)。
+              data-testid・onClick・disabled等の挙動は変更していない(レイアウト/CSSのみの変更)。 */}
           <div className="viewport-headsup">
-            <button
-              type="button"
-              className="ribbon-icon-btn"
-              data-testid="btn-fit-view"
-              onClick={() => viewerRef.current?.fitToView()}
-              title="フィット: モデル全体が画面に収まるようにカメラを調整します"
-            >
-              <ToolIcon name="fit" size={17} />
-            </button>
-            <button
-              type="button"
-              className="ribbon-icon-btn"
-              data-testid="btn-align-to-plane"
-              onClick={handleAlignToPlane}
-              disabled={!selectedSketchPlane}
-              title="正対: 選択中スケッチの平面に正対する視点へカメラを移動します"
-            >
-              <ToolIcon name="normalTo" size={17} />
-            </button>
-            {STANDARD_VIEW_BUTTONS.map(({ view, label, title, icon }) => (
+            <div className="viewport-headsup-side">
               <button
-                key={view}
                 type="button"
                 className="ribbon-icon-btn"
-                data-testid={`btn-view-${view}`}
-                onClick={() => viewerRef.current?.setStandardView(view)}
-                title={`${label}: ${title}`}
+                data-testid="btn-fit-view"
+                onClick={() => viewerRef.current?.fitToView()}
+                title="フィット: モデル全体が画面に収まるようにカメラを調整します"
               >
-                <ToolIcon name={icon} size={17} />
+                <ToolIcon name="fit" size={17} />
               </button>
-            ))}
+              <button
+                type="button"
+                className="ribbon-icon-btn"
+                data-testid="btn-align-to-plane"
+                onClick={handleAlignToPlane}
+                disabled={!selectedSketchPlane}
+                title="正対: 選択中スケッチの平面に正対する視点へカメラを移動します"
+              >
+                <ToolIcon name="normalTo" size={17} />
+              </button>
+            </div>
+            <div className="viewport-headsup-pad">
+              {STANDARD_VIEW_BUTTONS.map(({ view, label, title, icon }) => (
+                <button
+                  key={view}
+                  type="button"
+                  className={`ribbon-icon-btn viewport-pad-btn viewport-pad-btn-${view}`}
+                  data-testid={`btn-view-${view}`}
+                  onClick={() => viewerRef.current?.setStandardView(view)}
+                  title={`${label}: ${title}`}
+                >
+                  <ToolIcon name={icon} size={17} />
+                </button>
+              ))}
+            </div>
           </div>
           {selectedFeature?.type === "sketch" && selectedSketchPlane && (
             <DimensionOverlay

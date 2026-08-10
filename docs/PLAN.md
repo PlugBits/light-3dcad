@@ -1140,3 +1140,24 @@ E2E 48→49件全通過(2分割でBash同期実行)。
 gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 660→674件通過+1skip(接触バンドの
 単体・トリム統合テスト14件を追加)、`vite build`+`npm run size`でメインバンドルgzip264.7KB
 (+0.2KB、上限350KB内)、E2E 49→50件全通過(2分割でBash同期実行)。
+
+## Phase 43: ユーザー要望の4件のUX改善(ねじ数値配置・自由回転・スケッチ表示自動化・ビューパッド)
+
+①ねじ配置(`ThreadFeature.position`、面ローカル2D座標)に位置X/位置Y数値入力を`ThreadEditor.tsx`へ
+追加(`patchThreadPosition`新設、faceは変えず位置のみ差し替え、クリック配置→数値微調整の運用)。
+②右ドラッグ回転が極付近で詰まる不具合(`OrbitControls`はconstructor時点のcamera.upを基準に
+球面座標を固定するため、`setStandardView`/`lookAtPlane`での動的up切替と噛み合わなかった)を、
+ワールド固定upを一切参照しないトラックボール式`FreeOrbitControls`(`src/viewer/freeOrbitControls.ts`
+新設)に置き換えて解消(offsetとupを同じクォータニオンで一緒に回すため直交が常に保たれ、
+極を跨いでも特異点が出ない)。③スケッチ表示を自動化: スケッチ編集モード中は自動表示・外は自動
+非表示がデフォルトになり、既存の「スケッチ表示」チェックボックスは現在のモードに対する手動
+オーバーライド(`sketchVisibilityOverride`)として働き、モードの出入りでリセットされる。
+④ヘッズアップの標準ビューボタンを横一列からSolidWorks風の十字パッド(CSS Grid、正面中心+
+上下左右、等角/背面を角、フィット/正対は左に添える小列)へ変更(testid・ハンドラは不変)。
+パッドが縦に大きくなった副作用で寸法ラベル等をクリック不能にしていたため、パッド自体は
+`pointer-events: none`にしボタンのみ`auto`にして空セル/隙間はクリックを素通しするよう修正。
+gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 674件通過+1skip(変更なし)、
+`vite build`+`npm run size`でメインバンドルgzip261.1KB(-3.6KB、上限350KB内)、
+E2E 50件全通過(3分割でBash同期実行、スケッチ表示自動化に伴い`sketch-overlay.spec.ts`を
+新セマンティクスへ書き換え、十字パッドとの画面座標衝突を避けるため
+`dimension-drag-and-trim.spec.ts`④の作図座標を平行移動)。
