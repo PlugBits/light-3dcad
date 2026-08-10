@@ -2287,7 +2287,7 @@ describe("evaluateDocument (WASM統合): シェル(中抜き、Phase 25b)", () =
   });
 });
 
-describe("evaluateDocument (WASM統合): ねじ(Phase 25c)", () => {
+describe("evaluateDocument (WASM統合): ねじ(Phase 25c、Phase 41で簡易表示化)", () => {
   /** 60x40x20の箱(XY原点中心、Z方向に押し出し)のドキュメントを作る共通セットアップ。 */
   function buildBoxDoc(distance = 20) {
     const empty = createEmptyDocument();
@@ -2307,13 +2307,10 @@ describe("evaluateDocument (WASM統合): ねじ(Phase 25c)", () => {
     return { doc, extrude };
   }
 
-  // M6の谷径(evaluator.tsのTHREAD_ENGAGEMENT_FACTOR=0.61343と同じ式)。「円柱のみをfuseした場合」との
-  // 体積比較に使う(テスト側で独自に計算し、evaluator内部の値と一致させる)。
   const M6_NOMINAL = 6;
-  const M6_PITCH = 1.0;
-  const M6_MINOR_RADIUS = M6_NOMINAL / 2 - 0.61343 * M6_PITCH;
+  const M6_MAJOR_RADIUS = M6_NOMINAL / 2;
 
-  it("箱の上面にM6雄ねじ(5mm)を配置すると、谷径円柱のみをfuseした場合より体積が大きい(ねじ山分)", (ctx) => {
+  it("箱の上面にM6雄ねじ(5mm)を配置すると、呼び径円柱をfuseしたぶんだけ体積が増える(Phase 41、実ねじ山ソリッドは廃止)", (ctx) => {
     ctx.skip(!wasmLoaded, SKIP_NOTE);
     const { doc: boxDoc } = buildBoxDoc(20);
     const boxResult = evaluateDocument(boxDoc);
@@ -2339,14 +2336,14 @@ describe("evaluateDocument (WASM統合): ねじ(Phase 25c)", () => {
     const volume = measureVolume(result.shape);
     result.shape.delete();
 
-    const rodOnlyVolume = boxVolume + Math.PI * M6_MINOR_RADIUS * M6_MINOR_RADIUS * 5;
-    expect(volume).toBeGreaterThan(rodOnlyVolume);
-    // ねじ山ぶんの上乗せが極端に大きすぎない(明らかな破綻形状でない)ことも粗くチェックする。
-    expect(volume).toBeLessThan(rodOnlyVolume + 30);
+    // Phase 41: 雄ねじの実体は呼び径(majorRadius)の単純円柱のfuseのみになった(ヘリカルねじ山の
+    // 上乗せ分は無い)ため、体積は箱+円柱の理論値とほぼ一致するはず(ブーリアン演算の数値誤差程度)。
+    const expectedVolume = boxVolume + Math.PI * M6_MAJOR_RADIUS * M6_MAJOR_RADIUS * 5;
+    expect(volume).toBeCloseTo(expectedVolume, 1);
     void feature;
-  }, 45000);
+  }, 20000);
 
-  it("箱の上面にM6雌ねじ(下穴)を配置すると、規格下穴径(呼び径-ピッチ=5.0mm)ぶん体積が減る", (ctx) => {
+  it("箱の上面にM6雌ねじ(下穴)を配置すると、規格下穴径(呼び径-ピッチ=5.0mm)ぶん体積が減る(変更なし)", (ctx) => {
     ctx.skip(!wasmLoaded, SKIP_NOTE);
     const { doc: boxDoc } = buildBoxDoc(20);
     const boxResult = evaluateDocument(boxDoc);
@@ -2379,7 +2376,7 @@ describe("evaluateDocument (WASM統合): ねじ(Phase 25c)", () => {
     expect(volume).toBeCloseTo(expectedVolume, 1);
   });
 
-  it("雄ねじの長さが上限(20mm)を超えるとfeatureId付きのエラーになる", (ctx) => {
+  it("雄ねじの長さに上限は無い(Phase 41でヘリカルloftを廃止したため、20mm超でもエラーにならない)", (ctx) => {
     ctx.skip(!wasmLoaded, SKIP_NOTE);
     const { doc: boxDoc } = buildBoxDoc(20);
     const boxResult = evaluateDocument(boxDoc);
@@ -2388,7 +2385,7 @@ describe("evaluateDocument (WASM統合): ねじ(Phase 25c)", () => {
     const topFace = findTopFace(boxResult.shape);
     boxResult.shape.delete();
 
-    const { doc, feature } = addThreadFeature(boxDoc, {
+    const { doc } = addThreadFeature(boxDoc, {
       name: "M6ねじ1",
       hand: "male",
       preset: "M6",
@@ -2399,13 +2396,10 @@ describe("evaluateDocument (WASM統合): ねじ(Phase 25c)", () => {
     });
 
     const result = evaluateDocument(doc);
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.featureId).toBe(feature.id);
-    expect(result.message.length).toBeGreaterThan(0);
-  });
+    expect(result.ok).toBe(true);
+  }, 20000);
 
-  it("同一プリセット・長さの雄ねじは2回目以降の評価でキャッシュが再利用され、速度が大幅に短縮される(速度計測ログ、Phase 29a)", (ctx) => {
+  it("雄ねじの評価はヘリカルloftが無いぶん高速(M6×15mmが1秒未満で完了する、Phase 41)", (ctx) => {
     ctx.skip(!wasmLoaded, SKIP_NOTE);
     const { doc: boxDoc } = buildBoxDoc(20);
     const boxResult = evaluateDocument(boxDoc);
@@ -2414,8 +2408,6 @@ describe("evaluateDocument (WASM統合): ねじ(Phase 25c)", () => {
     const topFace = findTopFace(boxResult.shape);
     boxResult.shape.delete();
 
-    // M6×15mm(nTurns=15、断面数16/回転 -> 200件超のloft断面)は、キャッシュの効果が
-    // 測定しやすい程度に重い(THREAD_SECTIONS_PER_TURN、src/worker/evaluator.ts参照)。
     const { doc } = addThreadFeature(boxDoc, {
       name: "M6ねじ1",
       hand: "male",
@@ -2427,33 +2419,95 @@ describe("evaluateDocument (WASM統合): ねじ(Phase 25c)", () => {
     });
 
     const t0 = performance.now();
-    const first = evaluateDocument(doc);
-    const t1 = performance.now();
-    expect(first.ok).toBe(true);
-    if (!first.ok) return;
-    const volume1 = measureVolume(first.shape as Shape3D);
-    (first.shape as Shape3D).delete();
-
-    // ドキュメント自体は変えず、もう一度評価する(Workerメモリキャッシュ[本テストでは
-    // モジュールスコープを共有する同一プロセス内]により、雄ねじソリッド生成[loft+fuse]の
-    // 再計算は発生しないはず)。
-    const t2 = performance.now();
-    const second = evaluateDocument(doc);
-    const t3 = performance.now();
-    expect(second.ok).toBe(true);
-    if (!second.ok) return;
-    const volume2 = measureVolume(second.shape as Shape3D);
-    (second.shape as Shape3D).delete();
+    const result = evaluateDocument(doc);
+    const elapsed = performance.now() - t0;
+    expect(result.ok).toBe(true);
+    if (result.ok) result.shape?.delete();
 
     // eslint-disable-next-line no-console
-    console.log(
-      `[thread cache] 1回目(未キャッシュ): ${(t1 - t0).toFixed(1)}ms, ` + `2回目(キャッシュ済みのはず): ${(t3 - t2).toFixed(1)}ms`,
-    );
+    console.log(`[thread simplified] M6x15mm 評価時間: ${elapsed.toFixed(1)}ms`);
+    // 単純円柱のfuseのみ(旧v1のloft+fuseは数秒〜十数秒だった)なので、余裕を持たせても1秒未満で完了するはず。
+    expect(elapsed).toBeLessThan(1000);
+  }, 20000);
 
-    expect(volume2).toBeCloseTo(volume1, 6);
-    // 厳密な倍率はCI環境の負荷でばらつくため、緩めに「2回目が1回目より明らかに短い」ことのみ確認する。
-    expect(t3 - t2).toBeLessThan((t1 - t0) * 0.7);
-  }, 90000);
+  it("threadAnnotations: 雄ねじはkind/position/axisDir/majorRadius/minorRadius/lengthが正しく計算される", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: boxDoc } = buildBoxDoc(20);
+    const boxResult = evaluateDocument(boxDoc);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const topFace = findTopFace(boxResult.shape);
+    boxResult.shape.delete();
+
+    const { doc } = addThreadFeature(boxDoc, {
+      name: "M6ねじ1",
+      hand: "male",
+      preset: "M6",
+      length: 8,
+      face: topFace,
+      position: [3, -4],
+      direction: 1,
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    result.shape?.delete();
+
+    expect(result.threadAnnotations.length).toBe(1);
+    const ann = result.threadAnnotations[0];
+    expect(ann.kind).toBe("male");
+    // 配置面はXY平面上面(z=20)、配置クリック点は(u,v)=(3,-4)なので、ワールド座標は(3,-4,20)になるはず。
+    expect(ann.position[0]).toBeCloseTo(3, 6);
+    expect(ann.position[1]).toBeCloseTo(-4, 6);
+    expect(ann.position[2]).toBeCloseTo(20, 6);
+    // direction=1(面法線+Zと同じ向き)。
+    expect(ann.axisDir[0]).toBeCloseTo(0, 6);
+    expect(ann.axisDir[1]).toBeCloseTo(0, 6);
+    expect(ann.axisDir[2]).toBeCloseTo(1, 6);
+    expect(ann.majorRadius).toBeCloseTo(3, 6); // M6呼び径6mmの半分
+    // 谷径(THREAD_ENGAGEMENT_FACTOR=0.61343、ピッチ1.0mm): 3 - 0.61343*1.0 ≈ 2.38657
+    expect(ann.minorRadius).toBeCloseTo(3 - 0.61343, 5);
+    expect(ann.minorRadius).toBeLessThan(ann.majorRadius);
+    expect(ann.length).toBe(8);
+  });
+
+  it("threadAnnotations: 雌ねじはminorRadiusが実際の下穴半径(threadDrillDiameter/2)と一致する", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: boxDoc } = buildBoxDoc(20);
+    const boxResult = evaluateDocument(boxDoc);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const topFace = findTopFace(boxResult.shape);
+    boxResult.shape.delete();
+
+    const { doc } = addThreadFeature(boxDoc, {
+      name: "M6ねじ穴1",
+      hand: "female",
+      preset: "M6",
+      length: 6,
+      face: topFace,
+      position: [0, 0],
+      direction: -1,
+    });
+
+    const result = evaluateDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    result.shape?.delete();
+
+    expect(result.threadAnnotations.length).toBe(1);
+    const ann = result.threadAnnotations[0];
+    expect(ann.kind).toBe("female");
+    expect(ann.position[0]).toBeCloseTo(0, 6);
+    expect(ann.position[1]).toBeCloseTo(0, 6);
+    expect(ann.position[2]).toBeCloseTo(20, 6);
+    // direction=-1(面法線と逆向き、-Z)。
+    expect(ann.axisDir[2]).toBeCloseTo(-1, 6);
+    expect(ann.majorRadius).toBeCloseTo(3, 6); // M6呼び径6mmの半分
+    expect(ann.minorRadius).toBeCloseTo(2.5, 6); // 下穴径5.0mmの半分(呼び径6-ピッチ1.0)
+    expect(ann.length).toBe(6);
+  });
 });
 
 describe("evaluateDocument (WASM統合): 回転体(Revolve、Phase 25b)", () => {

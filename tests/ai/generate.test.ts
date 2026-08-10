@@ -53,6 +53,7 @@ function okDryRunEvaluate(): DryRunEvaluateFn {
     referenceEdges: [],
     bodyGroups: [],
     solvedPlacements: [],
+    threadAnnotations: [],
   }));
 }
 
@@ -139,6 +140,7 @@ describe("generateCadDocument: 成功系(生成結果)", () => {
         referenceEdges: [],
         bodyGroups: [],
         solvedPlacements: [],
+        threadAnnotations: [],
       };
     });
     const solveSketches = passthroughSolveSketches();
