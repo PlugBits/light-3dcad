@@ -398,10 +398,18 @@ interface CadStoreState {
   /** ビューアで現在選択中の面(未選択はnull)。 */
   selectedFace: SelectedFace | null;
 
-  /** スケッチ線オーバーレイの表示/非表示(デフォルトON)。 */
-  showSketches: boolean;
-  /** スケッチ線オーバーレイの表示/非表示を切り替える。 */
-  setShowSketches: (visible: boolean) => void;
+  /**
+   * スケッチ線オーバーレイ表示の手動オーバーライド(Phase 43)。既定値はnull(オーバーライド無し)で、
+   * その場合は「スケッチフィーチャーを選択中(スケッチ編集モード)なら表示、そうでなければ非表示」が
+   * 自動的に適用される(実際の自動判定・実効値の計算はsrc/app/App.tsx側、isInSketchModeベース)。
+   * ユーザーが「スケッチ表示」チェックボックスを操作すると、その値がここに書き込まれ、現在のモード
+   * (スケッチ編集中/外)の間は自動判定より優先される。スケッチ編集モードへ入る/出る境界で
+   * App.tsx がこれをnullへリセットし、次のモードでは再び自動判定に戻る
+   * (「モードが変わったらオーバーライドは引き継がない」という単純な意味付け)。
+   */
+  sketchVisibilityOverride: boolean | null;
+  /** スケッチ表示チェックボックス操作時に呼ぶ。現在のモードに対する手動オーバーライドを設定する。 */
+  setSketchVisibilityOverride: (visible: boolean | null) => void;
 
   exporting: boolean;
   exportError: string | null;
@@ -695,8 +703,8 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
 
   selectedFace: null,
 
-  showSketches: true,
-  setShowSketches: (visible) => set({ showSketches: visible }),
+  sketchVisibilityOverride: null,
+  setSketchVisibilityOverride: (visible) => set({ sketchVisibilityOverride: visible }),
 
   exporting: false,
   exportError: null,
