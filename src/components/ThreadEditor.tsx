@@ -2,7 +2,7 @@
 // 名前・呼び径プリセット・種別(雄/雌)・長さの編集に加え、「配置し直す」ボタンでビューアの
 // ねじ配置ツールを再選択モードで起動できる。面選択ツールと異なりクリック1回で即座に確定する
 // (「適用」ボタンは無い、通常のねじ配置ツールと同じ操作感)。
-import { patchThreadFeature } from "../model/document";
+import { patchThreadFeature, patchThreadPosition } from "../model/document";
 import { THREAD_PRESET_LIST, threadDrillDiameter, threadPitch } from "../model/threadPresets";
 import type { ThreadFeature, ThreadPreset } from "../model/types";
 import { useCadStore } from "../state/store";
@@ -24,7 +24,18 @@ export function ThreadEditor({ thread, hasError, isReselecting, onStartReselect,
     updateDocument((d) => patchThreadFeature(d, thread.id, p));
   }
 
+  /** 配置位置(面ローカル2D座標、mm)を数値編集する。faceは変えない(Phase 43)。 */
+  function patchPosition(index: 0 | 1, value: number) {
+    if (!Number.isFinite(value)) return;
+    const next: [number, number] = [...thread.position];
+    next[index] = value;
+    updateDocument((d) => patchThreadPosition(d, thread.id, next));
+  }
+
   const drillDiameter = threadDrillDiameter(thread.preset);
+  // 表示は3桁丸め(入力自体は自由精度、丸めは表示のみ)。
+  const posX = Number(thread.position[0].toFixed(3));
+  const posY = Number(thread.position[1].toFixed(3));
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -79,6 +90,32 @@ export function ThreadEditor({ thread, hasError, isReselecting, onStartReselect,
           }}
         />
       </label>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={{ fontSize: 12, opacity: 0.8 }}>配置位置 (mm、基準: 面のローカル座標)</span>
+        <div style={{ display: "flex", gap: 6 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 11, flex: 1 }}>
+            位置X
+            <input
+              type="number"
+              data-testid="thread-position-x-input"
+              value={posX}
+              step="any"
+              onChange={(e) => patchPosition(0, Number(e.target.value))}
+            />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 11, flex: 1 }}>
+            位置Y
+            <input
+              type="number"
+              data-testid="thread-position-y-input"
+              value={posY}
+              step="any"
+              onChange={(e) => patchPosition(1, Number(e.target.value))}
+            />
+          </label>
+        </div>
+      </div>
 
       <p style={{ fontSize: 11, opacity: 0.6, margin: 0 }}>
         {thread.hand === "male"

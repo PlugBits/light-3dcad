@@ -259,6 +259,15 @@ export function replaceThreadPlacement(
 }
 
 /**
+ * thread フィーチャーの配置位置(position、面ローカル2D座標mm)のみを数値編集する(Phase 43)。
+ * face(配置面自体)は変更しない点がreplaceThreadPlacement()と異なる
+ * (クリックでおおまかに配置した後、数値入力で微調整する用途)。
+ */
+export function patchThreadPosition(doc: CadDocument, featureId: FeatureId, position: [number, number]): CadDocument {
+  return updateFeature<ThreadFeature>(doc, featureId, (f) => ({ ...f, position }));
+}
+
+/**
  * 新しい部品配置(簡易アセンブリ)フィーチャーを作成して末尾に追加する。IDは自動生成される(Phase 27b)。
  * params.part は既に(deserializeProject()等で)検証済みの部品CadDocumentを渡すこと。
  * このヘルパー自体は入れ子チェック等のバリデーションを行わない(呼び出し側=UIで事前チェックし、
