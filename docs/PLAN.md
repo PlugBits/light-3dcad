@@ -1109,3 +1109,19 @@ gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 636→638件�
 gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 638→645件通過+1skip(entityトリムの
 拘束移行・ダングリング掃除5件を追加)、`vite build`+`npm run size`でメインバンドルgzip
 264.0KB(+0.3KB、上限350KB内)、E2E 47→48件全通過(2分割でBash同期実行)。
+
+## Phase 42b: 円弧をPlaneGCSのネイティブarcプリミティに昇格(接線・一致が効かないバグの修正)
+
+実機報告(「円弧に対して接線とか、一致が効かない。拘束メニュー時に円弧が選べなくなってる」)を
+修正。`gcsAdapter.ts`の円弧を、旧来の「bulge(挟角)固定+端点2点のみ」から、PlaneGCSの
+ネイティブ`arc`プリミティ(中心点+半径+start/end角、`arc_rules`で端点座標と整合)へ置き換えた
+(半径・掃引角も実変数になり、`radius`拘束はarc_radius、`tangent`は円弧⇔直線に`tangent_la`を
+新設、`concentric`はEntityRef|ArcRefへ拡張して円⇔円弧・円弧⇔円弧にも対応)。書き戻し時は
+解いたstart/end角からbulgeを逆算するが、mm座標と同じ1e-6グリッドで丸めると無次元量である
+bulgeでは接線判定を壊すほどの誤差(実機確認)になったため、専用のBULGE_ROUND_GRID(1e-9)を導入。
+Phase 42のfixEntity移行(トリムでentityが円弧片へ置換)も、両端点fixではなく円弧の中心・半径のみ
+固定する新設`fixArc`拘束へ改善(端点は元の円の上を自由に滑れる、より正確な意図の表現)。
+CadViewerの拘束ツールピック(`findConstraintPickHit`)から円弧を除外していたガードを撤去。
+gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 645→660件通過+1skip(円弧のネイティブ化・
+fixArc移行の回帰含む)、`vite build`+`npm run size`でメインバンドルgzip264.5KB(+0.5KB、上限350KB内)、
+E2E 48→49件全通過(2分割でBash同期実行)。
