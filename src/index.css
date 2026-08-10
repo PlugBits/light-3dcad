@@ -628,13 +628,15 @@ aside select {
 .viewport-headsup {
   position: absolute;
   top: 10px;
-  left: 50%;
-  transform: translateX(-50%);
+  right: 12px;
   display: flex;
   align-items: center;
   gap: 4px;
   padding: 3px;
   background: rgba(255, 255, 255, 0.82);
+  /* Phase 43b: モデルに被らないよう右上へ寄せ、非ホバー時は薄く表示する */
+  opacity: 0.45;
+  transition: opacity 0.15s ease;
   backdrop-filter: blur(6px);
   border: 1px solid var(--cad-border);
   border-radius: var(--cad-radius-lg);
@@ -699,4 +701,9 @@ aside select {
   to {
     transform: rotate(360deg);
   }
+}
+
+.viewport-headsup:hover,
+.viewport-headsup:focus-within {
+  opacity: 1;
 }
