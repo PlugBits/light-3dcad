@@ -290,3 +290,112 @@ test("②一致+水平+垂直+長さが付いた線分チェーンをトリム�
   await page.screenshot({ path: "test-results/trim-constraints-3-after.png" });
   expect(pageErrors).toEqual([]);
 });
+
+test("③実機報告(Phase 42): 固定円(fixEntity)+2本の線分への接線をトリムしても矛盾判定にならず、押し出しも成功する", async ({ page }) => {
+  const pageErrors = collectPageErrors(page);
+
+  await gotoApp(page);
+  await waitForReady(page);
+
+  await page.getByTestId("btn-add-sketch").click();
+  await expect(page.getByTestId("feature-item-Sketch2")).toBeVisible();
+  await waitForReady(page);
+  await page.getByTestId("btn-align-to-plane").click();
+
+  // 水平・垂直の2本チェーン(L字、12,-14→27,-14→27,18)を描く
+  // (実機報告の「チェーンの2本の線分に接線」を模した最小構成)。矩形(押し出し用の閉ループ)は
+  // 円のentities配列インデックス([entity-circle-0-...]テストID)を狂わせないよう、
+  // 円をトリムし終えた後(entitiesが空になった後)に追加する。
+  await page.getByTestId("btn-draw-segment").click();
+  await drawTwoSegmentChain(page, [12, -14], [27, -14], [27, 18]);
+  await expect(page.getByTestId("btn-draw-segment")).toHaveText("線分");
+
+  // 半径5の円を、L字の角(27,-14)に内接する位置(中心22,-9)へ配置し、固定する
+  // (実機報告の「円1・円2が固定[fixEntity]」に相当)。
+  await page.getByTestId("btn-add-circle").click();
+  await waitForReady(page);
+  await page.getByTestId("entity-circle-0-radius").fill("5");
+  await waitForReady(page);
+  await page.getByTestId("entity-circle-0-center-x").fill("22");
+  await waitForReady(page);
+  await page.getByTestId("entity-circle-0-center-y").fill("-9");
+  await waitForReady(page);
+  await page.getByTestId("entity-circle-0-fixed").check();
+  await waitForReady(page);
+  await expect(page.getByTestId("eval-error")).toHaveCount(0);
+
+  // 拘束ツール: 円周上の点→水平線分、円周上の点→垂直線分の順に「接線」を適用する
+  // (実機報告の「接線: circle ↔ 線分7、circle ↔ 線分4」に相当)。あらかじめ幾何的に
+  // 接する位置へ置いているため、適用は数値的にほぼ無変化(安定に成功する)。
+  await page.getByTestId("btn-constraint").click();
+  const circleLeftRim = await screenPointForWorld(page, [17, -9, 0]);
+  await page.mouse.click(circleLeftRim.x, circleLeftRim.y);
+  await expect(page.getByTestId("constraint-pending-status")).toContainText("円");
+  const horizSegPt = await screenPointForWorld(page, [14, -14, 0]);
+  await page.mouse.click(horizSegPt.x, horizSegPt.y);
+  await expect(page.getByTestId("constraint-tool-popup-tangent")).toBeVisible();
+  await page.getByTestId("constraint-tool-popup-tangent").click();
+  await waitForReady(page);
+  await expect(page.getByTestId("constraint-conflict-toast")).toHaveCount(0);
+  await expect(page.getByTestId("eval-error")).toHaveCount(0);
+
+  await page.mouse.click(circleLeftRim.x, circleLeftRim.y);
+  await expect(page.getByTestId("constraint-pending-status")).toContainText("円");
+  const vertSegPt = await screenPointForWorld(page, [27, 10, 0]);
+  await page.mouse.click(vertSegPt.x, vertSegPt.y);
+  await expect(page.getByTestId("constraint-tool-popup-tangent")).toBeVisible();
+  await page.getByTestId("constraint-tool-popup-tangent").click();
+  await waitForReady(page);
+  await expect(page.getByTestId("constraint-conflict-toast")).toHaveCount(0);
+  await expect(page.getByTestId("eval-error")).toHaveCount(0);
+  await page.getByTestId("btn-constraint").click(); // 拘束ツールを終了する。
+
+  await page.screenshot({ path: "test-results/trim-fixed-circle-1-before.png" });
+
+  // 拘束一覧に円entityを参照する拘束(円の固定・接線×2)が3件あることを確認してからトリムする。
+  const beforeTrim = await constraintListTexts(page);
+  expect(beforeTrim.filter((t) => t.includes("円の固定"))).toHaveLength(1);
+  expect(beforeTrim.filter((t) => t.includes("接線"))).toHaveLength(2);
+
+  // トリムツール: 円周上、いずれの接点(下端(22,-14)・右端(27,-9))とも異なる上端(22,-4)をクリックし、
+  // 円entityをトリムする(円弧片へ分解される)。
+  await page.getByTestId("btn-trim").click();
+  const trimClick = await screenPointForWorld(page, [22, -4, 0]);
+  await page.mouse.click(trimClick.x, trimClick.y);
+  await waitForReady(page);
+  await page.getByTestId("btn-trim").click(); // トリムツールを終了する。
+
+  await page.screenshot({ path: "test-results/trim-fixed-circle-2-after.png" });
+
+  // 実機報告バグの修正確認: 「拘束矛盾」ロールバックトーストが出ない(fixEntity/tangentは
+  // 全て移行/凍結により無害に処理されるためremovedConstraintCountは0、トースト自体が出ない)、
+  // 評価エラーも無い、スケッチの定義状態バッジが「矛盾あり」にならない。
+  await expect(page.getByTestId("constraint-conflict-toast")).toHaveCount(0);
+  await expect(page.getByTestId("eval-error")).toHaveCount(0);
+  await expect(page.getByTestId("sketch-definition-badge-conflicting")).toHaveCount(0);
+
+  // tell-tale sign: 拘束一覧に解決不能な生ID(entity-...)がそのまま表示され続けていない
+  // (fixEntity/tangentが円entityIdへの参照切れのまま残っていた、というのがバグの根本原因だった)。
+  const afterTrim = await constraintListTexts(page);
+  expect(afterTrim.some((t) => t.includes("entity-"))).toBe(false);
+  // fixEntityは全断片の両端点へのfix拘束に移行され、tangentは凍結により無害に削除されるため、
+  // 「円の固定」「接線」表記は消え、代わりに「固定」(fix、断片の両端点分)が複数残る。
+  expect(afterTrim.filter((t) => t.includes("円の固定"))).toHaveLength(0);
+  expect(afterTrim.filter((t) => t.includes("接線"))).toHaveLength(0);
+  // fixEntityは全断片の両端点への"fix"拘束(表記「固定: …」)に移行されるため、複数件残る。
+  expect(afterTrim.filter((t) => t.startsWith("固定:")).length).toBeGreaterThan(0);
+
+  // 押し出し用の閉ループ(20x20矩形、原点)を追加する(L字チェーン+トリム後の円弧片は開いた
+  // ままで領域を構成しないため、押し出し可能な形状にはこの矩形が必要。本題は「トリムが
+  // 壊れていないこと」の確認であり、この矩形自体はトリム対象の円とは無関係)。
+  await page.getByTestId("btn-add-rectangle").click();
+  await waitForReady(page);
+
+  // 押し出し(既にボディが存在するため既定operationは"add")も引き続き成功する。
+  await page.getByTestId("btn-add-extrude").click();
+  await waitForReady(page);
+  await expect(page.getByTestId("eval-error")).toHaveCount(0);
+
+  await page.screenshot({ path: "test-results/trim-fixed-circle-3-extruded.png" });
+  expect(pageErrors).toEqual([]);
+});
