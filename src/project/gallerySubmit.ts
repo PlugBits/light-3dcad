@@ -8,6 +8,13 @@
 // (`model_data`)フィールドだけを除外したURLを返す(payloadIncluded: false)。呼び出し側は
 // この場合、共有リンクをクリップボードにコピーした上で「モデルデータ欄に貼り付けてください」と
 // 案内する。
+//
+// Phase 45: AI生成パネルの貼り付けモードが提案したメタ情報(pendingGalleryMeta、
+// src/ai/pastePayload.ts の GallerySubmitMeta)からダイアログの初期入力値を作る
+// prefillGallerySubmitFields() もここに置く(GallerySubmitDialogの初期state計算を
+// 副作用フリーな純粋関数として切り出し、単体テストできるようにするため)。
+
+import type { GallerySubmitMeta } from "../ai/pastePayload";
 
 /** 投稿先リポジトリのissue作成URL(既定値、テストでは差し替え可能)。 */
 export const GALLERY_SUBMISSION_ISSUES_NEW_URL = "https://github.com/PlugBits/light-3dcad/issues/new";
@@ -83,4 +90,14 @@ export function buildGallerySubmissionUrl(
 
   const fallbackUrl = `${baseUrl}?${buildParams(fields, shareLinkUrl, template, false).toString()}`;
   return { url: fallbackUrl, payloadIncluded: false };
+}
+
+/**
+ * GallerySubmitDialogのタイトル/説明/タグ欄の初期値(author欄は含まない、常にユーザー自身の
+ * 入力に委ねる)。pendingGalleryMetaが無ければ全て空文字列(従来どおりの挙動)。tagsは配列を
+ * カンマ+半角スペース区切りの文字列にする(タグ欄の既存の表現・buildParams()と同じカンマ区切り)。
+ */
+export function prefillGallerySubmitFields(meta: GallerySubmitMeta | null): { title: string; description: string; tags: string } {
+  if (!meta) return { title: "", description: "", tags: "" };
+  return { title: meta.title, description: meta.description, tags: meta.tags.join(", ") };
 }

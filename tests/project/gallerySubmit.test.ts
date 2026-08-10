@@ -5,6 +5,7 @@ import {
   buildGallerySubmissionUrl,
   GALLERY_SUBMISSION_ISSUES_NEW_URL,
   GALLERY_SUBMISSION_TEMPLATE,
+  prefillGallerySubmitFields,
   type GallerySubmitFields,
 } from "../../src/project/gallerySubmit";
 
@@ -67,5 +68,29 @@ describe("buildGallerySubmissionUrl", () => {
     expect(exact.payloadIncluded).toBe(true);
     const overByOne = buildGallerySubmissionUrl(FIELDS, SHARE_LINK_URL, { lengthLimit: exactLimit - 1 });
     expect(overByOne.payloadIncluded).toBe(false);
+  });
+});
+
+describe("prefillGallerySubmitFields(Phase 45: AI貼り付けのpendingGalleryMetaからの初期入力値)", () => {
+  it("metaがnullなら全て空文字列(従来どおりの挙動)", () => {
+    expect(prefillGallerySubmitFields(null)).toEqual({ title: "", description: "", tags: "" });
+  });
+
+  it("metaがあればtitle/descriptionはそのまま、tagsはカンマ+半角スペース区切りの文字列にする", () => {
+    const result = prefillGallerySubmitFields({
+      title: "L字ブラケット",
+      description: "60×50mm・厚さ15mmのL字形状ブラケット",
+      tags: ["ブラケット", "L字"],
+    });
+    expect(result).toEqual({
+      title: "L字ブラケット",
+      description: "60×50mm・厚さ15mmのL字形状ブラケット",
+      tags: "ブラケット, L字",
+    });
+  });
+
+  it("tagsが空配列なら空文字列になる", () => {
+    const result = prefillGallerySubmitFields({ title: "T", description: "D", tags: [] });
+    expect(result.tags).toBe("");
   });
 });

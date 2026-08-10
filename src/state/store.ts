@@ -2,6 +2,7 @@
 // Three.jsシーン自体はReact stateに入れない(CadViewerが直接ストアをsubscribeする)。
 import { create } from "zustand";
 
+import type { GallerySubmitMeta } from "../ai/pastePayload";
 import {
   addExtrudeFeature,
   addFillet3DFeature,
@@ -399,6 +400,19 @@ interface CadStoreState {
   selectedFace: SelectedFace | null;
 
   /**
+   * AI生成パネルの貼り付けモード(Phase 45)が読み込み時に提案したギャラリー投稿用メタ情報
+   * (タイトル/説明/タグ)。未提案・クリア後はnull。GallerySubmitDialogがこれを初期値として
+   * タイトル/説明/タグ欄をプレフィルする(作者名はユーザー自身の入力のまま変えない)。
+   * loadDocument()(=「新規」「開く」「共有リンク/ギャラリーモデルの読み込み」が最終的に必ず
+   * 経由する箇所)の呼び出しごとにnullへリセットされる。AI貼り付け自身もloadDocument()を
+   * 経由するため、AiGeneratePanel側はonLoad()呼び出しの「後」にsetPendingGalleryMeta()を
+   * 呼ぶことで、この自動リセットに上書きする形で新しいmetaを設定する。
+   */
+  pendingGalleryMeta: GallerySubmitMeta | null;
+  /** pendingGalleryMetaを設定/クリアする(AI貼り付け成功時、またはGallerySubmitDialog送信後のクリア用)。 */
+  setPendingGalleryMeta: (meta: GallerySubmitMeta | null) => void;
+
+  /**
    * スケッチ線オーバーレイ表示の手動オーバーライド(Phase 43)。既定値はnull(オーバーライド無し)で、
    * その場合は「スケッチフィーチャーを選択中(スケッチ編集モード)なら表示、そうでなければ非表示」が
    * 自動的に適用される(実際の自動判定・実効値の計算はsrc/app/App.tsx側、isInSketchModeベース)。
@@ -706,6 +720,9 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   },
 
   selectedFace: null,
+
+  pendingGalleryMeta: null,
+  setPendingGalleryMeta: (meta) => set({ pendingGalleryMeta: meta }),
 
   sketchVisibilityOverride: null,
   setSketchVisibilityOverride: (visible) => set({ sketchVisibilityOverride: visible }),
@@ -1069,6 +1086,10 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   loadDocument: (doc) => {
     const { requestId, promise } = postRequest({ kind: "evaluate", doc: resolveEvaluationDocument(doc) });
     // undo()/redo()と違い、履歴は空にリセットする(プロジェクトの切り替えは別の編集セッションとして扱う)。
+    // pendingGalleryMeta(Phase 45)もここで無条件にリセットする(「新規」「開く」「共有リンク/
+    // ギャラリーモデルの読み込み」は最終的に必ずここを通る)。AI貼り付け自身の読み込みもこの関数を
+    // 経由するが、AiGeneratePanel側がこの呼び出しの「後」に改めてsetPendingGalleryMeta()を呼ぶため、
+    // 最終的には新しいmetaで上書きされる(store.ts冒頭のpendingGalleryMetaコメント参照)。
     set({
       doc,
       status: "evaluating",
@@ -1079,6 +1100,7 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
       selectedFace: null,
       errorMessage: null,
       errorFeatureId: null,
+      pendingGalleryMeta: null,
     });
     promise.then((response) => applyEvaluated(set, get, requestId, response));
   },

@@ -233,6 +233,9 @@ export default function App() {
   const exportStep = useCadStore((s) => s.exportStep);
   const loadDocument = useCadStore((s) => s.loadDocument);
   const newProject = useCadStore((s) => s.newProject);
+  // AI生成パネルの貼り付けモード(Phase 45)が提案したギャラリー投稿用メタ情報。
+  // GallerySubmitDialogの初期入力値として渡す(store.tsのコメント参照)。
+  const pendingGalleryMeta = useCadStore((s) => s.pendingGalleryMeta);
   const previewFeatureContext = useCadStore((s) => s.previewFeatureContext);
   const setSketchVisibilityOverride = useCadStore((s) => s.setSketchVisibilityOverride);
   const showGrid = useCadStore((s) => s.showGrid);
@@ -3551,7 +3554,12 @@ export default function App() {
       )}
       {gallerySubmitOpen && (
         <Suspense fallback={null}>
-          <GallerySubmitDialog doc={doc} onClose={() => setGallerySubmitOpen(false)} onNotice={showTransientMessage} />
+          <GallerySubmitDialog
+            doc={doc}
+            onClose={() => setGallerySubmitOpen(false)}
+            onNotice={showTransientMessage}
+            pendingMeta={pendingGalleryMeta}
+          />
         </Suspense>
       )}
     </div>

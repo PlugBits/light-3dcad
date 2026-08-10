@@ -9,8 +9,9 @@
 // (src/project/gallerySubmit.ts の buildGallerySubmissionUrl 参照)。
 import { useState } from "react";
 
-import { buildGallerySubmissionUrl } from "../project/gallerySubmit";
+import { buildGallerySubmissionUrl, prefillGallerySubmitFields } from "../project/gallerySubmit";
 import { buildShareLinkUrl, encodeShareLinkPayload } from "../project/shareLink";
+import type { GallerySubmitMeta } from "../ai/pastePayload";
 import type { CadDocument } from "../model/types";
 
 export interface GallerySubmitDialogProps {
@@ -18,13 +19,20 @@ export interface GallerySubmitDialogProps {
   onClose: () => void;
   /** 送信後の案内・エラーをアプリ共通の一時トーストで表示する(App.tsx の showTransientMessage)。 */
   onNotice: (message: string) => void;
+  /**
+   * AI生成パネルの貼り付けモード(Phase 45)が読み込み時に提案したギャラリー投稿用メタ情報
+   * (store.tsのpendingGalleryMeta)。あればタイトル/説明/タグ欄の初期値として使う
+   * (作者名は含めない。常にユーザー自身の入力に委ねる)。未提案ならnull。
+   */
+  pendingMeta: GallerySubmitMeta | null;
 }
 
-export default function GallerySubmitDialog({ doc, onClose, onNotice }: GallerySubmitDialogProps) {
-  const [title, setTitle] = useState("");
+export default function GallerySubmitDialog({ doc, onClose, onNotice, pendingMeta }: GallerySubmitDialogProps) {
+  const [prefill] = useState(() => prefillGallerySubmitFields(pendingMeta));
+  const [title, setTitle] = useState(prefill.title);
   const [author, setAuthor] = useState("");
-  const [description, setDescription] = useState("");
-  const [tags, setTags] = useState("");
+  const [description, setDescription] = useState(prefill.description);
+  const [tags, setTags] = useState(prefill.tags);
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -107,6 +115,15 @@ export default function GallerySubmitDialog({ doc, onClose, onNotice }: GalleryS
           ライセンス同意のチェックを入れてIssueを送信すると、自動的にPull Requestが作成され、
           マージされるとギャラリーに掲載されます。
         </p>
+
+        {prefill.title && (
+          <p
+            data-testid="gallery-submit-prefill-notice"
+            style={{ margin: 0, fontSize: 11, color: "#9cf" }}
+          >
+            AIが提案したタイトル/説明/タグを入力しました(自由に編集できます)
+          </p>
+        )}
 
         <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
           タイトル
