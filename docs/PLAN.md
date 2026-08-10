@@ -1168,3 +1168,14 @@ E2E 50件全通過(3分割でBash同期実行、スケッチ表示自動化に�
 10mm補助線/100mm主線、距離フェード)による無限グリッドへ置き換え、「グリッド表示」トグル
 (既定ON、`showGrid`)をトップバーへ追加した。gate結果: tsc/Vitest(674+1skip)/E2E(51件)
 全通過、UIバンドルgzip262.0KB(+0.9KB、上限350KB内)。
+
+## Phase 45: コピー&ペースト経由のAI生成をPRIMARYフローへ格上げ(OSS/無料優先)
+
+APIキー不要な貼り付けモードをAiGeneratePanelのPRIMARYに、APIキー直接生成を`<details>`折りたたみの
+SECONDARY「APIキーで直接生成(上級者向け)」に変更。貼り付けプロンプトはモデル本体と併せて
+ギャラリー投稿用メタ情報(タイトル/説明/タグ)も提案する`{model, meta}`形式に拡張し(旧`{sketches,
+features}`形式・コードフェンス付きテキストも後方互換で読み込み可、`src/ai/pastePayload.ts`)、
+読み込んだmetaはstore(`pendingGalleryMeta`)経由でGallerySubmitDialogへプレフィルされる。
+gate結果: tsc(app/e2e両方)エラーなし、Vitest 674→691件通過+1skip(貼り付け解析・few-shot
+wrapper・プレフィルの単体テスト17件を追加)、UIバンドルgzip262.0KB(変化なし、上限350KB内)、
+E2E 51→52件全通過(2分割でBash実行、share-link.spec.tsの1件は既知の非再現フレークで単独再実行し通過)。
