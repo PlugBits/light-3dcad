@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { FreeOrbitControls } from "./freeOrbitControls";
 
 import type { FeatureId, FilletEdgeRef, LineRef, PointRef, ShellFaceRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
 import type { BodyGroup, EdgeGroup, EdgeInfo, FaceGroup, FaceInfo, MeshData, ReferenceEdgeLine, ThreadAnnotation } from "../protocol/messages";
@@ -1012,7 +1012,7 @@ export class CadViewer {
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
-  private controls: OrbitControls;
+  private controls: FreeOrbitControls;
   private mesh: THREE.Mesh | null = null;
   /** ソリッドのエッジ線(setMesh()でmesh.edgesから構築)。メッシュ更新時に破棄・再構築する。 */
   private edgesMesh: THREE.LineSegments | null = null;
@@ -1456,9 +1456,8 @@ export class CadViewer {
     this.renderer.setSize(Math.max(clientWidth, 1), Math.max(clientHeight, 1));
     container.appendChild(this.renderer.domElement);
 
-    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+    this.controls = new FreeOrbitControls(this.camera, this.renderer.domElement);
     this.controls.target.set(0, 0, 0);
-    this.controls.enableDamping = true;
 
     // SolidWorks風の陰影: 控えめなHemisphere(空色/地色)+ カメラ斜め上からのキーライト
     // + 反対側からの弱いフィルライト(陰影が付く面でも真っ暗にならない程度の補助光)。
