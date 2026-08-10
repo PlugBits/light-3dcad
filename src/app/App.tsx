@@ -53,7 +53,9 @@ import {
   createSlotEntity,
 } from "../model/entity";
 import type {
+  ArcRef,
   CadDocument,
+  EntityRef,
   FeatureId,
   Fillet3DFeature,
   FilletEdgeRef,
@@ -70,6 +72,7 @@ import {
   addCoincidentOriginConstraint,
   addConcentricConstraint,
   addPerpendicularConstraint,
+  addTangentArcLineConstraint,
   addTangentEntityConstraint,
   addTangentSegmentConstraint,
   angleBetweenSegmentAndLine,
@@ -346,7 +349,7 @@ export default function App() {
   } | null>(null);
   // 寸法ツールの1点目待ち状態のステータス表示(ツールバー付近に1行、UI改善対応)。未保留はnull。
   const [dimensionPendingLabel, setDimensionPendingLabel] = useState<string | null>(null);
-  // 拘束ツール(未選択はfalse、Phase 23)。線分/円を2つ順にクリックして垂直・同心・接線拘束を作成する。
+  // 拘束ツール(未選択はfalse、Phase 23。Phase 42bで円弧も対象に追加)。線分/円弧/円を2つ順にクリックして垂直・同心・接線拘束を作成する。
   const [constraintTool, setConstraintTool] = useState(false);
   // 拘束ツールの1つ目待ち状態のステータス表示(寸法ツールのdimensionPendingLabelと同じ位置に表示)。未保留はnull。
   const [constraintPendingLabel, setConstraintPendingLabel] = useState<string | null>(null);
@@ -2083,9 +2086,9 @@ export default function App() {
         if (!pending) {
           setConstraintPendingLabel(null);
         } else if (pending.kind === "segment") {
-          setConstraintPendingLabel("1つ目: 線分 → 2つ目を選択(線分/円)");
+          setConstraintPendingLabel("1つ目: 線分/円弧 → 2つ目を選択(線分/円弧/円)");
         } else if (pending.kind === "circle") {
-          setConstraintPendingLabel("1つ目: 円 → 2つ目を選択(円/線分/原点)");
+          setConstraintPendingLabel("1つ目: 円 → 2つ目を選択(円/線分/円弧/原点)");
         } else if (pending.kind === "point") {
           // 原点一致(追加項目): 線分端点を1つ目としてクリックした状態。
           setConstraintPendingLabel("1つ目: 端点 → 2つ目を選択(原点)");
@@ -2117,9 +2120,25 @@ export default function App() {
     return !hasBody;
   }
 
+  /** segmentIdが円弧セグメント(kind:"arc"かつbulgeあり、Phase 42b)を指しているかどうか。 */
+  function isArcSegmentId(segmentId: string): boolean {
+    const segments = selectedFeature?.type === "sketch" ? (selectedFeature.segments ?? []) : [];
+    const seg = segments.find((s) => s.id === segmentId);
+    return !!seg && seg.kind === "arc" && !!seg.bulge;
+  }
+
+  /** ConstraintPickTarget(circle/segment)をconcentric/tangentのEntityRef|ArcRefへ変換する。それ以外はnull。 */
+  function curveRefFromPickTarget(t: ConstraintPickTarget): EntityRef | ArcRef | null {
+    if (t.kind === "circle") return { entityId: t.entityId };
+    if (t.kind === "segment") return { segmentId: t.segmentId };
+    return null;
+  }
+
   /**
    * ピックした2対象の組み合わせから適用可能な拘束の選択肢を返す(表示ラベル+kind)。
    * 線分+線分=垂直のみ、円+円=同心/接線(外接or内接は自動判定)、円+線分=接線のみ、
+   * 円弧+線分=接線のみ、円弧+円弧/円弧+円=同心のみ(Phase 42b: 円弧の一級化。接線は「円弧+直線」
+   * の組み合わせのみ許可し、円弧が絡む円/円弧同士は同心のみを提示する)、
    * 原点+(線分端点または円)=原点一致のみ(追加項目)。それ以外の組み合わせ(点+点等)は選択肢無し。
    */
   function constraintOptionsFor(
@@ -2131,15 +2150,26 @@ export default function App() {
       if (other.kind === "point" || other.kind === "circle") return [{ label: "原点一致", kind: "coincidentOrigin" }];
       return [];
     }
-    if (a.kind === "segment" && b.kind === "segment") return [{ label: "垂直", kind: "perpendicular" }];
+    if (a.kind === "segment" && b.kind === "segment") {
+      const aArc = isArcSegmentId(a.segmentId);
+      const bArc = isArcSegmentId(b.segmentId);
+      if (!aArc && !bArc) return [{ label: "垂直", kind: "perpendicular" }];
+      if (aArc && bArc) return [{ label: "同心", kind: "concentric" }]; // 円弧↔円弧
+      return [{ label: "接線", kind: "tangent" }]; // 円弧↔直線
+    }
     if (a.kind === "circle" && b.kind === "circle") {
       return [
         { label: "同心", kind: "concentric" },
         { label: "接線", kind: "tangent" },
       ];
     }
-    if ((a.kind === "circle" && b.kind === "segment") || (a.kind === "segment" && b.kind === "circle")) {
-      return [{ label: "接線", kind: "tangent" }];
+    if (a.kind === "segment" && b.kind === "circle") {
+      if (isArcSegmentId(a.segmentId)) return [{ label: "同心", kind: "concentric" }]; // 円弧↔円
+      return [{ label: "接線", kind: "tangent" }]; // 直線↔円
+    }
+    if (a.kind === "circle" && b.kind === "segment") {
+      if (isArcSegmentId(b.segmentId)) return [{ label: "同心", kind: "concentric" }]; // 円弧↔円
+      return [{ label: "接線", kind: "tangent" }]; // 直線↔円
     }
     return [];
   }
@@ -2159,8 +2189,12 @@ export default function App() {
         let next = constraints;
         if (kind === "perpendicular" && a.kind === "segment" && b.kind === "segment") {
           next = addPerpendicularConstraint(constraints, a.segmentId, b.segmentId);
-        } else if (kind === "concentric" && a.kind === "circle" && b.kind === "circle") {
-          next = addConcentricConstraint(constraints, a.entityId, b.entityId);
+        } else if (kind === "concentric") {
+          // Phase 42b: circleエンティティ(EntityRef)・円弧セグメント(ArcRef)のどちらの組み合わせも
+          // 同じヘルパーで扱える(curveRefFromPickTarget)。
+          const refA = curveRefFromPickTarget(a);
+          const refB = curveRefFromPickTarget(b);
+          if (refA && refB) next = addConcentricConstraint(constraints, refA, refB);
         } else if (kind === "coincidentOrigin") {
           // 原点一致(追加項目): a/bのどちらかがoriginで、もう片方が線分端点(point)またはcircle。
           const target = a.kind === "origin" ? b : a;
@@ -2177,6 +2211,13 @@ export default function App() {
             next = addTangentSegmentConstraint(constraints, a.entityId, b.segmentId, feature.entities, feature.segments ?? []);
           } else if (a.kind === "segment" && b.kind === "circle") {
             next = addTangentSegmentConstraint(constraints, b.entityId, a.segmentId, feature.entities, feature.segments ?? []);
+          } else if (a.kind === "segment" && b.kind === "segment") {
+            // 円弧(ArcRef)↔直線のtangent(constraintOptionsForがこの組み合わせを提示するのは
+            // どちらか一方が円弧・もう片方が直線のときのみ)。
+            const aArc = isArcSegmentId(a.segmentId);
+            next = aArc
+              ? addTangentArcLineConstraint(constraints, a.segmentId, b.segmentId)
+              : addTangentArcLineConstraint(constraints, b.segmentId, a.segmentId);
           }
         }
         return setSketchConstraints(doc, sketchId, next);
@@ -2562,7 +2603,7 @@ export default function App() {
                   data-testid="btn-constraint"
                   onClick={constraintTool ? handleCancelConstraintTool : handleStartConstraintTool}
                   disabled={isConstraintToolDisabled()}
-                  title="線分/円を2つ順にクリックして垂直・同心・接線の拘束を作成します(Escで終了)"
+                  title="線分/円弧/円を2つ順にクリックして垂直・同心・接線の拘束を作成します(Escで終了)"
                 >
                   <ToolIcon name="constraint" />
                   <span className="ribbon-tool-label">{constraintTool ? "拘束キャンセル(Esc)" : "拘束"}</span>
@@ -2958,7 +2999,7 @@ export default function App() {
           )}
           {constraintTool && (
             <span data-testid="constraint-tool-hint" style={{ opacity: 0.75 }}>
-              線分/円をクリックして垂直・同心・接線を指定
+              線分/円弧/円をクリックして垂直・同心・接線を指定
             </span>
           )}
           {constraintTool && constraintPendingLabel && (

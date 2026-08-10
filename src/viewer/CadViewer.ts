@@ -703,7 +703,7 @@ declare global {
        * updateDimensionToolTargets()でドキュメント変更のたびに最新化するため、拘束適用後の
        * 実際の解けた座標(ソルバの出力)を確認できる。非アクティブ時は空配列。
        */
-      dimensionToolSegmentsSnapshot: () => { id: string; p1: [number, number]; p2: [number, number] }[];
+      dimensionToolSegmentsSnapshot: () => { id: string; p1: [number, number]; p2: [number, number]; kind: "line" | "arc"; bulge?: number }[];
       /**
        * ねじの簡易表示(Phase 41)オーバーレイの現在の線本数(円+ヘリックス、開発ビルド限定、E2E用)。
        * setThreadAnnotations()が構築したthis.threadAnnotationGroupの子要素数をそのまま返す
@@ -1618,7 +1618,8 @@ export class CadViewer {
         dimensionHoverEntityKind: () => this.dimensionHoverEntityHit?.kind ?? null,
         drawingPointsSnapshot: () => this.drawingPoints.map((p): [number, number] => [p[0], p[1]]),
         cameraDistance: () => this.camera.position.distanceTo(this.controls.target),
-        dimensionToolSegmentsSnapshot: () => this.dimensionToolSegments.map((s) => ({ id: s.id, p1: s.p1, p2: s.p2 })),
+        dimensionToolSegmentsSnapshot: () =>
+          this.dimensionToolSegments.map((s) => ({ id: s.id, p1: s.p1, p2: s.p2, kind: s.kind, bulge: s.bulge })),
         threadAnnotationLineCount: () => this.threadAnnotationGroup.children.length,
       };
     }
@@ -4990,19 +4991,23 @@ export class CadViewer {
   }
 
   /**
-   * ローカル2D座標に最も近い拘束ピック対象(直線セグメント本体・circleエンティティ境界)を求める。
+   * ローカル2D座標に最も近い拘束ピック対象(直線・円弧セグメント本体・circleエンティティ境界)を求める。
    * 許容距離内に何も無ければnull。原点一致(追加項目)のための端点・原点はスクリーン空間で別途
    * 判定する(findConstraintPickHitScreen)ため、ここでは従来通りsegment/circleのみを対象とする。
+   * 円弧セグメント(kind:"arc"かつbulgeあり、Phase 42b: 円弧の一級化)も直線と同じ優先度で
+   * ピック対象にする(接線[円弧↔直線]・同心[円弧↔円/円弧]拘束のため)。ホバー強調は
+   * 直線が[p1,p2]の2点なのに対し、円弧はbulgeArcPointsで近似したポリライン全体を使う。
    */
   private findConstraintPickHit(
     local: [number, number],
   ): { target: ConstraintPickTarget; dist: number; highlightPoints: [number, number][] } | null {
     let best: { target: ConstraintPickTarget; dist: number; highlightPoints: [number, number][] } | null = null;
     for (const seg of this.constraintToolSegments) {
-      if (seg.kind !== "line") continue;
       const d = distPointToSegmentShape(local, seg);
       if (!best || d < best.dist) {
-        best = { target: { kind: "segment", segmentId: seg.id }, dist: d, highlightPoints: [seg.p1, seg.p2] };
+        const highlightPoints =
+          seg.kind === "arc" && seg.bulge ? bulgeArcPoints(seg.p1, seg.p2, seg.bulge, DEFAULT_BULGE_SEGMENTS) : [seg.p1, seg.p2];
+        best = { target: { kind: "segment", segmentId: seg.id }, dist: d, highlightPoints };
       }
     }
     const circles = this.constraintToolEntities.filter((e) => e.kind === "circle");

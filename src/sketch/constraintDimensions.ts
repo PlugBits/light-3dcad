@@ -8,13 +8,24 @@
 //    作るcomputeConstraintDimensions()(src/sketch/dimensions.tsのcomputeSketchDimensions()と対になる、
 //    entities由来ではなくconstraints/segments由来のラベル一覧)。
 import { generateId } from "../model/id";
-import type { EntityRef, LineRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
+import type { ArcRef, EntityRef, LineRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
 import { arcGeometryFromBulge } from "./bulge";
 import { resolveLineRefPoints, sameLineRef } from "./entityEdges";
 
 /** point(PointRef)とentity(EntityRef)を判別するタイプガード(coincidentOrigin拘束のpointフィールド、追加項目)。 */
 function isPointRef(ref: PointRef | EntityRef): ref is PointRef {
   return "segmentId" in ref;
+}
+
+/** EntityRef(circleエンティティ)とArcRef(円弧セグメント)を判別するタイプガード(Phase 42b、concentric/tangent)。 */
+function isArcCurveRef(ref: EntityRef | ArcRef): ref is ArcRef {
+  return "segmentId" in ref;
+}
+
+/** EntityRef|ArcRefが同じ対象を指しているか(concentric拘束の重複判定用)。 */
+function sameCurveRef(a: EntityRef | ArcRef, b: EntityRef | ArcRef): boolean {
+  if (isArcCurveRef(a) !== isArcCurveRef(b)) return false;
+  return isArcCurveRef(a) && isArcCurveRef(b) ? a.segmentId === b.segmentId : (a as EntityRef).entityId === (b as EntityRef).entityId;
 }
 
 export type Point2 = [number, number];
@@ -316,25 +327,23 @@ export function addPerpendicularConstraint(
   return [...constraints, { id: generateId("constraint"), kind: "perpendicular", a: segmentIdA, b: segmentIdB }];
 }
 
-function sameConcentricPair(constraint: SketchConstraint, a: string, b: string): boolean {
+function sameConcentricPair(constraint: SketchConstraint, a: EntityRef | ArcRef, b: EntityRef | ArcRef): boolean {
   if (constraint.kind !== "concentric") return false;
-  return (
-    (constraint.a.entityId === a && constraint.b.entityId === b) ||
-    (constraint.a.entityId === b && constraint.b.entityId === a)
-  );
+  return (sameCurveRef(constraint.a, a) && sameCurveRef(constraint.b, b)) || (sameCurveRef(constraint.a, b) && sameCurveRef(constraint.b, a));
 }
 
-/** 2つのcircleエンティティのconcentric拘束を追加する(同じ組み合わせが既にあれば何もしない)。 */
+/**
+ * 2つの中心(circleエンティティ、または円弧セグメント)のconcentric拘束を追加する(同じ組み合わせが
+ * 既にあれば何もしない)。Phase 42bでcircleエンティティ(EntityRef)に加え円弧セグメント(ArcRef、
+ * `{segmentId}`)も指定できるように拡張した(円↔円/円↔円弧/円弧↔円弧のいずれも中心の一致)。
+ */
 export function addConcentricConstraint(
   constraints: readonly SketchConstraint[],
-  entityIdA: string,
-  entityIdB: string,
+  a: EntityRef | ArcRef,
+  b: EntityRef | ArcRef,
 ): SketchConstraint[] {
-  if (constraints.some((c) => sameConcentricPair(c, entityIdA, entityIdB))) return constraints.slice();
-  return [
-    ...constraints,
-    { id: generateId("constraint"), kind: "concentric", a: { entityId: entityIdA }, b: { entityId: entityIdB } },
-  ];
+  if (constraints.some((c) => sameConcentricPair(c, a, b))) return constraints.slice();
+  return [...constraints, { id: generateId("constraint"), kind: "concentric", a, b }];
 }
 
 /**
@@ -355,7 +364,12 @@ export function addTangentSegmentConstraint(
   segments: readonly SketchSegment[] = [],
 ): SketchConstraint[] {
   const exists = constraints.some(
-    (c) => c.kind === "tangent" && c.entity.entityId === entityId && c.target.kind === "segment" && c.target.segmentId === segmentId,
+    (c) =>
+      c.kind === "tangent" &&
+      !isArcCurveRef(c.entity) &&
+      c.entity.entityId === entityId &&
+      c.target.kind === "segment" &&
+      c.target.segmentId === segmentId,
   );
   if (exists) return constraints.slice();
 
@@ -381,6 +395,32 @@ export function addTangentSegmentConstraint(
 }
 
 /**
+ * 円弧セグメント↔直線セグメントのtangent拘束を追加する(Phase 42b新設、既に同じ組み合わせが
+ * あれば何もしない)。addTangentSegmentConstraint(circle↔直線)と異なり、円弧側の半径は
+ * PlaneGCSのネイティブarcプリミティの実変数のため、側(side)の永続化は不要(gcsAdapter.tsの
+ * tangent_la実装が内部で扱う。円↔直線のp2l_distance手組み実装とは事情が異なる)。
+ */
+export function addTangentArcLineConstraint(
+  constraints: readonly SketchConstraint[],
+  arcSegmentId: string,
+  lineSegmentId: string,
+): SketchConstraint[] {
+  const exists = constraints.some(
+    (c) =>
+      c.kind === "tangent" &&
+      isArcCurveRef(c.entity) &&
+      c.entity.segmentId === arcSegmentId &&
+      c.target.kind === "segment" &&
+      c.target.segmentId === lineSegmentId,
+  );
+  if (exists) return constraints.slice();
+  return [
+    ...constraints,
+    { id: generateId("constraint"), kind: "tangent", entity: { segmentId: arcSegmentId }, target: { kind: "segment", segmentId: lineSegmentId } },
+  ];
+}
+
+/**
  * circleエンティティ↔circleエンティティのtangent拘束を追加する(既に同じ組み合わせがあれば何もしない)。
  * mode(外接/内接)は現在の中心間距離が外接目標(r1+r2)・内接目標(|r1-r2|)のどちらに近いかで自動選択する
  * (拘束作成時点の形状から意図を推定する。以後は固定値として保存され、動かない)。
@@ -392,7 +432,10 @@ export function addTangentEntityConstraint(
   entityIdB: string,
 ): SketchConstraint[] {
   const exists = constraints.some(
-    (c) => c.kind === "tangent" && c.target.kind === "entity" &&
+    (c) =>
+      c.kind === "tangent" &&
+      !isArcCurveRef(c.entity) &&
+      c.target.kind === "entity" &&
       ((c.entity.entityId === entityIdA && c.target.entityId === entityIdB) ||
         (c.entity.entityId === entityIdB && c.target.entityId === entityIdA)),
   );
