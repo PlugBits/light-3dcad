@@ -16,6 +16,8 @@ declare global {
       cameraDistance: () => number;
       /** 寸法ツール中のヒット判定対象セグメントの現在の座標スナップショット(Phase 30、頂点ベースの寸法指定検証用)。 */
       dimensionToolSegmentsSnapshot: () => { id: string; p1: [number, number]; p2: [number, number] }[];
+      /** ねじの簡易表示(Phase 41)オーバーレイの現在の線本数(円+ヘリックス)。 */
+      threadAnnotationLineCount: () => number;
     };
     /**
      * Workerへ「故意にthrowする」メッセージを送り、実際のWorkerクラッシュ(Workerのerrorイベント)を

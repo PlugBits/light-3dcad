@@ -65,7 +65,7 @@ import type {
   ThreadFeature,
   ThreadPreset,
 } from "../model/types";
-import { MALE_THREAD_MAX_LENGTH, THREAD_PRESET_LIST } from "../model/threadPresets";
+import { THREAD_PRESET_LIST } from "../model/threadPresets";
 import {
   addCoincidentOriginConstraint,
   addConcentricConstraint,
@@ -177,6 +177,7 @@ export default function App() {
   const sketchPlanes = useCadStore((s) => s.sketchPlanes);
   const referenceEdges = useCadStore((s) => s.referenceEdges);
   const bodyGroups = useCadStore((s) => s.bodyGroups);
+  const threadAnnotations = useCadStore((s) => s.threadAnnotations);
   const errorMessage = useCadStore((s) => s.errorMessage);
   const errorFeatureId = useCadStore((s) => s.errorFeatureId);
   const kernelCrashed = useCadStore((s) => s.kernelCrashed);
@@ -521,6 +522,13 @@ export default function App() {
       viewerRef.current?.setMesh(mesh, faceInfo, edgeInfo, bodyGroups);
     }
   }, [mesh, faceInfo, edgeInfo, bodyGroups]);
+
+  // ねじフィーチャーの簡易表示(Phase 41): threadAnnotationsが更新されるたびに二重円+ヘリックス線の
+  // オーバーレイを再構築する(setMesh()とは独立。ボディが再構築されない場合でもthreadAnnotationsだけ
+  // 変わることは無いはずだが、依存配列は他の派生状態と同じくstore側の配列参照で判定する)。
+  useEffect(() => {
+    viewerRef.current?.setThreadAnnotations(threadAnnotations);
+  }, [threadAnnotations]);
 
   // 部品移動ツール(Phase 28a): ドキュメントが変わるたびに、partInstanceフィーチャーのfeatureId集合を
   // ビューアへ同期する(ドラッグ対象=部品ボディかどうかの判定に使う)。
@@ -2781,12 +2789,10 @@ export default function App() {
                         data-testid="thread-tool-length"
                         value={threadLength}
                         min={0.1}
-                        max={threadHand === "male" ? MALE_THREAD_MAX_LENGTH : undefined}
                         step="any"
                         onChange={(e) => {
                           const v = Number(e.target.value);
                           if (!Number.isFinite(v) || v <= 0) return;
-                          if (threadHand === "male" && v > MALE_THREAD_MAX_LENGTH) return;
                           setThreadLength(v);
                         }}
                       />

@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
 import type { FeatureId, FilletEdgeRef, LineRef, PointRef, ShellFaceRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
-import type { BodyGroup, EdgeGroup, EdgeInfo, FaceGroup, FaceInfo, MeshData, ReferenceEdgeLine } from "../protocol/messages";
+import type { BodyGroup, EdgeGroup, EdgeInfo, FaceGroup, FaceInfo, MeshData, ReferenceEdgeLine, ThreadAnnotation } from "../protocol/messages";
 import { bulgeArcPoints, bulgeFromThreePoints, DEFAULT_BULGE_SEGMENTS } from "../sketch/bulge";
 import { findEntityDimensionHit, type EntityDimensionHit } from "../sketch/entityDimensionPick";
 import type { Segment as DimensionLineSegment } from "./dimensionGraphics";
@@ -85,6 +85,70 @@ const REFERENCE_PLANE_COLORS: Record<"XY" | "XZ" | "YZ", number> = {
 
 /** ボディ端面参照エッジ(Phase 22)の破線オーバーレイ色(控えめなグレー)。 */
 const REFERENCE_EDGE_COLOR = 0x888888;
+
+/**
+ * ねじの簡易表示(コスメティック表示、Phase 41)の線オーバーレイ色・不透明度。
+ * ソリッド本体のエッジ色(EDGE_COLOR、ほぼ黒)よりわずかに明るいチャコールグレーにし、選択/ホバー色
+ * (黄・水色・オレンジ)とも被らない色にすることで、「実エッジではない付加情報」だと視覚的に
+ * 区別できるようにする(実サイズ寸法通りのB-Repではないため誤認を避ける狙い)。depthTest:falseで
+ * 常時描画するため(setThreadAnnotations()のコメント参照)、opacity<1で実体を透かして見せる。
+ */
+const THREAD_ANNOTATION_COLOR = 0x2f3338;
+const THREAD_ANNOTATION_OPACITY = 0.8;
+/** ねじ山ヘリックス線の1回転あたりのセグメント数(円滑さと頂点数のバランス、Phase 41)。 */
+const THREAD_HELIX_SEGMENTS_PER_TURN = 24;
+/** ねじ山ヘリックス線を軸方向に見せる際の目安巻き数の範囲(Phase 41、length/pitch相当が無いためlengthから概算する)。 */
+const THREAD_HELIX_MIN_TURNS = 6;
+const THREAD_HELIX_MAX_TURNS = 8;
+/** ねじの簡易表示(Phase 41)の円・ヘリックス線を描く際の円周方向の分割数。 */
+const THREAD_ANNOTATION_CIRCLE_SEGMENTS = 48;
+
+/**
+ * axisDir(単位ベクトル)に垂直な平面上の正規直交基底(u, v)を求める(Phase 41、ねじの簡易表示の
+ * 円・ヘリックス線がaxisDir周りに垂直な断面円を描くために使う)。axisDirとほぼ平行な適当なベクトル
+ * (world +Xまたは+Y、どちらかが必ずaxisDirと十分離れている)を選んでcrossを2回取ることで求める
+ * (原点トライアド[updateAxisIndicator]と同様、視点非依存の単純な方式)。
+ */
+function threadAnnotationBasis(axisDir: THREE.Vector3): { u: THREE.Vector3; v: THREE.Vector3 } {
+  const arbitrary = Math.abs(axisDir.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+  const u = new THREE.Vector3().crossVectors(axisDir, arbitrary).normalize();
+  const v = new THREE.Vector3().crossVectors(axisDir, u).normalize();
+  return { u, v };
+}
+
+/** center中心、(u,v)平面上の半径radiusの円周点列(閉ループ、始点=終点、Phase 41)。 */
+function threadAnnotationCirclePoints(center: THREE.Vector3, u: THREE.Vector3, v: THREE.Vector3, radius: number): THREE.Vector3[] {
+  const points: THREE.Vector3[] = [];
+  for (let i = 0; i <= THREAD_ANNOTATION_CIRCLE_SEGMENTS; i += 1) {
+    const theta = (i / THREAD_ANNOTATION_CIRCLE_SEGMENTS) * Math.PI * 2;
+    points.push(center.clone().addScaledVector(u, radius * Math.cos(theta)).addScaledVector(v, radius * Math.sin(theta)));
+  }
+  return points;
+}
+
+/**
+ * start(軸開始点)からaxisDir方向へlengthぶん伸びるヘリックスの点列(Phase 41)。
+ * turns回転ぶんをTHREAD_HELIX_SEGMENTS_PER_TURNで分割する(24segments/turn、ゆるやかな曲線)。
+ */
+function threadAnnotationHelixPoints(
+  start: THREE.Vector3,
+  axisDir: THREE.Vector3,
+  u: THREE.Vector3,
+  v: THREE.Vector3,
+  radius: number,
+  length: number,
+  turns: number,
+): THREE.Vector3[] {
+  const totalSegments = Math.max(2, Math.round(turns * THREAD_HELIX_SEGMENTS_PER_TURN));
+  const points: THREE.Vector3[] = [];
+  for (let i = 0; i <= totalSegments; i += 1) {
+    const frac = i / totalSegments;
+    const theta = frac * turns * Math.PI * 2;
+    const center = start.clone().addScaledVector(axisDir, frac * length);
+    points.push(center.addScaledVector(u, radius * Math.cos(theta)).addScaledVector(v, radius * Math.sin(theta)));
+  }
+  return points;
+}
 
 /** 選択中スケッチの線色(オレンジ、拘束診断が無い[GCS未初期化・図形が無い]間の既定色)。 */
 const SKETCH_SELECTED_COLOR = 0xff9800;
@@ -640,6 +704,12 @@ declare global {
        * 実際の解けた座標(ソルバの出力)を確認できる。非アクティブ時は空配列。
        */
       dimensionToolSegmentsSnapshot: () => { id: string; p1: [number, number]; p2: [number, number] }[];
+      /**
+       * ねじの簡易表示(Phase 41)オーバーレイの現在の線本数(円+ヘリックス、開発ビルド限定、E2E用)。
+       * setThreadAnnotations()が構築したthis.threadAnnotationGroupの子要素数をそのまま返す
+       * (雄1本あたり3本[両端面の谷径円2+ヘリックス1]、雌1本あたり2本[入口面の呼び径円1+ヘリックス1])。
+       */
+      threadAnnotationLineCount: () => number;
     };
   }
 }
@@ -990,6 +1060,16 @@ export class CadViewer {
   private interferenceGroup: THREE.Group;
   private interferenceGeometries: THREE.BufferGeometry[] = [];
   private interferenceMaterials: THREE.MeshBasicMaterial[] = [];
+  /**
+   * ねじの簡易表示(コスメティック表示、Phase 41)の「二重円+ヘリックス」線オーバーレイを乗せる
+   * グループ。setMesh()と同様、setThreadAnnotations()が呼ばれるたびに全消去して作り直す
+   * (実B-Repには含まれない付加情報のため、ソリッド本体のメッシュ再構築とはライフサイクルが独立)。
+   * raycastは常にthis.meshに対してのみ行う(このファイル内のintersectObject呼び出し箇所を参照)ため、
+   * このグループをシーンに追加してもピッキング(面/エッジ選択等)には一切影響しない。
+   */
+  private threadAnnotationGroup: THREE.Group;
+  private threadAnnotationGeometries: THREE.BufferGeometry[] = [];
+  private threadAnnotationMaterials: THREE.Material[] = [];
   /** 現在のメッシュのバウンディングボックスから求めた半径目安(mm)。グリッド範囲の基準に使う。 */
   private meshHalfExtent = 50;
   /** 初回メッシュ受信時にfitToView()を自動実行するためのフラグ(2回目以降は視点を維持する)。 */
@@ -1416,6 +1496,9 @@ export class CadViewer {
     this.interferenceGroup = new THREE.Group();
     this.scene.add(this.interferenceGroup);
 
+    this.threadAnnotationGroup = new THREE.Group();
+    this.scene.add(this.threadAnnotationGroup);
+
     // コンテナを絶対配置の基準にする(座標オーバーレイをcanvas上にpxで重ねるため)。
     // containerは既存レイアウト上は幅・高さ100%のプレーンなdivであり、position指定を持たない
     // 想定なのでrelativeにしても既存の見た目には影響しない。
@@ -1536,6 +1619,7 @@ export class CadViewer {
         drawingPointsSnapshot: () => this.drawingPoints.map((p): [number, number] => [p[0], p[1]]),
         cameraDistance: () => this.camera.position.distanceTo(this.controls.target),
         dimensionToolSegmentsSnapshot: () => this.dimensionToolSegments.map((s) => ({ id: s.id, p1: s.p1, p2: s.p2 })),
+        threadAnnotationLineCount: () => this.threadAnnotationGroup.children.length,
       };
     }
   }
@@ -2256,6 +2340,70 @@ export class CadViewer {
     this.interferenceMaterials.forEach((m) => m.dispose());
     this.interferenceGeometries = [];
     this.interferenceMaterials = [];
+  }
+
+  /**
+   * ねじの簡易表示(コスメティック表示、Phase 41)の線オーバーレイを再構築する。App側は
+   * store.threadAnnotations(Worker評価応答由来)が変わるたびにこれを呼ぶ。呼ぶたびに既存の
+   * オーバーレイを全消去してから作り直す(setMesh()と同じ「毎回作り直し」方針。ねじの数・配置は
+   * 評価のたびに変わりうるため差分更新はしない)。
+   * 雄(male): 谷径(minorRadius)の円を両端面に、谷径のヘリックスを軸方向全長に描く(実ソリッドは
+   * 呼び径[majorRadius]の単純円柱のため、谷径円は実際の外形シルエットに対する「二重円」になる)。
+   * 雌(female): 呼び径(majorRadius)の円を入口面(position、下穴の始点)に、呼び径のヘリックスを
+   * 穴の内部に描く(実際に削られている下穴は谷径[minorRadius=下穴半径]のため、入口面の円は
+   * 実穴の縁に対する「二重円」になる)。
+   *
+   * depthTestはあえて無効にする(実装検証の結果、有効にすると次の理由でほぼ何も見えなくなることが
+   * 判明したため): 谷径・呼び径の線は、実ソリッド(単純円柱)の外形半径の「内側」に位置する
+   * ため、中身の詰まった(中空でない)ソリッドの内部に完全に埋没する。中身の詰まったソリッドの
+   * 内部の点は、外部のどのカメラ位置から見てもレイが必ず先に外側の実表面に当たるため、
+   * 正しいdepth testでは理論上も実測上も常に隠れる(スクリーンショットで実際に確認済み)。
+   * 二重円・ヘリックスとも実B-Repではない模式的な付加情報(JIS製図の簡易ねじ表示と同じ位置づけ)
+   * であるため、常時視認できることを優先し、referenceEdgeGroup(Phase 22のボディ端面参照エッジ、
+   * 同じくdepthTest:false)と同じ方針にする。
+   */
+  setThreadAnnotations(annotations: ThreadAnnotation[]) {
+    this.threadAnnotationGroup.clear();
+    this.threadAnnotationGeometries.forEach((g) => g.dispose());
+    this.threadAnnotationMaterials.forEach((m) => m.dispose());
+    this.threadAnnotationGeometries = [];
+    this.threadAnnotationMaterials = [];
+
+    const addLine = (points: THREE.Vector3[]) => {
+      const geometry = new THREE.BufferGeometry().setFromPoints(points);
+      const material = new THREE.LineBasicMaterial({
+        color: THREAD_ANNOTATION_COLOR,
+        transparent: true,
+        opacity: THREAD_ANNOTATION_OPACITY,
+        depthTest: false,
+      });
+      const line = new THREE.Line(geometry, material);
+      this.threadAnnotationGroup.add(line);
+      this.threadAnnotationGeometries.push(geometry);
+      this.threadAnnotationMaterials.push(material);
+    };
+
+    for (const ann of annotations) {
+      const position = new THREE.Vector3(...ann.position);
+      const axisDir = new THREE.Vector3(...ann.axisDir).normalize();
+      const { u, v } = threadAnnotationBasis(axisDir);
+      const turns = Math.min(THREAD_HELIX_MAX_TURNS, Math.max(THREAD_HELIX_MIN_TURNS, Math.round(ann.length / 3)));
+
+      if (ann.kind === "male") {
+        // 両端面(z=0とz=length)の谷径円(実ソリッドの呼び径円柱の平坦な端面上に乗るため、
+        // depthTestが有効でも実体表面と同じ深さでz-fightingなく描ける)。
+        addLine(threadAnnotationCirclePoints(position, u, v, ann.minorRadius));
+        const farCenter = position.clone().addScaledVector(axisDir, ann.length);
+        addLine(threadAnnotationCirclePoints(farCenter, u, v, ann.minorRadius));
+        // 谷径のヘリックス(円柱表面沿い、軸方向全長)。
+        addLine(threadAnnotationHelixPoints(position, axisDir, u, v, ann.minorRadius, ann.length, turns));
+      } else {
+        // 入口面(下穴の開始点)の呼び径円のみ(実穴の縁[谷径=下穴半径]に対する二重円効果)。
+        addLine(threadAnnotationCirclePoints(position, u, v, ann.majorRadius));
+        // 呼び径のヘリックス(穴の内部、軸方向全長)。
+        addLine(threadAnnotationHelixPoints(position, axisDir, u, v, ann.majorRadius, ann.length, turns));
+      }
+    }
   }
 
   /**
@@ -6189,6 +6337,8 @@ export class CadViewer {
     this.clearDrawingPreview();
     this.clearDimensionSelectHighlight();
     this.clearInterferenceMeshes();
+    this.threadAnnotationGeometries.forEach((g) => g.dispose());
+    this.threadAnnotationMaterials.forEach((m) => m.dispose());
     this.referenceEdgeGeometries.forEach((g) => g.dispose());
     this.referenceEdgeMaterials.forEach((m) => m.dispose());
     this.referencePlaneEntries.forEach((entry) => {
