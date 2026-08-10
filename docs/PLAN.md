@@ -1079,3 +1079,18 @@ MIT License・`THIRD_PARTY_NOTICES.md`(OCCT/PlaneGCSのLGPL-2.1系WASM無改変�
 事前入力して開く(長すぎる場合はクリップボードへフォールバック)。`model-submission.yml`
 ワークフローがissue本文をパース・検証し`models/<slug>/`へのPRを自動作成する(`scripts/`配下の
 Node製ロジックをvitestで単体テスト、実際のAction実行はこの環境では検証不可)。
+
+## Phase 41: ねじを簡易表示化、ロフト廃止で高速化
+
+実機報告(雄ねじの実体が尖って見える、雌ねじが素の穴と区別できない)を受け、雄ねじの実ヘリカル
+ねじ山ソリッド(loft+fuse、`buildMaleThreadSolidLocal`/`THREAD_SECTIONS_PER_TURN`/LRUキャッシュ)を
+撤去し、呼び径円柱のfuseのみにした(評価は数秒〜十数秒→事実上瞬時。`MALE_THREAD_MAX_LENGTH`
+[20mm上限、loft専用の制約]もUI・validation.ts・evaluator.tsから撤去)。雌ねじ(下穴cut)は変更なし。
+見た目上の「ねじらしさ」はWorker評価応答に追加した`threadAnnotations`(位置・軸・呼び径・谷径・長さ)
+経由でビューアが描く、JIS製図の「二重円」表現を参考にした線オーバーレイ(両端面/入口面の円+
+軸方向のヘリックス線、`CadViewer#setThreadAnnotations`、実B-Repに含めずraycastの対象外)が担う。
+中身の詰まったソリッド内部に埋没する線はdepthTest有効では原理的に不可視になることを実測で確認した
+ため、この線オーバーレイのみdepthTest:falseの常時描画にした(referenceEdgeGroupと同じ方針)。
+gate結果: `tsc --noEmit`(app/e2e両方)エラーなし、Vitest 636→638件通過+1skip(ヘリカルloft関連
+テスト3件を撤去し、threadAnnotations検証2件+高速化検証1件を追加)、`vite build`+`npm run size`で
+メインバンドルgzip 263.7KB(変化なし、上限350KB内)、E2E 47件全通過(2分割でBash同期実行)。
