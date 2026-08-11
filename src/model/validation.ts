@@ -561,6 +561,19 @@ export function validateFeature(feature: Feature, allFeatures: readonly Feature[
     if (!feature.face.center.every((c) => Number.isFinite(c)) || !feature.face.normal.every((c) => Number.isFinite(c))) {
       errors.push({ featureId: feature.id, message: "ねじの配置面の中心・法線座標が不正です" });
     }
+    // 配置基準参照(positionRef、Phase 46)の構造チェック。実際の「同じ面かどうか」の幾何検証は
+    // ジオメトリ解決が必要なためsrc/worker/evaluator.tsが評価時に行う(見つからない/面が違う場合は
+    // 評価エラーになる。extrude/revolveのsketchId・validateTargetBodyIdと同じ考え方)。
+    if (feature.positionRef) {
+      const refSketch = allFeatures.find((f) => f.id === feature.positionRef?.sketchId);
+      if (!refSketch) {
+        errors.push({ featureId: feature.id, message: `配置基準のスケッチ(${feature.positionRef.sketchId})が存在しません` });
+      } else if (refSketch.type !== "sketch") {
+        errors.push({ featureId: feature.id, message: `配置基準の参照先(${feature.positionRef.sketchId})はスケッチではありません` });
+      } else if (!refSketch.entities.find((e) => e.id === feature.positionRef?.entityId && e.kind === "circle")) {
+        errors.push({ featureId: feature.id, message: `配置基準の円(${feature.positionRef.entityId})が見つかりません` });
+      }
+    }
   } else if (feature.type === "mate") {
     if (feature.kind !== "coincident" && feature.kind !== "distance" && feature.kind !== "concentric") {
       errors.push({ featureId: feature.id, message: `合致(${feature.name})の種別が不正です` });

@@ -3259,6 +3259,7 @@ export default function App() {
               {selectedFeature.type === "thread" && (
                 <ThreadEditor
                   thread={selectedFeature}
+                  doc={doc}
                   hasError={errorFeatureId === selectedFeature.id}
                   isReselecting={threadReselectTargetId === selectedFeature.id}
                   onStartReselect={() => handleStartThreadReselect(selectedFeature)}

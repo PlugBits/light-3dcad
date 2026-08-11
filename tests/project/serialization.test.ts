@@ -5,9 +5,12 @@ import {
   addExtrudeFeature,
   addPartInstanceFeature,
   addSketchFeature,
+  addThreadFeature,
+  createCircleEntity,
   createEmptyDocument,
   createLineSegment,
   createRectangleEntity,
+  patchThreadPositionRef,
 } from "../../src/model";
 import { deserializeProject, PROJECT_FORMAT, PROJECT_SCHEMA_VERSION, serializeProject } from "../../src/project/serialization";
 
@@ -106,6 +109,77 @@ describe("serializeProject / deserializeProject", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.doc).toEqual(docWithOffsets);
+    }
+  });
+
+  it("ねじフィーチャー(positionRef省略、Phase 46追加前と同形)はserialize→deserializeで完全一致する(往復テスト)", () => {
+    const { doc: withExtrude } = (() => {
+      const rect = createRectangleEntity({ width: 60, height: 40 });
+      const { doc: withSketch, feature: sketch } = addSketchFeature(createEmptyDocument(), {
+        name: "Sketch1",
+        plane: { kind: "world", plane: "XY" },
+        entities: [rect],
+      });
+      return addExtrudeFeature(withSketch, { name: "Extrude1", sketchId: sketch.id, distance: 20, direction: 1, operation: "newBody" });
+    })();
+    const { doc } = addThreadFeature(withExtrude, {
+      name: "M6ねじ1",
+      hand: "male",
+      preset: "M6",
+      length: 10,
+      face: { faceId: 1, center: [0, 0, 20], normal: [0, 0, 1] },
+      position: [3, -4],
+      direction: 1,
+    });
+    const text = serializeProject(doc);
+    const result = deserializeProject(text);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.doc).toEqual(doc);
+    }
+  });
+
+  it("positionRef(スケッチの円参照配置、Phase 46追加項目)を含むねじフィーチャーもserialize→deserializeで完全一致する(往復テスト、追加フィールドの後方互換性)", () => {
+    const rect = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: withSketch, feature: sketch } = addSketchFeature(createEmptyDocument(), {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+    });
+    const { doc: withExtrude, feature: extrude } = addExtrudeFeature(withSketch, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+    const circle = createCircleEntity({ center: [3, -4], radius: 2 });
+    const { doc: withFaceSketch, feature: faceSketch } = addSketchFeature(withExtrude, {
+      name: "FaceSketch1",
+      plane: { kind: "face", featureId: extrude.id, faceId: 1, center: [0, 0, 20], normal: [0, 0, 1] },
+      entities: [circle],
+    });
+    const { doc: withThread, feature: thread } = addThreadFeature(withFaceSketch, {
+      name: "M6ねじ1",
+      hand: "male",
+      preset: "M6",
+      length: 10,
+      face: { faceId: 1, center: [0, 0, 20], normal: [0, 0, 1] },
+      position: [3, -4],
+      direction: 1,
+    });
+    const doc = patchThreadPositionRef(withThread, thread.id, { sketchId: faceSketch.id, entityId: circle.id });
+
+    const text = serializeProject(doc);
+    const result = deserializeProject(text);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.doc).toEqual(doc);
+      const restoredThread = result.doc.features.find((f) => f.id === thread.id);
+      expect(restoredThread?.type === "thread" ? restoredThread.positionRef : undefined).toEqual({
+        sketchId: faceSketch.id,
+        entityId: circle.id,
+      });
     }
   });
 

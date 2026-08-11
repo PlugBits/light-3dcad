@@ -169,12 +169,38 @@ export interface ReferenceEdgeSet {
  *     「二重円」効果になる。
  */
 export interface ThreadAnnotation {
+  /** 元になったthreadフィーチャーのid(Phase 46追加。UI側がthreadAnnotations[]から特定のねじを引くために使う)。 */
+  featureId: FeatureId;
   kind: "male" | "female";
   position: [number, number, number];
   axisDir: [number, number, number];
   majorRadius: number;
   minorRadius: number;
   length: number;
+}
+
+/**
+ * positionRef(Phase 46: ねじのスケッチ参照配置)が設定されたthreadフィーチャー1件分の、
+ * 評価で解決した配置位置(面ローカル2D座標、mm)の書き戻し情報。合致(メイト)ソルバの
+ * SolvedPlacementと同じ設計(履歴を積まない直接のdoc反映、src/state/store.tsの
+ * applyThreadPositionUpdates参照)。positionRefが無いthreadフィーチャーは含まれない。
+ */
+export interface ThreadPositionUpdate {
+  featureId: FeatureId;
+  position: [number, number];
+}
+
+/**
+ * extrude/revolveフィーチャー1件が実際に作用したボディのfeatureId(Phase 46: 押し出し選択時の
+ * 対象ハイライト用)。bodyFeatureIdはbodyGroups[].featureIdと同じ値(そのボディを作ったnewBody
+ * フィーチャーのid)で、operation:"newBody"ならfeatureId自身、"cut"/"add"ならevaluator.tsの
+ * applyBodyOperation()が実際に解決した対象ボディ(targetBodyId省略時はlastBodyId())になる。
+ * ビューアは選択中フィーチャーのidからこの配列を引いてbodyFeatureIdを特定し、bodyGroupsで
+ * 該当ボディの面群を強調表示する。
+ */
+export interface BodyOperationTarget {
+  featureId: FeatureId;
+  bodyFeatureId: FeatureId;
 }
 
 /**
@@ -229,6 +255,10 @@ export type WorkerResponse =
       solvedPlacements: SolvedPlacement[];
       /** ねじフィーチャーの簡易表示用メタデータ(Phase 41)。ねじが無ければ空配列。 */
       threadAnnotations: ThreadAnnotation[];
+      /** positionRef(Phase 46)で解決した配置位置の書き戻し。対象のthreadフィーチャーが無ければ空配列。 */
+      threadPositionUpdates: ThreadPositionUpdate[];
+      /** extrude/revolveフィーチャー→実際に作用したボディのfeatureId対応(Phase 46)。フィーチャーが無ければ空配列。 */
+      bodyOperationTargets: BodyOperationTarget[];
     }
   | { kind: "stl"; requestId: string; blob: Blob }
   /** STEPエクスポート応答(Phase 26)。 */

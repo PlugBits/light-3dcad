@@ -74,13 +74,16 @@ import { computeFacePlaneBasis, facePlaneRawXDir } from "../sketch/facePlaneBasi
 import { findClosedRegions, loopPolyline } from "../sketch/regions";
 import { regularPolygonVertices, slotAxisNormal, SLOT_CAP_BULGE } from "../sketch/shapeFromPoints";
 import { THREAD_PRESET_TABLE, threadDrillDiameter } from "../model/threadPresets";
+import { sameFacePlane } from "../model/threadPositionRef";
 import type {
   BodyGroup,
+  BodyOperationTarget,
   ReferenceEdgeLine,
   ReferenceEdgeSet,
   SketchPlaneInfo,
   SolvedPlacement,
   ThreadAnnotation,
+  ThreadPositionUpdate,
 } from "../protocol/messages";
 
 export interface EvaluationSuccess {
@@ -127,6 +130,17 @@ export interface EvaluationSuccess {
    * 線オーバーレイを描くために使う(src/protocol/messages.tsのThreadAnnotation参照)。
    */
   threadAnnotations: ThreadAnnotation[];
+  /**
+   * positionRef(Phase 46: ねじのスケッチ参照配置)で解決した配置位置の書き戻し。positionRefを
+   * 持つthreadフィーチャーが無ければ空配列(src/protocol/messages.tsのThreadPositionUpdate参照)。
+   */
+  threadPositionUpdates: ThreadPositionUpdate[];
+  /**
+   * extrude/revolveフィーチャー→実際に作用したボディのfeatureId対応(Phase 46: 押し出し選択時の
+   * 対象ハイライト用)。doc.features中の全extrude/revolveフィーチャーが対象(フィーチャーが無ければ
+   * 空配列。src/protocol/messages.tsのBodyOperationTarget参照)。
+   */
+  bodyOperationTargets: BodyOperationTarget[];
 }
 
 export interface EvaluationFailure {
@@ -895,6 +909,42 @@ function orientLocalSolidToWorld(shape: Shape3D, position: Tuple3, axisDir: Tupl
 }
 
 /**
+ * ねじの配置基準参照(positionRef、Phase 46: ねじのスケッチ参照配置)を解決し、面ローカル2D座標
+ * (u, v)を返す。参照先スケッチはthreadFace(evaluator.tsが解決した現在のねじ配置面のcenter/normal)と
+ * ほぼ同じ面上のface参照スケッチである必要があり、参照先の円(entityId、circleエンティティ)の中心を
+ * そのまま面ローカル座標として使う(sketchのローカル2D基底はsrc/sketch/facePlaneBasis.tsの
+ * computeFacePlaneBasis()が中心・法線のみから決定的に求めるため、同じ面ならスケッチのローカル原点/
+ * 軸方向とねじの面ローカル座標系は完全に一致する)。
+ * 参照先が見つからない/面が異なる場合はfeatureId付きエラー(呼び出し元のtry/catchで捕捉される)。
+ */
+function resolveThreadPositionRef(
+  ref: { sketchId: FeatureId; entityId: string },
+  sketches: Map<FeatureId, SketchFeature>,
+  resolvedFacePlanes: Map<FeatureId, { center: Tuple3; normal: Tuple3 }>,
+  threadFace: { center: Tuple3; normal: Tuple3 },
+): [number, number] {
+  const refSketch = sketches.get(ref.sketchId);
+  if (!refSketch) {
+    throw new Error(`ねじの配置基準のスケッチ(${ref.sketchId})が見つかりません`);
+  }
+  if (refSketch.plane.kind !== "face") {
+    throw new Error(`ねじの配置基準のスケッチ(${refSketch.name})は面上スケッチである必要があります`);
+  }
+  const sketchPlane = resolvedFacePlanes.get(refSketch.id);
+  if (!sketchPlane) {
+    throw new Error(`内部エラー: 配置基準のスケッチ(${refSketch.name})の平面が解決されていません`);
+  }
+  if (!sameFacePlane(sketchPlane, threadFace)) {
+    throw new Error(`ねじの配置基準のスケッチ(${refSketch.name})はねじの配置面と異なる面です`);
+  }
+  const entity = refSketch.entities.find((e) => e.id === ref.entityId);
+  if (!entity || entity.kind !== "circle") {
+    throw new Error(`ねじの配置基準の円(${ref.entityId})が見つかりません`);
+  }
+  return entity.center;
+}
+
+/**
  * ねじフィーチャーを、全ボディ横断の面マッチング(resolveFaceGeometryAcrossBodies())で特定した
  * 最良マッチのボディに適用する(Phase 25c、Phase 27aで複数ボディ対応に変更。bodiesマップを
  * 直接書き換える)。配置面はShellFeatureと同様、featureId参照ではなく直前までの各ボディに対して
@@ -902,12 +952,23 @@ function orientLocalSolidToWorld(shape: Shape3D, position: Tuple3, axisDir: Tupl
  * 雄(hand:"male")は呼び径の単純円柱をfuseする(Phase 41、旧v1のヘリカルねじ山loftは廃止。
  * 見た目のねじらしさはビューア側のオーバーレイ線[threadAnnotations]が担う)。
  * 雌(hand:"female")は規格の下穴径(呼び径−ピッチ)の円柱をcutする簡易表現(変更なし)。
- * 戻り値は、ビューアが二重円+ヘリックス線オーバーレイを描くためのthreadAnnotation1件。
+ * positionRef(Phase 46)が設定されていれば、feature.positionの代わりにresolveThreadPositionRef()が
+ * 求めた面ローカル座標を使う(sketches/resolvedFacePlanesはこの解決にのみ使う)。
+ * 戻り値のannotationはビューアが二重円+ヘリックス線オーバーレイを描くための1件、positionLocalは
+ * 実際に使った面ローカル座標(positionRef経由ならevaluate応答経由でfeature.positionへ書き戻される)。
  */
-function applyThreadToBodies(bodies: Map<FeatureId, Shape3D>, feature: ThreadFeature): ThreadAnnotation {
+function applyThreadToBodies(
+  bodies: Map<FeatureId, Shape3D>,
+  feature: ThreadFeature,
+  sketches: Map<FeatureId, SketchFeature>,
+  resolvedFacePlanes: Map<FeatureId, { center: Tuple3; normal: Tuple3 }>,
+): { annotation: ThreadAnnotation; positionLocal: [number, number] } {
   const resolved = resolveFaceGeometryAcrossBodies(bodies, feature.face.faceId, feature.face.center, feature.face.normal);
   const basis = computeFacePlaneBasis(resolved.center, resolved.normal);
-  const [u, v] = feature.position;
+  const positionLocal = feature.positionRef
+    ? resolveThreadPositionRef(feature.positionRef, sketches, resolvedFacePlanes, resolved)
+    : feature.position;
+  const [u, v] = positionLocal;
   const position: Tuple3 = [
     basis.origin[0] + u * basis.xDir[0] + v * basis.yDir[0],
     basis.origin[1] + u * basis.xDir[1] + v * basis.yDir[1],
@@ -923,6 +984,7 @@ function applyThreadToBodies(bodies: Map<FeatureId, Shape3D>, feature: ThreadFea
   const majorRadius = nominal / 2;
   const minorRadius = threadMinorRadiusForAnnotation(feature.preset, feature.hand);
   const annotation: ThreadAnnotation = {
+    featureId: feature.id,
     kind: feature.hand,
     position,
     axisDir: normalize(axisDir),
@@ -941,7 +1003,7 @@ function applyThreadToBodies(bodies: Map<FeatureId, Shape3D>, feature: ThreadFea
     } finally {
       worldSolid.delete();
     }
-    return annotation;
+    return { annotation, positionLocal };
   }
 
   // hand === "female": 下穴径の円柱をcutする簡易表現(実ねじ山は作らない、変更なし)。
@@ -955,7 +1017,7 @@ function applyThreadToBodies(bodies: Map<FeatureId, Shape3D>, feature: ThreadFea
   } finally {
     worldHole.delete();
   }
-  return annotation;
+  return { annotation, positionLocal };
 }
 
 /**
@@ -1664,6 +1726,8 @@ function lastBodyId(bodies: Map<FeatureId, Shape3D>): FeatureId | undefined {
  * (省略時はlastBodyId()=最後に作られたボディ)が指すボディのみを書き換える。buildToolは
  * 実際にDrawingから立体を組み立てるクロージャ(extrudeSketchFeature()/revolveSketchFeature()を渡す)で、
  * newBody以外の場合にのみ呼ばれる。
+ * 戻り値は実際に作用したボディのbodies上のキー(Phase 46: 押し出し選択時の対象ハイライト用。
+ * newBodyはfeatureId自身、cut/addは解決したresolvedTargetId)。
  */
 function applyBodyOperation(
   bodies: Map<FeatureId, Shape3D>,
@@ -1671,10 +1735,10 @@ function applyBodyOperation(
   operation: "newBody" | "cut" | "add",
   targetBodyId: FeatureId | undefined,
   buildTool: () => Shape3D,
-): void {
+): FeatureId {
   if (operation === "newBody") {
     bodies.set(featureId, buildTool());
-    return;
+    return featureId;
   }
 
   const resolvedTargetId = targetBodyId ?? lastBodyId(bodies);
@@ -1695,6 +1759,7 @@ function applyBodyOperation(
   }
   target.delete();
   bodies.set(resolvedTargetId, result);
+  return resolvedTargetId;
 }
 
 /**
@@ -1714,6 +1779,10 @@ interface FeatureEvalSuccess {
   solvedPlacements: SolvedPlacement[];
   /** ねじフィーチャーの簡易表示用メタデータ(Phase 41、ねじが無ければ空配列)。 */
   threadAnnotations: ThreadAnnotation[];
+  /** positionRef(Phase 46)で解決した配置位置の書き戻し(対象が無ければ空配列)。 */
+  threadPositionUpdates: ThreadPositionUpdate[];
+  /** extrude/revolveフィーチャー→実際に作用したボディのfeatureId対応(Phase 46、フィーチャーが無ければ空配列)。 */
+  bodyOperationTargets: BodyOperationTarget[];
 }
 
 type FeatureEvalResult = FeatureEvalSuccess | EvaluationFailure;
@@ -1756,6 +1825,10 @@ function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
   const mateFeatures: MateFeature[] = [];
   // ねじフィーチャーの簡易表示用メタデータ(Phase 41)。ループ中に出現したthreadフィーチャーの順で積む。
   const threadAnnotations: ThreadAnnotation[] = [];
+  // positionRef(Phase 46)で解決した配置位置の書き戻し。positionRefを持つthreadフィーチャーのみ積む。
+  const threadPositionUpdates: ThreadPositionUpdate[] = [];
+  // extrude/revolveフィーチャー→実際に作用したボディのfeatureId対応(Phase 46)。
+  const bodyOperationTargets: BodyOperationTarget[] = [];
   let currentFeatureId: FeatureId | undefined;
   let solvedPlacements: SolvedPlacement[] = [];
 
@@ -1818,7 +1891,11 @@ function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
         if (bodies.size === 0) {
           throw new Error("ねじの対象となるボディがありません");
         }
-        threadAnnotations.push(applyThreadToBodies(bodies, feature));
+        const applied = applyThreadToBodies(bodies, feature, sketches, resolvedFacePlanes);
+        threadAnnotations.push(applied.annotation);
+        if (feature.positionRef) {
+          threadPositionUpdates.push({ featureId: feature.id, position: applied.positionLocal });
+        }
         snapshots.set(feature.id, buildBodiesCompound(bodies));
         continue;
       }
@@ -1840,9 +1917,10 @@ function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
         if (!sketch) {
           throw new Error(`参照先のスケッチ(${feature.sketchId})が見つかりません`);
         }
-        applyBodyOperation(bodies, feature.id, feature.operation, feature.targetBodyId, () =>
+        const revolveBodyId = applyBodyOperation(bodies, feature.id, feature.operation, feature.targetBodyId, () =>
           revolveSketchFeature(sketch, feature.axis, feature.angle, resolvedFacePlanes, sketchBasisById),
         );
+        bodyOperationTargets.push({ featureId: feature.id, bodyFeatureId: revolveBodyId });
         snapshots.set(feature.id, buildBodiesCompound(bodies));
         continue;
       }
@@ -1852,9 +1930,10 @@ function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
       if (!sketch) {
         throw new Error(`参照先のスケッチ(${feature.sketchId})が見つかりません`);
       }
-      applyBodyOperation(bodies, feature.id, feature.operation, feature.targetBodyId, () =>
+      const extrudeBodyId = applyBodyOperation(bodies, feature.id, feature.operation, feature.targetBodyId, () =>
         extrudeSketchFeature(sketch, feature.distance, feature.direction, resolvedFacePlanes),
       );
+      bodyOperationTargets.push({ featureId: feature.id, bodyFeatureId: extrudeBodyId });
       snapshots.set(feature.id, buildBodiesCompound(bodies));
     }
 
@@ -1887,7 +1966,17 @@ function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
   // 全スケッチ(world/faceいずれも)の平面基底が解決済みである。bodies(bodies.size===0は
   // newBodyフィーチャーが1つも無い、空ドキュメント/スケッチのみの正常なケース。Phase 13)は
   // 生きたまま返す(delete()は呼び出し側の責務)。
-  return { ok: true, bodies, sketches, resolvedFacePlanes, referenceEdgesById, solvedPlacements, threadAnnotations };
+  return {
+    ok: true,
+    bodies,
+    sketches,
+    resolvedFacePlanes,
+    referenceEdgesById,
+    solvedPlacements,
+    threadAnnotations,
+    threadPositionUpdates,
+    bodyOperationTargets,
+  };
 }
 
 /**
@@ -1898,7 +1987,7 @@ function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
 export function evaluateDocument(doc: CadDocument): EvaluationResult {
   const result = evaluateFeatures(doc);
   if (!result.ok) return result;
-  const { bodies, sketches, resolvedFacePlanes, referenceEdgesById, solvedPlacements, threadAnnotations } = result;
+  const { bodies, sketches, resolvedFacePlanes, referenceEdgesById, solvedPlacements, threadAnnotations, threadPositionUpdates, bodyOperationTargets } = result;
 
   // 各ボディの面ID集合(Phase 28a)を、compound化してbodiesをdelete()する前に集めておく。
   const bodyGroups: BodyGroup[] = [];
@@ -1930,7 +2019,17 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
     referenceEdges.push({ sketchId, edges });
   }
 
-  return { ok: true, shape, sketchPlanes, referenceEdges, bodyGroups, solvedPlacements, threadAnnotations };
+  return {
+    ok: true,
+    shape,
+    sketchPlanes,
+    referenceEdges,
+    bodyGroups,
+    solvedPlacements,
+    threadAnnotations,
+    threadPositionUpdates,
+    bodyOperationTargets,
+  };
 }
 
 /**

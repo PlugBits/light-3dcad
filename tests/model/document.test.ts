@@ -25,6 +25,7 @@ import {
   patchExtrudeFeature,
   patchPartInstanceFeature,
   patchSketchFeature,
+  patchThreadPositionRef,
   removeFeature,
   removeFeatureCascade,
   removeSketchElementCascade,
@@ -905,6 +906,64 @@ describe("validateFeature / validateDocument", () => {
     });
   });
 
+  describe("ねじのpositionRef構造チェック(Phase 46: スケッチ参照配置)", () => {
+    const faceSketch: SketchFeature = {
+      type: "sketch",
+      id: "fs1",
+      name: "FaceSketch1",
+      plane: { kind: "face", featureId: "e1", faceId: 1, center: [0, 0, 20], normal: [0, 0, 1] },
+      entities: [{ kind: "circle", id: "circle1", center: [3, -4], radius: 2 }],
+    };
+    const baseThread: ThreadFeature = {
+      type: "thread",
+      id: "t1",
+      name: "M6ねじ1",
+      hand: "male",
+      preset: "M6",
+      length: 10,
+      face: { faceId: 1, center: [0, 0, 20], normal: [0, 0, 1] },
+      position: [0, 0],
+      direction: 1,
+    };
+
+    it("positionRefが有効な円を指していればエラーなし", () => {
+      const thread: ThreadFeature = { ...baseThread, positionRef: { sketchId: "fs1", entityId: "circle1" } };
+      const errors = validateFeature(thread, [faceSketch, thread]);
+      expect(errors).toEqual([]);
+    });
+
+    it("positionRef省略(null/undefined)ならエラーなし(後方互換)", () => {
+      expect(validateFeature(baseThread, [baseThread])).toEqual([]);
+      const withNull: ThreadFeature = { ...baseThread, positionRef: null };
+      expect(validateFeature(withNull, [withNull])).toEqual([]);
+    });
+
+    it("positionRef.sketchIdが存在しないフィーチャーを指すとエラー", () => {
+      const thread: ThreadFeature = { ...baseThread, positionRef: { sketchId: "does-not-exist", entityId: "circle1" } };
+      const errors = validateFeature(thread, [faceSketch, thread]);
+      expect(errors.some((e) => e.message.includes("配置基準のスケッチ"))).toBe(true);
+    });
+
+    it("positionRef.sketchIdがスケッチ以外のフィーチャーを指すとエラー", () => {
+      const notASketch: ExtrudeFeature = { type: "extrude", id: "e1", name: "Extrude1", sketchId: "s1", distance: 10, direction: 1, operation: "newBody" };
+      const thread: ThreadFeature = { ...baseThread, positionRef: { sketchId: "e1", entityId: "circle1" } };
+      const errors = validateFeature(thread, [notASketch, thread]);
+      expect(errors.some((e) => e.message.includes("スケッチではありません"))).toBe(true);
+    });
+
+    it("positionRef.entityIdが存在しない、またはcircle以外だとエラー", () => {
+      const threadMissingEntity: ThreadFeature = { ...baseThread, positionRef: { sketchId: "fs1", entityId: "does-not-exist" } };
+      expect(validateFeature(threadMissingEntity, [faceSketch, threadMissingEntity]).some((e) => e.message.includes("配置基準の円"))).toBe(true);
+
+      const sketchWithRect: SketchFeature = {
+        ...faceSketch,
+        entities: [{ kind: "rectangle", id: "rect1", center: [0, 0], width: 10, height: 10 }],
+      };
+      const threadRefRect: ThreadFeature = { ...baseThread, positionRef: { sketchId: "fs1", entityId: "rect1" } };
+      expect(validateFeature(threadRefRect, [sketchWithRect, threadRefRect]).some((e) => e.message.includes("配置基準の円"))).toBe(true);
+    });
+  });
+
   it("operationが\"add\"でもエラーにならない", () => {
     const { doc, sketch } = makeRectSketchDoc();
     const { doc: doc2 } = addExtrudeFeature(doc, {
@@ -1205,6 +1264,36 @@ describe("replaceFillet3DEdges / replaceShellFaces / replaceThreadPlacement / re
     expect(found.length).toBe(10);
     expect(found.hand).toBe("male");
     expect(found.direction).toBe(1);
+  });
+
+  it("patchThreadPositionRef: positionRefを設定/解除できる。解除してもpositionは変更しない(Phase 46)", () => {
+    const empty = createEmptyDocument();
+    const { doc, feature: thread } = addThreadFeature(empty, {
+      name: "M6ねじ1",
+      hand: "male",
+      preset: "M6",
+      length: 10,
+      face: { faceId: 1, center: [0, 0, 0], normal: [0, 0, 1] },
+      position: [1, 2],
+      direction: 1,
+    });
+    expect((findFeature(doc, thread.id) as ThreadFeature).positionRef).toBeUndefined();
+
+    const withRef = patchThreadPositionRef(doc, thread.id, { sketchId: "sketch-1", entityId: "entity-1" });
+    const foundWithRef = findFeature(withRef, thread.id) as ThreadFeature;
+    expect(foundWithRef.positionRef).toEqual({ sketchId: "sketch-1", entityId: "entity-1" });
+    // 他のフィールドは変更されない。
+    expect(foundWithRef.position).toEqual([1, 2]);
+    expect(foundWithRef.preset).toBe("M6");
+
+    const withoutRef = patchThreadPositionRef(withRef, thread.id, null);
+    const foundWithoutRef = findFeature(withoutRef, thread.id) as ThreadFeature;
+    expect(foundWithoutRef.positionRef).toBeNull();
+    // position自体は直前の値のまま(手動編集の起点として維持する仕様)。
+    expect(foundWithoutRef.position).toEqual([1, 2]);
+
+    // 非破壊: 元のdocは変更されない。
+    expect((findFeature(doc, thread.id) as ThreadFeature).positionRef).toBeUndefined();
   });
 
   it("replaceMateFaces: a/bを丸ごと差し替え、kind/valueは変更しない。存在しないfeatureIdは何もしない", () => {

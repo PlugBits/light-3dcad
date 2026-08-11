@@ -27,6 +27,7 @@ import {
   createRegularPolygonEntity,
   createSlotEntity,
   patchExtrudeFeature,
+  patchThreadPositionRef,
   resolveEvaluationDocument,
   setRollbackIndex,
   validateFeature,
@@ -2507,6 +2508,175 @@ describe("evaluateDocument (WASM統合): ねじ(Phase 25c、Phase 41で簡易表
     expect(ann.majorRadius).toBeCloseTo(3, 6); // M6呼び径6mmの半分
     expect(ann.minorRadius).toBeCloseTo(2.5, 6); // 下穴径5.0mmの半分(呼び径6-ピッチ1.0)
     expect(ann.length).toBe(6);
+  });
+
+  // ---- positionRef(スケッチ参照配置、Phase 46) ----
+
+  /** shapeの平面のうち、法線がtargetNormalにほぼ一致するものを1つ探す(見つからなければ例外)。 */
+  function findFaceByNormal(
+    shape: Shape3D,
+    targetNormal: [number, number, number],
+  ): { faceId: number; center: [number, number, number]; normal: [number, number, number] } {
+    const faces = shape.faces;
+    let found: { faceId: number; center: [number, number, number]; normal: [number, number, number] } | null = null;
+    for (const face of faces) {
+      if (face.geomType === "PLANE") {
+        const centerVec = face.center;
+        const normalVec = face.normalAt();
+        const center = centerVec.toTuple();
+        const normal = normalVec.toTuple();
+        centerVec.delete();
+        normalVec.delete();
+        const dot = normal[0] * targetNormal[0] + normal[1] * targetNormal[1] + normal[2] * targetNormal[2];
+        if (dot > 0.999) found = { faceId: face.hashCode, center, normal };
+      }
+      face.delete();
+    }
+    if (!found) throw new Error("テストセットアップ失敗: 対象の面が見つかりません");
+    return found;
+  }
+
+  it("positionRef: 面上スケッチの円の中心を配置位置として解決し、threadPositionUpdatesへ書き戻す", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: boxDoc, extrude } = buildBoxDoc(20);
+    const boxResult = evaluateDocument(boxDoc);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const topFace = findTopFace(boxResult.shape);
+    boxResult.shape.delete();
+
+    // 上面のface参照スケッチに、押し出さない円(位置決め専用)を1つ置く。
+    const circle = createCircleEntity({ center: [3, -4], radius: 2 });
+    const { doc: withSketch, feature: faceSketch } = addSketchFeature(boxDoc, {
+      name: "FaceSketch1",
+      plane: { kind: "face", featureId: extrude.id, faceId: topFace.faceId, center: topFace.center, normal: topFace.normal },
+      entities: [circle],
+    });
+
+    const { doc, feature: thread } = addThreadFeature(withSketch, {
+      name: "M6ねじ1",
+      hand: "male",
+      preset: "M6",
+      length: 5,
+      face: topFace,
+      position: [0, 0], // positionRefがあれば無視され、evaluate後に解決済み値へ書き戻される。
+      direction: 1,
+    });
+    const docWithRef = patchThreadPositionRef(doc, thread.id, { sketchId: faceSketch.id, entityId: circle.id });
+
+    const result = evaluateDocument(docWithRef);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    result.shape?.delete();
+
+    expect(result.threadPositionUpdates).toEqual([{ featureId: thread.id, position: [3, -4] }]);
+    expect(result.threadAnnotations.length).toBe(1);
+    const ann = result.threadAnnotations[0];
+    expect(ann.featureId).toBe(thread.id);
+    // 円の中心[3,-4]が配置位置として使われるので、ワールド座標は(3,-4,20)になるはず。
+    expect(ann.position[0]).toBeCloseTo(3, 6);
+    expect(ann.position[1]).toBeCloseTo(-4, 6);
+    expect(ann.position[2]).toBeCloseTo(20, 6);
+  });
+
+  it("positionRef: 参照先が面上スケッチでない(world平面)場合は評価エラーになる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: boxDoc, extrude } = buildBoxDoc(20);
+    const boxResult = evaluateDocument(boxDoc);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const topFace = findTopFace(boxResult.shape);
+    boxResult.shape.delete();
+
+    const circle = createCircleEntity({ center: [1, 1], radius: 2 });
+    const { doc: withSketch, feature: worldSketch } = addSketchFeature(boxDoc, {
+      name: "Sketch2",
+      plane: { kind: "world", plane: "XZ" },
+      entities: [circle],
+    });
+
+    const { doc, feature: thread } = addThreadFeature(withSketch, {
+      name: "M6ねじ1",
+      hand: "male",
+      preset: "M6",
+      length: 5,
+      face: topFace,
+      position: [0, 0],
+      direction: 1,
+    });
+    const docWithRef = patchThreadPositionRef(doc, thread.id, { sketchId: worldSketch.id, entityId: circle.id });
+
+    const result = evaluateDocument(docWithRef);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.featureId).toBe(thread.id);
+    expect(result.message).toContain("面上スケッチ");
+    void extrude;
+  });
+
+  it("positionRef: 参照先スケッチがねじの配置面と異なる面の場合は評価エラーになる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: boxDoc, extrude } = buildBoxDoc(20);
+    const boxResult = evaluateDocument(boxDoc);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const topFace = findTopFace(boxResult.shape);
+    const frontFace = findFaceByNormal(boxResult.shape, [0, -1, 0]);
+    boxResult.shape.delete();
+
+    const circle = createCircleEntity({ center: [0, 0], radius: 2 });
+    const { doc: withSketch, feature: frontSketch } = addSketchFeature(boxDoc, {
+      name: "FrontSketch1",
+      plane: { kind: "face", featureId: extrude.id, faceId: frontFace.faceId, center: frontFace.center, normal: frontFace.normal },
+      entities: [circle],
+    });
+
+    const { doc, feature: thread } = addThreadFeature(withSketch, {
+      name: "M6ねじ1",
+      hand: "male",
+      preset: "M6",
+      length: 5,
+      face: topFace, // 上面に配置するが、参照するスケッチは前面(異なる面)。
+      position: [0, 0],
+      direction: 1,
+    });
+    const docWithRef = patchThreadPositionRef(doc, thread.id, { sketchId: frontSketch.id, entityId: circle.id });
+
+    const result = evaluateDocument(docWithRef);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.featureId).toBe(thread.id);
+    expect(result.message).toContain("異なる面");
+  });
+
+  it("positionRef: 参照先のスケッチ/円が存在しない(参照切れ)場合は評価エラーになる", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: boxDoc } = buildBoxDoc(20);
+    const boxResult = evaluateDocument(boxDoc);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const topFace = findTopFace(boxResult.shape);
+    boxResult.shape.delete();
+
+    const { doc, feature: thread } = addThreadFeature(boxDoc, {
+      name: "M6ねじ1",
+      hand: "male",
+      preset: "M6",
+      length: 5,
+      face: topFace,
+      position: [0, 0],
+      direction: 1,
+    });
+    const docWithDanglingRef = patchThreadPositionRef(doc, thread.id, {
+      sketchId: "sketch-does-not-exist",
+      entityId: "entity-does-not-exist",
+    });
+
+    const result = evaluateDocument(docWithDanglingRef);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.featureId).toBe(thread.id);
+    expect(result.message).toContain("見つかりません");
   });
 });
 

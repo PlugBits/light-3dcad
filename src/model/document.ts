@@ -268,6 +268,21 @@ export function patchThreadPosition(doc: CadDocument, featureId: FeatureId, posi
 }
 
 /**
+ * thread フィーチャーの配置基準参照(positionRef、Phase 46: ねじのスケッチ参照配置)を設定/解除する。
+ * 設定するとsrc/worker/evaluator.tsが評価のたびに参照先スケッチの円の中心からpositionを再計算し、
+ * evaluate応答経由でpositionへ書き戻す(src/state/store.tsのapplyThreadPositionUpdates参照)。
+ * null(手動編集[数値入力/クリック配置し直し]へ戻す)を渡してもposition自体は変更しない
+ * (直前に解決済みの値がそのまま手動編集の起点になる)。
+ */
+export function patchThreadPositionRef(
+  doc: CadDocument,
+  featureId: FeatureId,
+  positionRef: { sketchId: FeatureId; entityId: string } | null,
+): CadDocument {
+  return updateFeature<ThreadFeature>(doc, featureId, (f) => ({ ...f, positionRef }));
+}
+
+/**
  * 新しい部品配置(簡易アセンブリ)フィーチャーを作成して末尾に追加する。IDは自動生成される(Phase 27b)。
  * params.part は既に(deserializeProject()等で)検証済みの部品CadDocumentを渡すこと。
  * このヘルパー自体は入れ子チェック等のバリデーションを行わない(呼び出し側=UIで事前チェックし、

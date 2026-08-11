@@ -484,6 +484,18 @@ export interface ThreadFeature {
   face: ThreadFaceRef;
   position: [number, number];
   direction: 1 | -1;
+  /**
+   * 配置基準をスケッチの円参照に切り替える(Phase 46: ねじのスケッチ参照配置、省略可・後方互換)。
+   * 設定すると、評価のたびにsrc/worker/evaluator.tsがsketchId(面上スケッチである必要がある)の
+   * entityId(circleエンティティ)の中心を、faceと同じ面上のローカル座標として解決し、positionを
+   * 上書きする(evaluate応答経由でこのFeatureのpositionへ書き戻される。src/state/store.tsの
+   * applyThreadPositionUpdates参照。合致[mate]のsolvedPlacements書き戻しと同じ設計)。
+   * sketchIdの平面がfaceと異なる面、またはsketchId/entityIdの参照先が見つからない場合は
+   * 評価エラーになる(featureId付き、日本語メッセージ)。null/省略時はpositionを手動編集の対象とする
+   * (従来通り)。手動編集(数値入力/クリック配置し直し)に戻す際はpositionRefをnullに戻すのみで、
+   * position自体は直前に解決した値を保持する(src/components/ThreadEditor.tsx参照)。
+   */
+  positionRef?: { sketchId: FeatureId; entityId: string } | null;
 }
 
 /**

@@ -16,6 +16,7 @@ import {
   effectiveFeatureCount,
   findFeature,
   patchPartInstanceFeature,
+  patchThreadPosition,
   removeFeatureCascade,
   resolveEvaluationDocument,
   setRollbackIndex as setDocRollbackIndex,
@@ -36,6 +37,7 @@ import type {
 } from "../model/types";
 import type {
   BodyGroup,
+  BodyOperationTarget,
   EdgeInfo,
   FaceInfo,
   InterferenceResult,
@@ -45,6 +47,7 @@ import type {
   SketchPlaneInfo,
   SolvedPlacement,
   ThreadAnnotation,
+  ThreadPositionUpdate,
   WorkerResponse,
 } from "../protocol/messages";
 import { deserializeProject, serializeProject } from "../project/serialization";
@@ -370,6 +373,11 @@ interface CadStoreState {
   referenceEdges: ReferenceEdgeSet[];
   /** 各ボディを構成する面IDの集合(Phase 28a、部品ドラッグ配置ツールのヒット判定に使う派生状態)。 */
   bodyGroups: BodyGroup[];
+  /**
+   * extrude/revolveフィーチャー→実際に作用したボディのfeatureId対応(Phase 46、押し出し選択時の
+   * 対象ハイライトに使う派生状態。bodyGroupsと組み合わせて選択中フィーチャーの面群を特定する)。
+   */
+  bodyOperationTargets: BodyOperationTarget[];
   /** ねじフィーチャーの簡易表示用メタデータ(Phase 41、ビューアの二重円+ヘリックス線オーバーレイに使う派生状態)。 */
   threadAnnotations: ThreadAnnotation[];
   errorMessage: string | null;
@@ -608,6 +616,21 @@ function applyMateSolvedPlacements(doc: CadDocument, placements: SolvedPlacement
   return next;
 }
 
+/**
+ * positionRef(Phase 46: ねじのスケッチ参照配置)で解決した配置位置を、対応するthreadフィーチャーの
+ * positionへ書き戻す。applyMateSolvedPlacements()と同じ設計(履歴を積まない直接のdoc置き換え、
+ * 解決済みの値は既にジオメトリ・threadAnnotationsに反映済みのため、doc側の数値を合わせるだけで
+ * 再評価は不要)。ThreadEditor.tsxはこれによって常に最新の解決済み位置を読み取れる
+ * (positionRef中は読み取り専用表示、手動編集へ戻す際もこの値がそのまま起点になる)。
+ */
+function applyThreadPositionUpdates(doc: CadDocument, updates: ThreadPositionUpdate[]): CadDocument {
+  let next = doc;
+  for (const update of updates) {
+    next = patchThreadPosition(next, update.featureId, update.position);
+  }
+  return next;
+}
+
 function applyEvaluated(
   set: (partial: Partial<CadStoreState>) => void,
   get: () => CadStoreState,
@@ -629,7 +652,9 @@ function applyEvaluated(
     // 発行しない)。
     const withOrigin = updateOriginSnapshots(withReferenceEdges, response.sketchPlanes);
     // 合致(メイト、Phase 28c)ソルバが解いた配置を書き戻す(履歴は積まない、上記コメント参照)。
-    const nextDoc = applyMateSolvedPlacements(withOrigin, response.solvedPlacements);
+    const withMates = applyMateSolvedPlacements(withOrigin, response.solvedPlacements);
+    // ねじのpositionRef(Phase 46)で解決した配置位置を書き戻す(同じく履歴は積まない)。
+    const nextDoc = applyThreadPositionUpdates(withMates, response.threadPositionUpdates);
     // 起動クラッシュループ防止(Phase 29a): 評価が成功した時点で復元開始マーカーを解除する
     // (マーカーが立っていなければ no-op)。「初回評価が成功したら」という仕様どおり、
     // 実際には毎回の成功評価で呼ぶ(冪等なので安全、かつ通常の編集中の評価成功でも解除されて
@@ -644,6 +669,7 @@ function applyEvaluated(
       sketchPlanes: response.sketchPlanes,
       referenceEdges: response.referenceEdges,
       bodyGroups: response.bodyGroups,
+      bodyOperationTargets: response.bodyOperationTargets,
       threadAnnotations: response.threadAnnotations,
       errorMessage: null,
       errorFeatureId: null,
@@ -675,6 +701,7 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   sketchPlanes: [],
   referenceEdges: [],
   bodyGroups: [],
+  bodyOperationTargets: [],
   threadAnnotations: [],
   errorMessage: null,
   errorFeatureId: null,

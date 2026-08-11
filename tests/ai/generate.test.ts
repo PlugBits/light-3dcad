@@ -54,6 +54,8 @@ function okDryRunEvaluate(): DryRunEvaluateFn {
     bodyGroups: [],
     solvedPlacements: [],
     threadAnnotations: [],
+    threadPositionUpdates: [],
+    bodyOperationTargets: [],
   }));
 }
 
@@ -141,6 +143,8 @@ describe("generateCadDocument: 成功系(生成結果)", () => {
         bodyGroups: [],
         solvedPlacements: [],
         threadAnnotations: [],
+    threadPositionUpdates: [],
+    bodyOperationTargets: [],
       };
     });
     const solveSketches = passthroughSolveSketches();
