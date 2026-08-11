@@ -372,10 +372,12 @@ export default function App() {
     screen: { x: number; y: number };
   } | null>(null);
   // 拘束の矛盾で自動巻き戻しが起きたときの一時メッセージ(Phase 20b)。数秒後に自動で消える。
-  const [transientMessage, setTransientMessage] = useState<string | null>(null);
+  // variant(トーストの色分け、Phase 46): "success"=成功系(緑)/"error"=失敗・矛盾系(赤、既定と同じ見た目)/
+  // "info"=それ以外の中立的な通知(濃紺グレー)。省略時は既存呼び出し元との後方互換のため"info"。
+  const [transientMessage, setTransientMessage] = useState<{ text: string; variant: "success" | "error" | "info" } | null>(null);
   const transientMessageTimer = useRef<number | null>(null);
-  function showTransientMessage(message: string) {
-    setTransientMessage(message);
+  function showTransientMessage(message: string, variant: "success" | "error" | "info" = "info") {
+    setTransientMessage({ text: message, variant });
     if (transientMessageTimer.current !== null) window.clearTimeout(transientMessageTimer.current);
     transientMessageTimer.current = window.setTimeout(() => setTransientMessage(null), 3000);
   }
@@ -430,10 +432,10 @@ export default function App() {
         viewerRef.current?.requestFitOnNextMesh();
         loadDocument(doc);
         stripShareLinkHash();
-        showTransientMessage("共有モデルを読み込みました");
+        showTransientMessage("共有モデルを読み込みました", "success");
       },
       onError: (message) => {
-        showTransientMessage(`共有リンクの読み込みに失敗しました: ${message}`);
+        showTransientMessage(`共有リンクの読み込みに失敗しました: ${message}`, "error");
         stripShareLinkHash();
       },
       onCancelled: stripShareLinkHash,
@@ -471,10 +473,10 @@ export default function App() {
         viewerRef.current?.requestFitOnNextMesh();
         loadDocument(doc);
         stripGalleryQuery();
-        showTransientMessage("ギャラリーモデルを読み込みました");
+        showTransientMessage("ギャラリーモデルを読み込みました", "success");
       },
       onError: (message) => {
-        showTransientMessage(`ギャラリーモデルの読み込みに失敗しました: ${message}`);
+        showTransientMessage(`ギャラリーモデルの読み込みに失敗しました: ${message}`, "error");
         stripGalleryQuery();
       },
       onCancelled: stripGalleryQuery,
@@ -912,9 +914,9 @@ export default function App() {
       await navigator.clipboard.writeText(url);
       const kb = (byteLength / 1024).toFixed(1);
       const sizeWarning = data.length > SHARE_LINK_WARN_CHARS ? "(URLが長いため一部の環境では開けない可能性があります)" : "";
-      showTransientMessage(`共有リンクをコピーしました(${kb}KB)${sizeWarning}`);
+      showTransientMessage(`共有リンクをコピーしました(${kb}KB)${sizeWarning}`, "success");
     } catch (err) {
-      showTransientMessage(`共有リンクの作成に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+      showTransientMessage(`共有リンクの作成に失敗しました: ${err instanceof Error ? err.message : String(err)}`, "error");
     }
   }
 
@@ -1535,7 +1537,7 @@ export default function App() {
         const aRef = toMateFaceRef(a);
         const bRef = toMateFaceRef(b);
         if (!aRef || !bRef) {
-          showTransientMessage("この組み合わせの面は選択できません(平面または円筒面を選んでください)");
+          showTransientMessage("この組み合わせの面は選択できません(平面または円筒面を選んでください)", "error");
           return;
         }
         updateDocument((d) => replaceMateFaces(d, mate.id, { a: aRef, b: bRef }));
@@ -1645,7 +1647,7 @@ export default function App() {
   async function handleCheckInterference() {
     const result = await checkInterference();
     if (result && result.pairs.length === 0) {
-      showTransientMessage("干渉はありません");
+      showTransientMessage("干渉はありません", "success");
     }
   }
 
@@ -2027,7 +2029,7 @@ export default function App() {
             : upsertAngleLineLineConstraint(constraints, target.a, target.b, value);
           return setSketchConstraints(doc, sketchId, next);
         },
-        showTransientMessage,
+        (message) => showTransientMessage(message, "error"),
       );
       setDimensionPopup(null);
       return;
@@ -2046,7 +2048,7 @@ export default function App() {
             : upsertAngleLineRefEdgeConstraint(constraints, target.a, target.line, value);
           return setSketchConstraints(doc, sketchId, next);
         },
-        showTransientMessage,
+        (message) => showTransientMessage(message, "error"),
       );
       setDimensionPopup(null);
       return;
@@ -2103,7 +2105,7 @@ export default function App() {
                         : upsertDistanceEntityLineConstraint(constraints, target.entityId, target.line, value);
         return setSketchConstraints(doc, sketchId, next);
       },
-      showTransientMessage,
+      (message) => showTransientMessage(message, "error"),
       describeConflict,
     );
     setDimensionPopup(null);
@@ -2268,7 +2270,7 @@ export default function App() {
         }
         return setSketchConstraints(doc, sketchId, next);
       },
-      showTransientMessage,
+      (message) => showTransientMessage(message, "error"),
     );
     setConstraintPopup(null);
   }
@@ -3367,7 +3369,7 @@ export default function App() {
               // 寸法ツール中(dimensionTool)は既存の寸法線・ラベルを隠さない(むしろ見えているべき、
               // UI改善対応)。線分/矩形/円等の作図ツール・フィレット/面取り・トリム・延長の間は従来通り隠す。
               visible={showSketches && !activeTool && !cornerTool && !trimTool && !extendTool && !constraintTool && !edgeTool}
-              onConflictRollback={showTransientMessage}
+              onConflictRollback={(message) => showTransientMessage(message, "error")}
             />
           )}
           {dimensionPopup && (
@@ -3513,14 +3515,19 @@ export default function App() {
                 transform: "translateX(-50%)",
                 padding: "6px 14px",
                 borderRadius: 4,
-                background: "rgba(211, 47, 47, 0.92)",
+                background:
+                  transientMessage.variant === "success"
+                    ? "rgba(26, 127, 55, 0.92)"
+                    : transientMessage.variant === "error"
+                      ? "rgba(211, 47, 47, 0.92)"
+                      : "rgba(38, 42, 51, 0.92)",
                 color: "#fff",
                 fontSize: 12,
                 pointerEvents: "none",
                 zIndex: 30,
               }}
             >
-              {transientMessage}
+              {transientMessage.text}
             </div>
           )}
           {showInitOverlay && (
@@ -3584,7 +3591,7 @@ export default function App() {
           <GallerySubmitDialog
             doc={doc}
             onClose={() => setGallerySubmitOpen(false)}
-            onNotice={showTransientMessage}
+            onNotice={(message) => showTransientMessage(message, "error")}
             pendingMeta={pendingGalleryMeta}
           />
         </Suspense>

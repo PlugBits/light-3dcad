@@ -30,6 +30,8 @@
   --cad-danger-soft: #fdeaea;
   --cad-warning: #b8720a;
   --cad-warning-soft: #fdf1de;
+  --cad-success: #1a7f37;
+  --cad-success-soft: #e6f4ea;
 
   /* --- スペーシングスケール --- */
   --cad-space-1: 2px;
