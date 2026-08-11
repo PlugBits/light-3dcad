@@ -5,6 +5,29 @@ import { expect, test } from "@playwright/test";
 
 import { clickTopFace, collectPageErrors, gotoApp, waitForReady } from "./helpers";
 
+test("押し出し選択時に対象ボディが強調され、ソーススケッチの輪郭がハイライトされる(Phase 46)", async ({ page }) => {
+  const pageErrors = collectPageErrors(page);
+
+  await gotoApp(page);
+  await waitForReady(page);
+
+  // 未選択の初期状態では強調は無い。
+  expect(await page.evaluate(() => window.__cadViewerDebug?.selectedBodyTintActive() ?? false)).toBe(false);
+  expect(await page.evaluate(() => window.__cadViewerDebug?.extrudeSourceHighlightLineCount() ?? -1)).toBe(0);
+
+  // 初期ボディを作ったExtrude1を選択すると、対象ボディの強調とソーススケッチの輪郭ハイライトが現れる。
+  await page.getByTestId("feature-item-Extrude1").click();
+  expect(await page.evaluate(() => window.__cadViewerDebug?.selectedBodyTintActive() ?? false)).toBe(true);
+  expect(await page.evaluate(() => window.__cadViewerDebug?.extrudeSourceHighlightLineCount() ?? 0)).toBeGreaterThan(0);
+
+  // 別のフィーチャー(スケッチ)を選ぶと強調は解除される。
+  await page.getByTestId("feature-item-Sketch1").click();
+  expect(await page.evaluate(() => window.__cadViewerDebug?.selectedBodyTintActive() ?? false)).toBe(false);
+  expect(await page.evaluate(() => window.__cadViewerDebug?.extrudeSourceHighlightLineCount() ?? -1)).toBe(0);
+
+  expect(pageErrors).toEqual([]);
+});
+
 test("上面に円スケッチ→Add操作でエラーなく再評価が完了する", async ({ page }) => {
   const pageErrors = collectPageErrors(page);
 

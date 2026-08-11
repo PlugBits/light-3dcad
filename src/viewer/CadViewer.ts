@@ -60,6 +60,12 @@ const EDGE_PICK_TOLERANCE_PX = 8;
 const FACE_SELECT_COLOR = 0xff9800;
 /** 部品移動ツール(Phase 28a)中、ドラッグ可能な部品ボディ全体をホバー時に薄く強調する色(淡い紫)。 */
 const PART_HOVER_COLOR = 0xb39ddb;
+/**
+ * 押し出し/回転体フィーチャー選択時の対象ボディ強調(Phase 46)。BASE_COLORをアクセント色
+ * (index.cssの--cad-accentと同じ値)へわずかに寄せた色(常時見えるが選択色[HIGHLIGHT_COLOR/
+ * FACE_SELECT_COLOR]やホバー色ほど主張しないよう、控えめな比率で混ぜる)。
+ */
+const SELECTED_BODY_TINT_COLOR = new THREE.Color(BASE_COLOR).lerp(new THREE.Color(0x2563eb), 0.35).getHex();
 /** ドラッグ中のバウンディングボックスのワイヤーフレームプレビュー色(濃い紫)。 */
 const PART_DRAG_PREVIEW_COLOR = 0x7c4dff;
 /** 部品移動ツールのドキュメント更新スロットル間隔(ms)。プレビュー自体は毎フレーム追従する。 */
@@ -165,6 +171,11 @@ const SKETCH_CONFLICTING_COLOR = 0xff5252;
 const DIMENSION_PENDING_COLOR = 0xff3dae;
 /** 非選択スケッチの線色(控えめなグレー、半透明)。 */
 const SKETCH_DEFAULT_COLOR = 0xaaaaaa;
+/**
+ * 押し出し/回転体フィーチャー選択時、元になったスケッチの輪郭強調に使う色(Phase 46)。
+ * index.cssの--cad-accentと同じ値(SELECTED_BODY_TINT_COLORの混色元と統一)。
+ */
+const EXTRUDE_SOURCE_HIGHLIGHT_COLOR = 0x2563eb;
 /** Z-fighting防止のため、スケッチ線を面法線方向へオフセットする距離(mm)。 */
 const SKETCH_NORMAL_OFFSET = 0.05;
 /** 円エンティティのポリライン近似の分割数。 */
@@ -732,6 +743,20 @@ declare global {
       threadAnnotationLineCount: () => number;
       /** 地面の無限グリッド(Phase 44)の現在の可視状態(開発ビルド限定、E2E用)。 */
       groundGridVisible: () => boolean;
+      /**
+       * 押し出し/回転体選択時の対象ボディ強調(Phase 46)が現在1面以上に適用されているかどうか
+       * (開発ビルド限定、E2E用)。setSelectedBodyTint()が構築したthis.tintedGroupIndicesが
+       * 空でないかどうかをそのまま返す。
+       */
+      selectedBodyTintActive: () => boolean;
+      /** 押し出しソースのスケッチ強調(Phase 46)の現在の描画本数(開発ビルド限定、E2E用)。 */
+      extrudeSourceHighlightLineCount: () => number;
+      /**
+       * 直近のsetThreadAnnotations()に渡されたthreadAnnotationsのスナップショット(開発ビルド限定、
+       * E2E用、Phase 46)。positionRef変更後にねじのワールド座標が追従したことをfeatureId付きで
+       * 検証するために使う。
+       */
+      threadAnnotationsSnapshot: () => { featureId: string; position: [number, number, number] }[];
     };
   }
 }
@@ -1134,6 +1159,13 @@ export class CadViewer {
   private selectedGroupIndex: number | null = null;
   /** マウスオーバー中の面のmaterialIndex(選択面とは独立、選択時は選択色を優先)。 */
   private hoveredGroupIndex: number | null = null;
+  /**
+   * setSelectedBodyTint()で強調中のmaterialIndex集合(Phase 46、押し出し/回転体選択時の対象
+   * ハイライト)。「面が今どの色を表示すべきか(resting状態)」の判定にrestColorForIndex()経由で
+   * 使う。setMesh()のたびにB-Rep面IDの対応が変わりうるためリセットし、mesh更新後にApp側が
+   * setSelectedBodyTint()を呼び直して再構築する。
+   */
+  private tintedGroupIndices: Set<number> = new Set();
   private raycaster = new THREE.Raycaster();
   private container: HTMLElement;
   private resizeObserver: ResizeObserver;
@@ -1178,6 +1210,18 @@ export class CadViewer {
   private threadAnnotationGroup: THREE.Group;
   private threadAnnotationGeometries: THREE.BufferGeometry[] = [];
   private threadAnnotationMaterials: THREE.Material[] = [];
+  /** 直近のsetThreadAnnotations()呼び出しの入力(Phase 46、E2Eデバッグフック用)。 */
+  private lastThreadAnnotations: ThreadAnnotation[] = [];
+  /**
+   * 押し出し/回転体フィーチャー選択時、元になったスケッチの輪郭を一時的にアクセント色で強調表示
+   * するためのグループ(Phase 46)。setSketchOverlay()のスケッチ線描画とは完全に独立したライフサイクル
+   * (通常のスケッチ表示トグル[showSketches]の状態に関わらず表示できるようにするため)。
+   * setExtrudeSourceHighlight()が呼ばれるたびに全消去して作り直す。raycastは常にthis.meshに対しての
+   * み行うため、このグループの追加はピッキングに一切影響しない。
+   */
+  private extrudeSourceHighlightGroup: THREE.Group;
+  private extrudeSourceHighlightGeometries: THREE.BufferGeometry[] = [];
+  private extrudeSourceHighlightMaterials: THREE.Material[] = [];
   /** 現在のメッシュのバウンディングボックスから求めた半径目安(mm)。グリッド範囲の基準に使う。 */
   private meshHalfExtent = 50;
   /** 初回メッシュ受信時にfitToView()を自動実行するためのフラグ(2回目以降は視点を維持する)。 */
@@ -1605,6 +1649,9 @@ export class CadViewer {
     this.threadAnnotationGroup = new THREE.Group();
     this.scene.add(this.threadAnnotationGroup);
 
+    this.extrudeSourceHighlightGroup = new THREE.Group();
+    this.scene.add(this.extrudeSourceHighlightGroup);
+
     // コンテナを絶対配置の基準にする(座標オーバーレイをcanvas上にpxで重ねるため)。
     // containerは既存レイアウト上は幅・高さ100%のプレーンなdivであり、position指定を持たない
     // 想定なのでrelativeにしても既存の見た目には影響しない。
@@ -1728,6 +1775,9 @@ export class CadViewer {
           this.dimensionToolSegments.map((s) => ({ id: s.id, p1: s.p1, p2: s.p2, kind: s.kind, bulge: s.bulge })),
         threadAnnotationLineCount: () => this.threadAnnotationGroup.children.length,
         groundGridVisible: () => this.groundGrid.visible,
+        selectedBodyTintActive: () => this.tintedGroupIndices.size > 0,
+        extrudeSourceHighlightLineCount: () => this.extrudeSourceHighlightGroup.children.length,
+        threadAnnotationsSnapshot: () => this.lastThreadAnnotations.map((a) => ({ featureId: a.featureId, position: a.position })),
       };
     }
   }
@@ -2115,11 +2165,23 @@ export class CadViewer {
     this.onFaceSelect?.(info);
   };
 
+  /**
+   * materialIndex = idx の面が「何も乗っていない(未ホバー・未選択)」ときに表示すべき色を返す
+   * (Phase 46)。setSelectedBodyTint()で強調中ならSELECTED_BODY_TINT_COLOR、それ以外は従来通り
+   * BASE_COLOR。ホバー/選択解除時の「基本色に戻す」箇所がすべてBASE_COLOR直書きの代わりにこれを
+   * 呼ぶことで、対象ボディ強調中はホバー等が終わったときにも強調色へ戻るようにする
+   * (tintedGroupIndicesが空の間はBASE_COLORと完全に同じ値を返すため、強調非使用時の既存の
+   * 見た目・挙動は一切変わらない)。
+   */
+  private restColorForIndex(idx: number | null): number {
+    return idx != null && this.tintedGroupIndices.has(idx) ? SELECTED_BODY_TINT_COLOR : BASE_COLOR;
+  }
+
   /** materialIndex = groupIndex のマテリアル色をハイライト色に、前回選択分は基本色(またはホバー中ならホバー色)に戻す。 */
   private selectGroup(groupIndex: number) {
     if (this.selectedGroupIndex != null) {
       this.materials[this.selectedGroupIndex]?.color.setHex(
-        this.selectedGroupIndex === this.hoveredGroupIndex ? HOVER_COLOR : BASE_COLOR,
+        this.selectedGroupIndex === this.hoveredGroupIndex ? HOVER_COLOR : this.restColorForIndex(this.selectedGroupIndex),
       );
     }
     this.selectedGroupIndex = groupIndex;
@@ -2130,7 +2192,7 @@ export class CadViewer {
   clearSelection() {
     if (this.selectedGroupIndex != null) {
       this.materials[this.selectedGroupIndex]?.color.setHex(
-        this.selectedGroupIndex === this.hoveredGroupIndex ? HOVER_COLOR : BASE_COLOR,
+        this.selectedGroupIndex === this.hoveredGroupIndex ? HOVER_COLOR : this.restColorForIndex(this.selectedGroupIndex),
       );
       this.selectedGroupIndex = null;
       this.onFaceSelect?.(null);
@@ -2195,14 +2257,14 @@ export class CadViewer {
     if (this.faceSelectActive && this.hoveredFaceSelectIndex != null) {
       const faceId = this.faceGroups[this.hoveredFaceSelectIndex]?.faceId;
       if (faceId == null || !this.selectedFaceIds.includes(faceId)) {
-        this.materials[this.hoveredFaceSelectIndex]?.color.setHex(BASE_COLOR);
+        this.materials[this.hoveredFaceSelectIndex]?.color.setHex(this.restColorForIndex(this.hoveredFaceSelectIndex));
       }
       this.hoveredFaceSelectIndex = null;
     }
     if (this.mateToolActive && this.mateHoverGroupIndex != null) {
       const faceId = this.faceGroups[this.mateHoverGroupIndex]?.faceId;
       if (faceId == null || faceId !== this.matePendingTarget?.faceId) {
-        this.materials[this.mateHoverGroupIndex]?.color.setHex(BASE_COLOR);
+        this.materials[this.mateHoverGroupIndex]?.color.setHex(this.restColorForIndex(this.mateHoverGroupIndex));
       }
       this.mateHoverGroupIndex = null;
     }
@@ -2289,7 +2351,7 @@ export class CadViewer {
   private setHoverGroup(groupIndex: number | null) {
     if (this.hoveredGroupIndex === groupIndex) return;
     if (this.hoveredGroupIndex != null && this.hoveredGroupIndex !== this.selectedGroupIndex) {
-      this.materials[this.hoveredGroupIndex]?.color.setHex(BASE_COLOR);
+      this.materials[this.hoveredGroupIndex]?.color.setHex(this.restColorForIndex(this.hoveredGroupIndex));
     }
     this.hoveredGroupIndex = groupIndex;
     if (groupIndex != null && groupIndex !== this.selectedGroupIndex) {
@@ -2332,6 +2394,10 @@ export class CadViewer {
     // mouseup)自体はfaceGroups/materialsに依存しないため継続する(computePartDragDelta参照)。
     this.partHoverGroupIndices = [];
     this.partHoverFeatureId = null;
+    // 押し出し/回転体の対象ボディ強調(Phase 46)も同じ理由(materialIndexの対応が変わりうる)で
+    // リセットする(materials自体は新規生成されるためBASE_COLORへの復元は不要)。強調が継続すべき
+    // 場合はApp側がmesh更新のたびにsetSelectedBodyTint()を呼び直して再構築する。
+    this.tintedGroupIndices = new Set();
     this.bodyGroups = bodyGroups;
     this.faceIdToBodyFeatureId = new Map();
     for (const group of bodyGroups) {
@@ -2479,6 +2545,9 @@ export class CadViewer {
    * 同じくdepthTest:false)と同じ方針にする。
    */
   setThreadAnnotations(annotations: ThreadAnnotation[]) {
+    // E2Eデバッグフック(window.__cadViewerDebug.threadAnnotationsSnapshot)向けに直近の入力を保持する
+    // (Phase 46: positionRef変更でねじの位置が追従したことをワールド座標で検証するために使う)。
+    this.lastThreadAnnotations = annotations;
     this.threadAnnotationGroup.clear();
     this.threadAnnotationGeometries.forEach((g) => g.dispose());
     this.threadAnnotationMaterials.forEach((m) => m.dispose());
@@ -2604,6 +2673,65 @@ export class CadViewer {
     const hFov = 2 * Math.atan(Math.tan(vFov / 2) * this.camera.aspect);
     const fitFov = Math.min(vFov, hFov);
     return (radius / Math.sin(fitFov / 2)) * 1.15;
+  }
+
+  /**
+   * 押し出し/回転体フィーチャー選択時、元になったスケッチの輪郭をアクセント色で一時強調する
+   * (Phase 46、押し出し選択時の対象ハイライト)。entry=nullで強調を消す。showSketches(スケッチ表示
+   * トグル)の状態に関わらず常時表示する(押し出し選択という文脈自体が「このスケッチから作られた」
+   * ことを示す一時的な視覚フィードバックのため)。depthTest:falseにしてソリッドの内部に埋もれても
+   * 常に見えるようにする(setSketchOverlay()の選択中スケッチと同じ方針)。
+   */
+  setExtrudeSourceHighlight(entry: SketchOverlayEntry | null) {
+    while (this.extrudeSourceHighlightGroup.children.length > 0) {
+      this.extrudeSourceHighlightGroup.remove(this.extrudeSourceHighlightGroup.children[0]);
+    }
+    this.extrudeSourceHighlightGeometries.forEach((g) => g.dispose());
+    this.extrudeSourceHighlightMaterials.forEach((m) => m.dispose());
+    this.extrudeSourceHighlightGeometries = [];
+    this.extrudeSourceHighlightMaterials = [];
+    if (!entry) return;
+
+    const material = new THREE.LineBasicMaterial({
+      color: EXTRUDE_SOURCE_HIGHLIGHT_COLOR,
+      linewidth: 2,
+      depthTest: false,
+    });
+    this.extrudeSourceHighlightMaterials.push(material);
+
+    const addLoop = (localPoints: [number, number][]) => {
+      const positions = new Float32Array(localPoints.length * 3);
+      localPoints.forEach(([u, v], i) => {
+        const [x, y, z] = toWorldPoint(entry, u, v);
+        positions[i * 3] = x;
+        positions[i * 3 + 1] = y;
+        positions[i * 3 + 2] = z;
+      });
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      this.extrudeSourceHighlightGeometries.push(geometry);
+      const line = new THREE.LineLoop(geometry, material);
+      line.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
+      this.extrudeSourceHighlightGroup.add(line);
+    };
+    const addOpen = (localPoints: [number, number][]) => {
+      const positions = new Float32Array(localPoints.length * 3);
+      localPoints.forEach(([u, v], i) => {
+        const [x, y, z] = toWorldPoint(entry, u, v);
+        positions[i * 3] = x;
+        positions[i * 3 + 1] = y;
+        positions[i * 3 + 2] = z;
+      });
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      this.extrudeSourceHighlightGeometries.push(geometry);
+      const line = new THREE.Line(geometry, material);
+      line.renderOrder = SELECTED_SKETCH_RENDER_ORDER;
+      this.extrudeSourceHighlightGroup.add(line);
+    };
+
+    for (const entity of entry.entities) addLoop(entityLocalPoints(entity));
+    for (const segment of entry.segments ?? []) addOpen(segmentLocalPoints(segment));
   }
 
   /** 直前のsetSketchOverlay()呼び出しで生成した線・グリッドをsceneから取り除き、リソースを解放する。 */
@@ -5480,13 +5608,14 @@ export class CadViewer {
     const callbacks = this.faceSelectCallbacks;
     this.faceSelectActive = false;
     this.faceSelectCallbacks = null;
-    // 選択済み・ホバー中だった面の色をBASE_COLORへ戻す(materialsは次のsetMesh()まで生存し続けるため)。
+    // 選択済み・ホバー中だった面の色を基本色(または対象ボディ強調中ならその色)へ戻す
+    // (materialsは次のsetMesh()まで生存し続けるため)。
     for (const id of this.selectedFaceIds) {
       const idx = this.faceGroups.findIndex((g) => g.faceId === id);
-      if (idx !== -1) this.materials[idx]?.color.setHex(BASE_COLOR);
+      if (idx !== -1) this.materials[idx]?.color.setHex(this.restColorForIndex(idx));
     }
     if (this.hoveredFaceSelectIndex != null) {
-      this.materials[this.hoveredFaceSelectIndex]?.color.setHex(BASE_COLOR);
+      this.materials[this.hoveredFaceSelectIndex]?.color.setHex(this.restColorForIndex(this.hoveredFaceSelectIndex));
     }
     this.selectedFaceIds = [];
     this.hoveredFaceSelectIndex = null;
@@ -5522,7 +5651,7 @@ export class CadViewer {
       this.materials[groupIndex]?.color.setHex(FACE_SELECT_COLOR);
     } else {
       this.selectedFaceIds = this.selectedFaceIds.filter((id) => id !== faceId);
-      this.materials[groupIndex]?.color.setHex(groupIndex === this.hoveredFaceSelectIndex ? HOVER_COLOR : BASE_COLOR);
+      this.materials[groupIndex]?.color.setHex(groupIndex === this.hoveredFaceSelectIndex ? HOVER_COLOR : this.restColorForIndex(groupIndex));
     }
     this.faceSelectCallbacks?.onSelectionChange(this.getSelectedFaceRefs());
   }
@@ -5534,7 +5663,7 @@ export class CadViewer {
     if (this.hoveredFaceSelectIndex != null) {
       const prevFaceId = this.faceGroups[this.hoveredFaceSelectIndex]?.faceId;
       if (prevFaceId == null || !this.selectedFaceIds.includes(prevFaceId)) {
-        this.materials[this.hoveredFaceSelectIndex]?.color.setHex(BASE_COLOR);
+        this.materials[this.hoveredFaceSelectIndex]?.color.setHex(this.restColorForIndex(this.hoveredFaceSelectIndex));
       }
     }
     this.hoveredFaceSelectIndex = groupIndex;
@@ -5593,10 +5722,10 @@ export class CadViewer {
     callbacks?.onCancel();
   }
 
-  /** materials[]の色をすべてBASE_COLORへ戻す(選択・ホバーいずれもリセット)。 */
+  /** materials[]の色をすべて基本色(または対象ボディ強調中ならその色)へ戻す(選択・ホバーいずれもリセット)。 */
   private clearMateHighlight() {
     for (let i = 0; i < this.faceGroups.length; i += 1) {
-      this.materials[i]?.color.setHex(BASE_COLOR);
+      this.materials[i]?.color.setHex(this.restColorForIndex(i));
     }
     this.mateHoverGroupIndex = null;
     this.renderer.domElement.style.cursor = "";
@@ -5642,7 +5771,7 @@ export class CadViewer {
     if (this.mateHoverGroupIndex != null) {
       const prevFaceId = this.faceGroups[this.mateHoverGroupIndex]?.faceId;
       if (prevFaceId == null || prevFaceId !== this.matePendingTarget?.faceId) {
-        this.materials[this.mateHoverGroupIndex]?.color.setHex(BASE_COLOR);
+        this.materials[this.mateHoverGroupIndex]?.color.setHex(this.restColorForIndex(this.mateHoverGroupIndex));
       }
     }
     this.mateHoverGroupIndex = groupIndex;
@@ -6057,13 +6186,45 @@ export class CadViewer {
     });
   }
 
-  /** 部品ホバー強調を解除し、対象面をBASE_COLORへ戻す。 */
+  /** 部品ホバー強調を解除し、対象面を基本色(または対象ボディ強調中ならその色)へ戻す。 */
   private clearPartHoverHighlight() {
     for (const idx of this.partHoverGroupIndices) {
-      this.materials[idx]?.color.setHex(BASE_COLOR);
+      this.materials[idx]?.color.setHex(this.restColorForIndex(idx));
     }
     this.partHoverGroupIndices = [];
     this.partHoverFeatureId = null;
+  }
+
+  /**
+   * 押し出し/回転体フィーチャー選択時、それが実際に作用したボディ(bodyGroups[].featureIdと同じ
+   * bodyFeatureId)の全面を控えめなアクセント色で強調する(Phase 46)。App側は選択中フィーチャーが
+   * extrude/revolveのときのみ対象ボディのfeatureIdを渡し、それ以外(未選択・他種別選択)ではnullを
+   * 渡して解除する。setPartHoverHighlight()と異なり「resting状態の色そのもの」を差し替える方式
+   * (restColorForIndex())のため、呼び出し後もホバー/選択等の既存ハイライトは通常どおり優先される。
+   * 直前の強調と重複しないmaterialIndexのみ、実際に表示中の色がBASE_COLOR/SELECTED_BODY_TINT_COLOR
+   * (=resting状態)のときだけ書き換える(ホバー中/選択中の面はそのままにして、次にresting状態へ
+   * 戻ったときにrestColorForIndex()が新しい強調状態を反映するのに任せる)。
+   */
+  setSelectedBodyTint(bodyFeatureId: FeatureId | null) {
+    const previousIndices = this.tintedGroupIndices;
+    this.tintedGroupIndices = new Set();
+    for (const idx of previousIndices) {
+      const material = this.materials[idx];
+      if (material && material.color.getHex() === SELECTED_BODY_TINT_COLOR) {
+        material.color.setHex(BASE_COLOR);
+      }
+    }
+    if (!bodyFeatureId) return;
+    const faceIdSet = new Set(this.bodyGroups.filter((g) => g.featureId === bodyFeatureId).flatMap((g) => g.faceIds));
+    if (faceIdSet.size === 0) return;
+    this.faceGroups.forEach((fg, idx) => {
+      if (!faceIdSet.has(fg.faceId)) return;
+      this.tintedGroupIndices.add(idx);
+      const material = this.materials[idx];
+      if (material && material.color.getHex() === BASE_COLOR) {
+        material.color.setHex(SELECTED_BODY_TINT_COLOR);
+      }
+    });
   }
 
   // ---- スケッチジオメトリのドラッグ編集(Phase 34) ----
@@ -6459,6 +6620,8 @@ export class CadViewer {
     this.clearInterferenceMeshes();
     this.threadAnnotationGeometries.forEach((g) => g.dispose());
     this.threadAnnotationMaterials.forEach((m) => m.dispose());
+    this.extrudeSourceHighlightGeometries.forEach((g) => g.dispose());
+    this.extrudeSourceHighlightMaterials.forEach((m) => m.dispose());
     this.referenceEdgeGeometries.forEach((g) => g.dispose());
     this.referenceEdgeMaterials.forEach((m) => m.dispose());
     this.referencePlaneEntries.forEach((entry) => {

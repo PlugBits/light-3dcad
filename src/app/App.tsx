@@ -180,6 +180,7 @@ export default function App() {
   const sketchPlanes = useCadStore((s) => s.sketchPlanes);
   const referenceEdges = useCadStore((s) => s.referenceEdges);
   const bodyGroups = useCadStore((s) => s.bodyGroups);
+  const bodyOperationTargets = useCadStore((s) => s.bodyOperationTargets);
   const threadAnnotations = useCadStore((s) => s.threadAnnotations);
   const errorMessage = useCadStore((s) => s.errorMessage);
   const errorFeatureId = useCadStore((s) => s.errorFeatureId);
@@ -610,6 +611,31 @@ export default function App() {
   useEffect(() => {
     viewerRef.current?.setSketchOverlay(sketchOverlays, selectedFeatureId, showSketches, selectedEntityId, selectedSketchDefinitionState);
   }, [sketchOverlays, selectedFeatureId, showSketches, selectedEntityId, selectedSketchDefinitionState]);
+
+  // 押し出し選択時の対象ハイライト(Phase 46): 選択中フィーチャーがextrude/revolveのとき、
+  // それが実際に作用したボディのfeatureId(bodyOperationTargets経由)を求める。それ以外はnull
+  // (ビューア側は対象ボディ強調を解除する)。
+  const selectedBodyTintTarget: FeatureId | null =
+    selectedFeature && (selectedFeature.type === "extrude" || selectedFeature.type === "revolve")
+      ? (bodyOperationTargets.find((t) => t.featureId === selectedFeature.id)?.bodyFeatureId ?? null)
+      : null;
+  useEffect(() => {
+    viewerRef.current?.setSelectedBodyTint(selectedBodyTintTarget);
+    // mesh(setMesh()呼び出し)のたびにmaterialIndexの対応が変わりうるため、meshが更新されたら
+    // 対象ボディが変わっていなくても必ず再適用する(CadViewer.setMesh()がtintedGroupIndicesを
+    // リセットする側と対になる)。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedBodyTintTarget, mesh]);
+
+  // 押し出し選択時、元になったスケッチの輪郭を一時強調する(Phase 46)。showSketches(表示トグル)の
+  // 状態に関わらず常時表示する(setSketchOverlay()とは独立したオーバーレイ)。
+  const selectedExtrudeSourceEntry: SketchOverlayEntry | null =
+    selectedFeature && (selectedFeature.type === "extrude" || selectedFeature.type === "revolve")
+      ? (sketchOverlays.find((e) => e.sketchId === selectedFeature.sketchId) ?? null)
+      : null;
+  useEffect(() => {
+    viewerRef.current?.setExtrudeSourceHighlight(selectedExtrudeSourceEntry);
+  }, [selectedExtrudeSourceEntry]);
 
   // スケッチジオメトリのドラッグ編集(Phase 34): 既存の「スナップ」トグルの値をビューアへ同期する
   // (部品移動ツールと違い明示的なツール開始が無いため、都度startXxxTool()の引数として渡せない)。

@@ -23,6 +23,12 @@ declare global {
       threadAnnotationLineCount: () => number;
       /** 地面の無限グリッド(Phase 44)の現在の可視状態。 */
       groundGridVisible: () => boolean;
+      /** 押し出し/回転体選択時の対象ボディ強調(Phase 46)が現在1面以上に適用されているかどうか。 */
+      selectedBodyTintActive: () => boolean;
+      /** 押し出しソースのスケッチ強調(Phase 46)の現在の描画本数。 */
+      extrudeSourceHighlightLineCount: () => number;
+      /** 直近のsetThreadAnnotations()に渡されたthreadAnnotationsのスナップショット(Phase 46)。 */
+      threadAnnotationsSnapshot: () => { featureId: string; position: [number, number, number] }[];
     };
     /**
      * Workerへ「故意にthrowする」メッセージを送り、実際のWorkerクラッシュ(Workerのerrorイベント)を
