@@ -24,6 +24,7 @@ function curveRefDisplayName(segments: readonly SketchSegment[] | undefined, ent
 const ENTITY_KIND_LABELS: Record<SketchEntity["kind"], string> = {
   rectangle: "矩形",
   circle: "円",
+  point: "点",
   slot: "スロット",
   polygon: "多角形",
   regularPolygon: "正多角形",

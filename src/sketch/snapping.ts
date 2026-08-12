@@ -225,6 +225,9 @@ export function collectSketchSnapCandidates(entities: SketchEntity[]): SnapCandi
       candidates.push({ point: entity.center, kind: "center" });
       const vertices = regularPolygonVertices(entity.center, entity.radius, entity.sides, entity.rotation ?? 0);
       vertices.forEach((p) => candidates.push({ point: p, kind: "vertex" }));
+    } else if (entity.kind === "point") {
+      // 点(Phase 47)自身もスナップ対象(他の点・寸法・拘束の作図時にこの点へ吸着できる)。
+      candidates.push({ point: entity.position, kind: "vertex" });
     } else {
       const points: [number, number][] = entity.points;
       points.forEach((p) => candidates.push({ point: p, kind: "vertex" }));

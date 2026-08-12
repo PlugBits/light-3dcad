@@ -142,5 +142,7 @@ export function explodeEntity(entity: SketchEntity): SketchSegment[] {
   if (entity.kind === "circle") return explodeCircle(entity);
   if (entity.kind === "slot") return explodeSlot(entity);
   if (entity.kind === "regularPolygon") return explodeRegularPolygon(entity);
+  // 点(Phase 47)は閉図形ではない位置決め専用マーカーのため分解対象外(呼び出し元がボタンを隠す)。
+  if (entity.kind === "point") return [];
   return explodePolygon(entity);
 }

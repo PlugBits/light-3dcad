@@ -15,7 +15,7 @@ import {
   setSketchSegments,
   updateSketchEntity,
 } from "../model/document";
-import { createCircleEntity, createRectangleEntity, createRegularPolygonEntity, createSlotEntity } from "../model/entity";
+import { createCircleEntity, createPointEntity, createRectangleEntity, createRegularPolygonEntity, createSlotEntity } from "../model/entity";
 import type { FeatureId, PolygonCorner, SketchEntity, SketchFeature, SketchSegment } from "../model/types";
 import { isEntityFixed, removeConstraint, setEntityFixed } from "../sketch/constraintDimensions";
 import { CONSTRAINT_KIND_LABELS, describeConstraint, segmentDisplayName } from "../sketch/displayNames";
@@ -140,6 +140,11 @@ export function SketchEditor({
     updateDocument((doc) => addSketchEntity(doc, sketch.id, entity));
   }
 
+  function handleAddPoint() {
+    const entity = createPointEntity({});
+    updateDocument((doc) => addSketchEntity(doc, sketch.id, entity));
+  }
+
   function handleAddSlot() {
     const entity = createSlotEntity({ start: [-10, 0], end: [10, 0], width: 10 });
     updateDocument((doc) => addSketchEntity(doc, sketch.id, entity));
@@ -217,7 +222,7 @@ export function SketchEditor({
 
   function handlePointChange(
     entityId: string,
-    field: "start" | "end",
+    field: "start" | "end" | "position",
     axis: 0 | 1,
     value: number,
     point: [number, number],
@@ -266,6 +271,9 @@ export function SketchEditor({
         <button type="button" data-testid="btn-add-circle" onClick={handleAddCircle} title="半径10mmの円を原点に追加します">
           円を数値で追加
         </button>
+        <button type="button" data-testid="btn-add-point" onClick={handleAddPoint} title="点を原点に追加します">
+          点を数値で追加
+        </button>
         <button type="button" data-testid="btn-add-slot" onClick={handleAddSlot} title="幅10mmのスロット(長円)を原点付近に追加します">
           スロットを数値で追加
         </button>
@@ -310,22 +318,26 @@ export function SketchEditor({
                   ? "矩形"
                   : entity.kind === "circle"
                     ? "円"
-                    : entity.kind === "slot"
-                      ? "スロット"
-                      : entity.kind === "regularPolygon"
-                        ? "正多角形"
-                        : "多角形"}
+                    : entity.kind === "point"
+                      ? "点"
+                      : entity.kind === "slot"
+                        ? "スロット"
+                        : entity.kind === "regularPolygon"
+                          ? "正多角形"
+                          : "多角形"}
               </strong>
               <span style={{ display: "flex", gap: 6 }}>
-                <button
-                  type="button"
-                  title="等価な線分・円弧要素に変換します(変換後はトリムツールで編集できます)"
-                  data-testid={`entity-${entity.kind}-${index}-explode`}
-                  onClick={() => handleExplodeEntity(entity)}
-                  style={{ fontSize: 11 }}
-                >
-                  分解
-                </button>
+                {entity.kind !== "point" && (
+                  <button
+                    type="button"
+                    title="等価な線分・円弧要素に変換します(変換後はトリムツールで編集できます)"
+                    data-testid={`entity-${entity.kind}-${index}-explode`}
+                    onClick={() => handleExplodeEntity(entity)}
+                    style={{ fontSize: 11 }}
+                  >
+                    分解
+                  </button>
+                )}
                 <button
                   type="button"
                   title="削除"
@@ -337,7 +349,22 @@ export function SketchEditor({
                 </button>
               </span>
             </div>
-            {entity.kind === "polygon" ? (
+            {entity.kind === "point" ? (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                <NumberField
+                  label="X (mm)"
+                  value={entity.position[0]}
+                  testId={`entity-${entity.kind}-${index}-position-x`}
+                  onChange={(v) => handlePointChange(entity.id, "position", 0, v, entity.position)}
+                />
+                <NumberField
+                  label="Y (mm)"
+                  value={entity.position[1]}
+                  testId={`entity-${entity.kind}-${index}-position-y`}
+                  onChange={(v) => handlePointChange(entity.id, "position", 1, v, entity.position)}
+                />
+              </div>
+            ) : entity.kind === "polygon" ? (
               <PolygonVertexEditor sketchId={sketch.id} entityIndex={index} entity={entity} />
             ) : entity.kind === "slot" ? (
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>

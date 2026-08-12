@@ -180,6 +180,14 @@ const EXTRUDE_SOURCE_HIGHLIGHT_COLOR = 0x2563eb;
 const SKETCH_NORMAL_OFFSET = 0.05;
 /** 円エンティティのポリライン近似の分割数。 */
 const CIRCLE_SEGMENTS = 64;
+/**
+ * 点エンティティ(Phase 47)のマーカー半サイズ(mm)。菱形(4頂点、上下左右)の輪郭として描画する。
+ * entityLocalPoints()が返す4頂点をLineLoopでそのまま描くだけで、円/矩形と同じ既存の描画・
+ * ピック(pickSketchOverlayAt)・ドラッグプレビュー(previewSketchDragGeometry)経路にそのまま乗る
+ * (専用の特別扱いコードを増やさないための設計。輪郭を持たないentityLocalPoints()の他分岐と違い、
+ * 「面積を持たない点」を敢えて小さな閉多角形として表現することで既存インフラを再利用する)。
+ */
+const POINT_MARKER_HALF_SIZE = 1.2;
 /** 選択中スケッチのグリッド間隔(mm)。 */
 const GRID_SPACING = 10;
 /** グリッドの色・不透明度。 */
@@ -309,6 +317,14 @@ export interface CircleDrawingCallbacks {
   /** 2クリック目で確定したときに呼ばれる(中心・半径、ローカル2D座標/mm、スナップ適用済み)。 */
   onComplete: (center: [number, number], radius: number) => void;
   /** Escapeキーまたはcancel呼び出しで中断したときに呼ばれる(1クリック目前でも呼ばれうる)。 */
+  onCancel: () => void;
+}
+
+/** 点ツール(1クリック、Phase 47)の完了/キャンセル時に呼ばれるコールバック。 */
+export interface PointDrawingCallbacks {
+  /** クリックで確定したときに呼ばれる(ローカル2D座標/mm、スナップ適用済み)。 */
+  onComplete: (position: [number, number]) => void;
+  /** Escapeキーまたはcancel呼び出しで中断したときに呼ばれる。 */
   onCancel: () => void;
 }
 
@@ -521,7 +537,7 @@ export interface MateToolCallbacks {
  * slot/regularPolygonも2クリック作図(Phase 17。幅/辺数はツール開始時に固定するパラメータ)、
  * segmentは自由な線分・円弧チェーン作図(Phase 19b。閉じる必要が無い点がpolygonと異なる)。
  */
-type DrawingShapeKind = "polygon" | "rectangle" | "circle" | "slot" | "regularPolygon" | "segment";
+type DrawingShapeKind = "polygon" | "rectangle" | "circle" | "point" | "slot" | "regularPolygon" | "segment";
 
 /** 線描画モード中の円弧セグメント(Phase 17)プレビューの弧分割数。 */
 const ARC_PREVIEW_SEGMENTS = 24;
@@ -867,6 +883,16 @@ function entityLocalPoints(entity: SketchEntity): [number, number][] {
   if (entity.kind === "regularPolygon") {
     // Phase 17: 外接円半径・辺数・回転から頂点を計算する(cornersなし)。
     return regularPolygonVertices(entity.center, entity.radius, entity.sides, entity.rotation ?? 0);
+  }
+  if (entity.kind === "point") {
+    // 点(Phase 47)は上下左右4頂点の小さな菱形として表現する(POINT_MARKER_HALF_SIZE参照)。
+    const [px, py] = entity.position;
+    return [
+      [px - POINT_MARKER_HALF_SIZE, py],
+      [px, py - POINT_MARKER_HALF_SIZE],
+      [px + POINT_MARKER_HALF_SIZE, py],
+      [px, py + POINT_MARKER_HALF_SIZE],
+    ];
   }
   // polygon: フィレット/面取り(Phase 11)・円弧辺のふくらみ(Phase 17)を適用した輪郭をポリライン近似する。
   // corners/bulges未指定時は points がそのまま返る(既存の直線LineLoopと同じ結果)。
@@ -1268,6 +1294,7 @@ export class CadViewer {
   private polygonCallbacks: PolygonDrawingCallbacks | null = null;
   private rectCallbacks: RectDrawingCallbacks | null = null;
   private circleCallbacks: CircleDrawingCallbacks | null = null;
+  private pointCallbacks: PointDrawingCallbacks | null = null;
   private slotCallbacks: SlotDrawingCallbacks | null = null;
   private regularPolygonCallbacks: RegularPolygonDrawingCallbacks | null = null;
   private segmentCallbacks: SegmentDrawingCallbacks | null = null;
@@ -3095,6 +3122,16 @@ export class CadViewer {
   }
 
   /**
+   * 点ツール(1クリック、Phase 47)を開始する。クリックした位置(スナップ適用済み)で即座に
+   * onCompleteが呼ばれ、ツールは終了する(矩形/円のような2クリック確定は不要)。
+   * handleShapeClick()が「drawingShape==="point"なら1クリック目で即確定する」特別扱いを持つ。
+   */
+  startPointDrawing(basis: PlaneBasis, snap: boolean, existingEntities: SketchEntity[], callbacks: PointDrawingCallbacks) {
+    this.beginDrawing("point", basis, snap, existingEntities);
+    this.pointCallbacks = callbacks;
+  }
+
+  /**
    * スロットツール(3クリック、Phase 17→Phase 21でSolidWorks式に変更)を開始する。
    * 1クリック目で中心線の始点を確定、2クリック目で終点を確定(長さ・向きが決まり、この間は
    * ラバーバンドで中心線のみプレビューする)、その後のマウス移動でカーソルの中心線からの
@@ -4352,6 +4389,7 @@ export class CadViewer {
     const polygonCallbacks = this.polygonCallbacks;
     const rectCallbacks = this.rectCallbacks;
     const circleCallbacks = this.circleCallbacks;
+    const pointCallbacks = this.pointCallbacks;
     const slotCallbacks = this.slotCallbacks;
     const regularPolygonCallbacks = this.regularPolygonCallbacks;
     const segmentCallbacks = this.segmentCallbacks;
@@ -4359,6 +4397,7 @@ export class CadViewer {
     if (shape === "polygon") polygonCallbacks?.onCancel();
     else if (shape === "rectangle") rectCallbacks?.onCancel();
     else if (shape === "circle") circleCallbacks?.onCancel();
+    else if (shape === "point") pointCallbacks?.onCancel();
     else if (shape === "slot") slotCallbacks?.onCancel();
     else if (shape === "regularPolygon") regularPolygonCallbacks?.onCancel();
     else segmentCallbacks?.onCancel();
@@ -4454,6 +4493,14 @@ export class CadViewer {
     const hit = this.raycastDrawingPlane(basis, px, py, rect);
     if (!hit) return;
     const resolved = this.resolveDrawingCursor(basis, hit, event.shiftKey);
+
+    if (this.drawingShape === "point") {
+      // 点ツール(Phase 47)は1クリックで即確定する(矩形/円/正多角形と異なり2クリック目を待たない)。
+      const callbacks = this.pointCallbacks;
+      this.exitDrawingState();
+      callbacks?.onComplete(resolved.point);
+      return;
+    }
 
     if (this.drawingPoints.length === 0) {
       this.drawingPoints.push(resolved.point);

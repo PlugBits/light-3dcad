@@ -21,6 +21,7 @@ export type ToolIconName =
   | "line"
   | "rect"
   | "circle"
+  | "point"
   | "slot"
   | "polygon"
   | "arc"
@@ -151,6 +152,13 @@ const PATHS: Record<ToolIconName, ReactElement> = {
   ),
   rect: <rect x="4" y="6" width="16" height="12" rx="0.5" />,
   circle: <circle cx="12" cy="12" r="8" />,
+  // 点(Phase 47): 小さな十字マーカー(SolidWorksスケッチの「点」相当)。
+  point: (
+    <>
+      <path d="M12 5v5.5M12 13.5V19M5 12h5.5M13.5 12H19" />
+      <circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none" />
+    </>
+  ),
   slot: (
     <>
       <path d="M8 6a6 6 0 1 0 0 12" />

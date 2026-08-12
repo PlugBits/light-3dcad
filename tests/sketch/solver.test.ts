@@ -1667,3 +1667,83 @@ describe("solveSketch PlaneGCS移行(Phase 35b-1)のスパイク失敗ケース�
     expect(dist(outS5.p1, outS5.p2)).toBeGreaterThan(1);
   });
 });
+
+// Phase 47: 点エンティティ(SolidWorksスケッチの「点」相当)のGCS参加。
+// circleの中心と同じ「代表点1つ」の仕組みを共有するため(src/sketch/gcsAdapter.tsのMovableEntity)、
+// distanceEntityOrigin/distanceEntityEntity/fixEntity/coincidentOriginがcircle同様に解ける。
+describe("solveSketch pointエンティティのGCS参加(Phase 47)", () => {
+  function point(id: string, position: [number, number]): Extract<SketchEntity, { kind: "point" }> {
+    return { kind: "point", id, position };
+  }
+
+  it("① distanceEntityOrigin: 点↔原点の距離が指定値に解ける(方向は維持)", () => {
+    const p = point("p1", [10, 0]);
+    const constraints: SketchConstraint[] = [{ id: "d1", kind: "distanceEntityOrigin", entity: { entityId: "p1" }, value: 25 }];
+    const result = solveSketch([], constraints, [p]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.entities[0];
+    expect(out.kind).toBe("point");
+    if (out.kind !== "point") return;
+    expect(dist(out.position, [0, 0])).toBeCloseTo(25, 4);
+    expect(out.position[1]).toBeCloseTo(0, 4);
+  });
+
+  it("② distanceEntityEntity: 2点間の距離が指定値に解ける(円↔点の組み合わせも解ける)", () => {
+    const a = point("a", [0, 0]);
+    const b = point("b", [5, 0]);
+    const constraints: SketchConstraint[] = [
+      { id: "d1", kind: "distanceEntityEntity", a: { entityId: "a" }, b: { entityId: "b" }, value: 40 },
+    ];
+    const result = solveSketch([], constraints, [a, b]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outA = result.entities.find((e) => e.id === "a")!;
+    const outB = result.entities.find((e) => e.id === "b")!;
+    if (outA.kind !== "point" || outB.kind !== "point") throw new Error("not point");
+    expect(dist(outA.position, outB.position)).toBeCloseTo(40, 4);
+  });
+
+  it("③ fixEntity: 固定した点は距離拘束があっても動かず、もう一方の点が動く", () => {
+    const fixed = point("fixed", [0, 0]);
+    const movable = point("movable", [5, 0]);
+    const constraints: SketchConstraint[] = [
+      { id: "fix1", kind: "fixEntity", entity: { entityId: "fixed" } },
+      { id: "d1", kind: "distanceEntityEntity", a: { entityId: "fixed" }, b: { entityId: "movable" }, value: 50 },
+    ];
+    const result = solveSketch([], constraints, [fixed, movable]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outFixed = result.entities.find((e) => e.id === "fixed")!;
+    const outMovable = result.entities.find((e) => e.id === "movable")!;
+    if (outFixed.kind !== "point" || outMovable.kind !== "point") throw new Error("not point");
+    expect(outFixed.position[0]).toBeCloseTo(0, 6);
+    expect(outFixed.position[1]).toBeCloseTo(0, 6);
+    expect(dist(outFixed.position, outMovable.position)).toBeCloseTo(50, 4);
+  });
+
+  it("④ coincidentOrigin: 点を原点に一致させる(残差0に解ける、circleの一致と同じ経路)", () => {
+    const p = point("p1", [12, 8]);
+    const constraints: SketchConstraint[] = [{ id: "co1", kind: "coincidentOrigin", point: { entityId: "p1" } }];
+    const result = solveSketch([], constraints, [p]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.entities[0];
+    expect(out.kind).toBe("point");
+    if (out.kind !== "point") return;
+    expect(out.position[0]).toBeCloseTo(0, 6);
+    expect(out.position[1]).toBeCloseTo(0, 6);
+  });
+
+  it("⑤ fixEntityと矛盾するdistanceEntityOriginでconflictingになる(固定点は原点そのものだが距離30を要求)", () => {
+    const p = point("p1", [0, 0]);
+    const constraints: SketchConstraint[] = [
+      { id: "fix1", kind: "fixEntity", entity: { entityId: "p1" } },
+      { id: "d1", kind: "distanceEntityOrigin", entity: { entityId: "p1" }, value: 30 },
+    ];
+    const result = solveSketch([], constraints, [p]);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.conflicting).toBe(true);
+  });
+});

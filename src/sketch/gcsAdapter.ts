@@ -48,7 +48,7 @@ const EARLY_RETURN_TOLERANCE = 1e-7;
 /** ドラッグ中(temporary拘束あり)の緩和後の最大反復回数(スパイクの06-drag-tuning.mjsで確認)。 */
 const DRAG_MAX_ITERATIONS = 1000;
 
-type MovableEntity = Extract<SketchEntity, { kind: "circle" | "rectangle" | "polygon" | "regularPolygon" | "slot" }>;
+type MovableEntity = Extract<SketchEntity, { kind: "circle" | "rectangle" | "polygon" | "regularPolygon" | "slot" | "point" }>;
 
 /**
  * segmentがPlaneGCSのネイティブarcプリミティとして構築されるべき「本物の円弧」かどうか
@@ -65,7 +65,8 @@ function isMovableEntity(entity: SketchEntity): entity is MovableEntity {
     entity.kind === "rectangle" ||
     entity.kind === "polygon" ||
     entity.kind === "regularPolygon" ||
-    entity.kind === "slot"
+    entity.kind === "slot" ||
+    entity.kind === "point"
   );
 }
 
@@ -166,9 +167,11 @@ function addLine(ctx: BuildContext, id: string, p1: string, p2: string) {
   ctx.lines.set(id, { id, type: "line", p1_id: p1, p2_id: p2 });
 }
 
-/** entity(可動)の「代表点」の初期座標(circle/rectangle/regularPolygonは中心、polygon/slotは並進オフセット0,0)。 */
+/** entity(可動)の「代表点」の初期座標(circle/rectangle/regularPolygonは中心、pointはposition、polygon/slotは並進オフセット0,0)。 */
 function repInit(entity: MovableEntity): Point2 {
-  return entity.kind === "circle" || entity.kind === "rectangle" || entity.kind === "regularPolygon" ? entity.center : [0, 0];
+  if (entity.kind === "circle" || entity.kind === "rectangle" || entity.kind === "regularPolygon") return entity.center;
+  if (entity.kind === "point") return entity.position;
+  return [0, 0];
 }
 
 /** entity(可動)の「代表点」の現在座標(拘束構築時点の符号決定に使う。repInitと同じ値)。 */
@@ -792,6 +795,9 @@ function entitiesFromGcs(w: GcsWrapper, entities: readonly SketchEntity[]): Sket
       if (entity.kind === "circle" || entity.kind === "rectangle" || entity.kind === "regularPolygon") {
         return { ...entity, center: [rx, ry] as Point2 };
       }
+      if (entity.kind === "point") {
+        return { ...entity, position: [rx, ry] as Point2 };
+      }
       if (rx !== 0 || ry !== 0) {
         if (entity.kind === "polygon") {
           return { ...entity, points: entity.points.map((p) => [p[0] + rx, p[1] + ry] as Point2) };
@@ -832,6 +838,8 @@ function maxCoordDelta(
     const b = newEntities[i];
     if (a.kind === "circle" && b.kind === "circle") {
       m = Math.max(m, Math.abs(a.center[0] - b.center[0]), Math.abs(a.center[1] - b.center[1]));
+    } else if (a.kind === "point" && b.kind === "point") {
+      m = Math.max(m, Math.abs(a.position[0] - b.position[0]), Math.abs(a.position[1] - b.position[1]));
     } else if (a.kind === "rectangle" && b.kind === "rectangle") {
       m = Math.max(m, Math.abs(a.center[0] - b.center[0]), Math.abs(a.center[1] - b.center[1]));
     } else if (a.kind === "regularPolygon" && b.kind === "regularPolygon") {
@@ -941,6 +949,7 @@ function angleBetweenDeg(a: Point2, b: Point2): number {
 function repPointConcrete(entity: SketchEntity | undefined): Point2 {
   if (!entity) return [0, 0];
   if (entity.kind === "circle" || entity.kind === "rectangle" || entity.kind === "regularPolygon") return entity.center;
+  if (entity.kind === "point") return entity.position;
   if (entity.kind === "polygon") return entity.points[0] ?? [0, 0];
   if (entity.kind === "slot") return [(entity.start[0] + entity.end[0]) / 2, (entity.start[1] + entity.end[1]) / 2];
   return [0, 0];

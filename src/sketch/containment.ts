@@ -83,6 +83,11 @@ function entityVertices(entity: SketchEntity): Point2[] {
   if (entity.kind === "regularPolygon") {
     return regularPolygonVertices(entity.center, entity.radius, entity.sides, entity.rotation ?? 0);
   }
+  // 点(Phase 47)は呼び出し元(evaluator.tsのbuildDrawingParts)が常に除外するため実際には
+  // 渡されないはずだが、型を満たすためのフォールバック(面積ゼロの1点として扱う)。
+  if (entity.kind === "point") {
+    return [entity.position];
+  }
   return entity.points;
 }
 

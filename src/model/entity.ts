@@ -26,6 +26,15 @@ export function createCircleEntity(params: { center?: [number, number]; radius: 
   };
 }
 
+/** ID付きの点エンティティを作成する(Phase 47、SolidWorksスケッチの「点」相当)。 */
+export function createPointEntity(params: { position?: [number, number] }): SketchEntity {
+  return {
+    kind: "point",
+    id: generateId("entity"),
+    position: params.position ?? [0, 0],
+  };
+}
+
 /**
  * ID付きの多角形エンティティを作成する。points は順序付き頂点列(閉ループ、3点以上)。
  * corners は頂点ごとのフィレット/面取り指定(省略可、省略時は全頂点が角のまま)。

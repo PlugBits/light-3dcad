@@ -9,6 +9,7 @@ import {
   createCircleEntity,
   createEmptyDocument,
   createLineSegment,
+  createPointEntity,
   createRectangleEntity,
   patchThreadPositionRef,
 } from "../../src/model";
@@ -180,6 +181,62 @@ describe("serializeProject / deserializeProject", () => {
         sketchId: faceSketch.id,
         entityId: circle.id,
       });
+    }
+  });
+
+  it("点エンティティ(Phase 47)を含むスケッチはserialize→deserializeで完全一致する(往復テスト)", () => {
+    const point = createPointEntity({ position: [3, -4] });
+    const { doc } = addSketchFeature(createEmptyDocument(), {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [point],
+    });
+    const text = serializeProject(doc);
+    const result = deserializeProject(text);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.doc).toEqual(doc);
+      const sketch = result.doc.features[0];
+      expect(sketch.type === "sketch" ? sketch.entities[0] : null).toEqual(point);
+    }
+  });
+
+  it("positionRefが点エンティティ(Phase 47)を参照するねじフィーチャーもserialize→deserializeで完全一致する(往復テスト)", () => {
+    const rect = createRectangleEntity({ width: 60, height: 40 });
+    const { doc: withSketch, feature: sketch } = addSketchFeature(createEmptyDocument(), {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [rect],
+    });
+    const { doc: withExtrude, feature: extrude } = addExtrudeFeature(withSketch, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: 20,
+      direction: 1,
+      operation: "newBody",
+    });
+    const point = createPointEntity({ position: [3, -4] });
+    const { doc: withFaceSketch, feature: faceSketch } = addSketchFeature(withExtrude, {
+      name: "FaceSketch1",
+      plane: { kind: "face", featureId: extrude.id, faceId: 1, center: [0, 0, 20], normal: [0, 0, 1] },
+      entities: [point],
+    });
+    const { doc: withThread, feature: thread } = addThreadFeature(withFaceSketch, {
+      name: "M6ねじ1",
+      hand: "male",
+      preset: "M6",
+      length: 10,
+      face: { faceId: 1, center: [0, 0, 20], normal: [0, 0, 1] },
+      position: [3, -4],
+      direction: 1,
+    });
+    const doc = patchThreadPositionRef(withThread, thread.id, { sketchId: faceSketch.id, entityId: point.id });
+
+    const text = serializeProject(doc);
+    const result = deserializeProject(text);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.doc).toEqual(doc);
     }
   });
 

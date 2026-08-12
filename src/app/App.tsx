@@ -48,6 +48,7 @@ import {
   createArcSegment,
   createCircleEntity,
   createLineSegment,
+  createPointEntity,
   createPolygonEntity,
   createRectangleEntity,
   createSlotEntity,
@@ -134,7 +135,7 @@ import type { StandardView } from "../viewer/standardViews";
  * (自由描画はsegmentツールが担い、regularPolygon経由でも頂点編集でpolygonエンティティを
  * 個別に調整できるため)。
  */
-type DrawingTool = "rect" | "circle" | "slot" | "regularPolygon" | "segment" | null;
+type DrawingTool = "rect" | "circle" | "point" | "slot" | "regularPolygon" | "segment" | null;
 
 /**
  * CommandManagerリボン(Phase 38a)のタブ。"sketch"=スケッチ、"feature"=フィーチャー、
@@ -224,6 +225,7 @@ export default function App() {
   const addExtrude = useCadStore((s) => s.addExtrude);
   const addRevolve = useCadStore((s) => s.addRevolve);
   const addFaceSketch = useCadStore((s) => s.addFaceSketch);
+  const editThreadPlacementSketch = useCadStore((s) => s.editThreadPlacementSketch);
   const removeFeature = useCadStore((s) => s.removeFeature);
   const addFillet3D = useCadStore((s) => s.addFillet3D);
   const addShell3D = useCadStore((s) => s.addShell3D);
@@ -329,6 +331,12 @@ export default function App() {
   const [threadReselectTargetId, setThreadReselectTargetId] = useState<FeatureId | null>(null);
   const [mateReselectTargetId, setMateReselectTargetId] = useState<FeatureId | null>(null);
   const anyReselectActive = !!(edgeReselectTargetId || shellReselectTargetId || threadReselectTargetId || mateReselectTargetId);
+  /**
+   * ねじの「配置スケッチを編集」ガイド付きフロー(Phase 47)。対象スケッチのselectedSketchPlaneが
+   * 解決される(既存スケッチなら即座、新規作成したスケッチならWorker再評価完了後)まで待ってから
+   * 点ツールを事前アクティブ化するための保留id(下のuseEffect参照)。
+   */
+  const [pendingGuidedPointToolSketchId, setPendingGuidedPointToolSketchId] = useState<FeatureId | null>(null);
   // トリムツール(未選択はfalse、Phase 19b)。
   const [trimTool, setTrimTool] = useState(false);
   // 延長ツール(未選択はfalse、Phase 31b)。トリムの逆: 直線セグメントの近い側の端点を、最初に交わる
@@ -1169,6 +1177,30 @@ export default function App() {
     setActiveTool("circle");
   }
 
+  /**
+   * 点ツール(Phase 47、1クリック)。SolidWorksスケッチの「点」相当の位置決め専用マーカーを置く。
+   * ねじの配置スケッチ編集(handleThreadEditPlacementSketch)からもactivateOnEnter経由で
+   * 事前アクティブ化される。
+   */
+  function handleStartPointDrawing() {
+    if (!viewerRef.current || !selectedFeature || selectedFeature.type !== "sketch" || !selectedSketchPlane) return;
+    const sketchId = selectedFeature.id;
+    viewerRef.current.startPointDrawing(selectedSketchPlane, gridSnap, selectedFeature.entities, {
+      onComplete: (position) => {
+        const entity = createPointEntity({ position });
+        updateDocument((d) => addSketchEntity(d, sketchId, entity));
+        setActiveTool(null);
+        setDrawingSketchId(null);
+      },
+      onCancel: () => {
+        setActiveTool(null);
+        setDrawingSketchId(null);
+      },
+    });
+    setDrawingSketchId(sketchId);
+    setActiveTool("point");
+  }
+
   function handleCancelDrawing() {
     viewerRef.current?.cancelPolygonDrawing();
   }
@@ -1430,6 +1462,42 @@ export default function App() {
   function handleCancelThreadReselect() {
     viewerRef.current?.cancelThreadPlaceTool();
   }
+
+  /**
+   * 「配置スケッチを編集」(Phase 47、ThreadEditor): positionRefが設定済みならその参照先スケッチを
+   * 選択するだけ(既存の選択フロー)。未設定ならstore.editThreadPlacementSketch()が配置面と同じ面の
+   * スケッチを探す/新規作成してpendingThreadPlacementLinkを設定するので、そのスケッチを選択し、
+   * 点ツールを事前アクティブ化する(selectedSketchPlaneが解決されるまで待つ、下のuseEffect参照)。
+   */
+  function handleEditThreadPlacementSketch(thread: ThreadFeature) {
+    const result = editThreadPlacementSketch(thread.id);
+    if (!result) return;
+    selectFeature(result.sketchId);
+    if (result.guided) setPendingGuidedPointToolSketchId(result.sketchId);
+  }
+
+  // pendingGuidedPointToolSketchId(上記)が指すスケッチのselectedSketchPlaneが解決され次第、
+  // 点ツールを起動する(新規作成したスケッチはWorker再評価完了まで平面が無いため、既存スケッチなら
+  // 即座に、新規なら再評価完了後に発火する)。
+  useEffect(() => {
+    if (!pendingGuidedPointToolSketchId) return;
+    if (selectedFeature?.type !== "sketch" || selectedFeature.id !== pendingGuidedPointToolSketchId) return;
+    if (!selectedSketchPlane) return;
+    setPendingGuidedPointToolSketchId(null);
+    handleStartPointDrawing();
+    // handleStartPointDrawingは選択中スケッチ(selectedFeature/selectedSketchPlane)を直接参照するため、
+    // 依存配列にも含める(古いクロージャで別スケッチを対象にしないため)。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingGuidedPointToolSketchId, selectedFeature, selectedSketchPlane]);
+
+  // ねじのpositionRef自動リンク(Phase 47、store.selectFeature()がpendingThreadPlacementLinkを
+  // 消費した際にセットするトーストメッセージ)。検知したら表示して直後にクリアする(一度きり)。
+  const pendingThreadAutoLinkMessage = useCadStore((s) => s.pendingThreadAutoLinkMessage);
+  useEffect(() => {
+    if (!pendingThreadAutoLinkMessage) return;
+    showTransientMessage(pendingThreadAutoLinkMessage, "success");
+    useCadStore.setState({ pendingThreadAutoLinkMessage: null });
+  }, [pendingThreadAutoLinkMessage]);
 
   /** ねじボタンをdisabledにすべきか(他のツール実行中、またはボディが存在しない)。 */
   function isThreadToolDisabled(): boolean {
@@ -2543,6 +2611,17 @@ export default function App() {
                 </button>
                 <button
                   type="button"
+                  className={`ribbon-tool${activeTool === "point" ? " is-active" : ""}`}
+                  data-testid="btn-draw-point"
+                  onClick={activeTool === "point" ? handleCancelDrawing : handleStartPointDrawing}
+                  disabled={isToolDisabled("point")}
+                  title="クリックで点を1つ置きます(位置決め専用のマーカー。Escでキャンセル)"
+                >
+                  <ToolIcon name="point" />
+                  <span className="ribbon-tool-label">{activeTool === "point" ? "点キャンセル(Esc)" : "点"}</span>
+                </button>
+                <button
+                  type="button"
                   className={`ribbon-tool${activeTool === "slot" ? " is-active" : ""}`}
                   data-testid="btn-draw-slot"
                   onClick={activeTool === "slot" ? handleCancelDrawing : handleStartSlotDrawing}
@@ -3292,6 +3371,7 @@ export default function App() {
                   isReselecting={threadReselectTargetId === selectedFeature.id}
                   onStartReselect={() => handleStartThreadReselect(selectedFeature)}
                   onCancelReselect={handleCancelThreadReselect}
+                  onEditPlacementSketch={() => handleEditThreadPlacementSketch(selectedFeature)}
                 />
               )}
               {selectedFeature.type === "partInstance" && <PartInstanceEditor instance={selectedFeature} />}

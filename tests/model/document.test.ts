@@ -22,6 +22,7 @@ import {
   getDependentFeatureIds,
   getDirectDependentFeatureIds,
   isDocumentValid,
+  moveFeatureBeforeIfAfter,
   patchExtrudeFeature,
   patchPartInstanceFeature,
   patchSketchFeature,
@@ -1314,5 +1315,79 @@ describe("replaceFillet3DEdges / replaceShellFaces / replaceThreadPlacement / re
     // 存在しないfeatureIdを渡した場合はupdateFeature()と同じく元のdocをそのまま返す。
     const untouched = replaceMateFaces(doc, "does-not-exist", { a: newA, b: newB });
     expect(untouched).toBe(doc);
+  });
+});
+
+describe("moveFeatureBeforeIfAfter(Phase 47: 配置スケッチを編集ガイド付きフロー用)", () => {
+  it("featureIdがbeforeFeatureIdより後ろにあれば、直前へ移動する", () => {
+    const empty = createEmptyDocument();
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [createRectangleEntity({ width: 10, height: 10 })],
+    });
+    const { doc: doc2, feature: extrude } = addExtrudeFeature(doc1, {
+      name: "Extrude1",
+      sketchId: sketch.id,
+      distance: 10,
+      direction: 1,
+      operation: "newBody",
+    });
+    const { doc: doc3, feature: thread } = addThreadFeature(doc2, {
+      name: "M6ねじ1",
+      hand: "male",
+      preset: "M6",
+      length: 5,
+      face: { faceId: 1, center: [0, 0, 10], normal: [0, 0, 1] },
+      position: [0, 0],
+      direction: 1,
+    });
+    // threadの後にface参照スケッチを追加(ガイド付きフローがaddSketchFeature()直後に行う想定)。
+    const { doc: doc4, feature: laterSketch } = addSketchFeature(doc3, {
+      name: "ThreadSketch1",
+      plane: { kind: "face", featureId: extrude.id, faceId: 1, center: [0, 0, 10], normal: [0, 0, 1] },
+      entities: [],
+    });
+    expect(doc4.features.findIndex((f) => f.id === laterSketch.id)).toBeGreaterThan(
+      doc4.features.findIndex((f) => f.id === thread.id),
+    );
+
+    const reordered = moveFeatureBeforeIfAfter(doc4, laterSketch.id, thread.id);
+    const ids = reordered.features.map((f) => f.id);
+    expect(ids.indexOf(laterSketch.id)).toBeLessThan(ids.indexOf(thread.id));
+    // 他のフィーチャーの並び・内容自体は変わらない(移動対象のみ位置が変わる、集合として同じ)。
+    expect(reordered.features).toHaveLength(doc4.features.length);
+    expect(new Set(ids)).toEqual(new Set(doc4.features.map((f) => f.id)));
+  });
+
+  it("既にbeforeFeatureIdより前にあれば何もしない(同一のdocをそのまま返す)", () => {
+    const empty = createEmptyDocument();
+    const { doc: doc1, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [createRectangleEntity({ width: 10, height: 10 })],
+    });
+    const { doc: doc2, feature: thread } = addThreadFeature(doc1, {
+      name: "M6ねじ1",
+      hand: "male",
+      preset: "M6",
+      length: 5,
+      face: { faceId: 1, center: [0, 0, 10], normal: [0, 0, 1] },
+      position: [0, 0],
+      direction: 1,
+    });
+    const result = moveFeatureBeforeIfAfter(doc2, sketch.id, thread.id);
+    expect(result).toBe(doc2);
+  });
+
+  it("featureId/beforeFeatureIdのいずれかが存在しなければ何もしない", () => {
+    const empty = createEmptyDocument();
+    const { doc, feature: sketch } = addSketchFeature(empty, {
+      name: "Sketch1",
+      plane: { kind: "world", plane: "XY" },
+      entities: [],
+    });
+    expect(moveFeatureBeforeIfAfter(doc, "does-not-exist", sketch.id)).toBe(doc);
+    expect(moveFeatureBeforeIfAfter(doc, sketch.id, "does-not-exist")).toBe(doc);
   });
 });

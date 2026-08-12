@@ -35,6 +35,12 @@ export type PolygonCorner = null | { kind: "fillet" | "chamfer"; size: number };
 export type SketchEntity =
   | { kind: "rectangle"; id: string; center: [number, number]; width: number; height: number }
   | { kind: "circle"; id: string; center: [number, number]; radius: number }
+  /**
+   * SolidWorksスケッチの「点」相当の自由点(Phase 47)。ボディの押し出し/カットには使わない
+   * (regions.ts等の閉領域検出の対象外)、位置決め専用のマーカー。GCSでは自由な点として扱われ、
+   * circleのcenterと同様に一致・距離拘束や寸法の対象になる(src/sketch/gcsAdapter.ts参照)。
+   */
+  | { kind: "point"; id: string; position: [number, number] }
   | {
       kind: "polygon";
       id: string;

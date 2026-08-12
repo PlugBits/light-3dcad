@@ -47,6 +47,25 @@ export function addFeature(doc: CadDocument, feature: Feature): CadDocument {
 }
 
 /**
+ * featureIdが指すフィーチャーを、beforeFeatureIdが指すフィーチャーの直前へ移動する(Phase 47、
+ * ThreadEditorの「配置スケッチを編集」ガイド付きフロー用)。evaluator.tsはdoc.featuresを先頭から
+ * 順に評価するため、あるフィーチャーが別のフィーチャー(例: ねじのpositionRef)を参照する場合、
+ * 参照先は参照元より前に登場している必要がある。両方が既にその順序なら(featureIdの位置が
+ * beforeFeatureIdより前)何もしない(同一のdocをそのまま返す)。いずれかのidが存在しなければ
+ * 何もしない。
+ */
+export function moveFeatureBeforeIfAfter(doc: CadDocument, featureId: FeatureId, beforeFeatureId: FeatureId): CadDocument {
+  const featureIndex = doc.features.findIndex((f) => f.id === featureId);
+  const beforeIndex = doc.features.findIndex((f) => f.id === beforeFeatureId);
+  if (featureIndex === -1 || beforeIndex === -1 || featureIndex < beforeIndex) return doc;
+  const feature = doc.features[featureIndex];
+  const withoutFeature = doc.features.filter((f) => f.id !== featureId);
+  const insertAt = withoutFeature.findIndex((f) => f.id === beforeFeatureId);
+  const reordered = [...withoutFeature.slice(0, insertAt), feature, ...withoutFeature.slice(insertAt)];
+  return { ...doc, features: reordered };
+}
+
+/**
  * 新しいスケッチフィーチャーを作成して末尾に追加する。IDは自動生成される。
  * segments(Phase 19a)は省略可(後方互換。省略時は既存どおりentitiesのみのスケッチになる)。
  */

@@ -53,6 +53,12 @@ function validateEntity(entity: SketchEntity, featureId: FeatureId): ValidationE
       }
       break;
     }
+    case "point": {
+      if (!entity.position.every((c) => Number.isFinite(c))) {
+        errors.push({ featureId, message: `点(${entity.id})の座標が不正です` });
+      }
+      break;
+    }
     case "polygon": {
       if (entity.points.length < 3) {
         errors.push({ featureId, message: `多角形(${entity.id})は3点以上の頂点が必要です` });
@@ -338,11 +344,12 @@ function validateConstraint(
       break;
     }
     case "distanceEntityEntity": {
-      if (!entities.find((e) => e.id === constraint.a.entityId && e.kind === "circle")) {
-        errors.push({ featureId, message: `拘束(${constraint.id})の参照先の円(${constraint.a.entityId})が見つかりません` });
+      // Phase 47: 点エンティティも円と同様に参照できる(どちらも「代表点」1つを持つmovable entity)。
+      if (!entities.find((e) => e.id === constraint.a.entityId && (e.kind === "circle" || e.kind === "point"))) {
+        errors.push({ featureId, message: `拘束(${constraint.id})の参照先の円/点(${constraint.a.entityId})が見つかりません` });
       }
-      if (!entities.find((e) => e.id === constraint.b.entityId && e.kind === "circle")) {
-        errors.push({ featureId, message: `拘束(${constraint.id})の参照先の円(${constraint.b.entityId})が見つかりません` });
+      if (!entities.find((e) => e.id === constraint.b.entityId && (e.kind === "circle" || e.kind === "point"))) {
+        errors.push({ featureId, message: `拘束(${constraint.id})の参照先の円/点(${constraint.b.entityId})が見つかりません` });
       }
       if (!isValidAxisDistanceValue(constraint.value, constraint.axis)) {
         errors.push({
@@ -570,8 +577,8 @@ export function validateFeature(feature: Feature, allFeatures: readonly Feature[
         errors.push({ featureId: feature.id, message: `配置基準のスケッチ(${feature.positionRef.sketchId})が存在しません` });
       } else if (refSketch.type !== "sketch") {
         errors.push({ featureId: feature.id, message: `配置基準の参照先(${feature.positionRef.sketchId})はスケッチではありません` });
-      } else if (!refSketch.entities.find((e) => e.id === feature.positionRef?.entityId && e.kind === "circle")) {
-        errors.push({ featureId: feature.id, message: `配置基準の円(${feature.positionRef.entityId})が見つかりません` });
+      } else if (!refSketch.entities.find((e) => e.id === feature.positionRef?.entityId && (e.kind === "circle" || e.kind === "point"))) {
+        errors.push({ featureId: feature.id, message: `配置基準の円/点(${feature.positionRef.entityId})が見つかりません` });
       }
     }
   } else if (feature.type === "mate") {
