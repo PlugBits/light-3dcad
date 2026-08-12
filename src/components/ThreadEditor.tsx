@@ -18,11 +18,18 @@ export interface ThreadEditorProps {
   isReselecting: boolean;
   onStartReselect: () => void;
   onCancelReselect: () => void;
+  /**
+   * 「配置スケッチを編集」ガイド付きフロー(Phase 47)。App.tsx側でstore.editThreadPlacementSketch()を
+   * 呼び、対象スケッチを選択してスケッチモードへ入る(未設定時は面上スケッチを探す/作成し、
+   * 点ツールを事前アクティブ化する)。
+   */
+  onEditPlacementSketch: () => void;
 }
 
-export function ThreadEditor({ thread, doc, hasError, isReselecting, onStartReselect, onCancelReselect }: ThreadEditorProps) {
+export function ThreadEditor({ thread, doc, hasError, isReselecting, onStartReselect, onCancelReselect, onEditPlacementSketch }: ThreadEditorProps) {
   const updateDocument = useCadStore((s) => s.updateDocument);
   const sketchPlanes = useCadStore((s) => s.sketchPlanes);
+  const threadFacePlanes = useCadStore((s) => s.threadFacePlanes);
 
   function patch(p: Partial<Pick<ThreadFeature, "name" | "preset" | "length" | "hand">>) {
     updateDocument((d) => patchThreadFeature(d, thread.id, p));
@@ -36,8 +43,12 @@ export function ThreadEditor({ thread, doc, hasError, isReselecting, onStartRese
     updateDocument((d) => patchThreadPosition(d, thread.id, next));
   }
 
-  // 配置基準参照(positionRef、Phase 46)の候補一覧: thread.faceと同じ面上スケッチが持つ円。
-  const positionRefCandidates = listThreadPositionRefCandidates(doc, thread, sketchPlanes);
+  // 配置基準参照(positionRef、Phase 46)の候補一覧: thread.faceと同じ面上スケッチが持つ円/点。
+  // 「同じ面かどうか」は直近評価で実際に解決した配置面(Phase 47、threadFacePlanes)を優先し、
+  // まだ解決されていなければthread.face(初回配置クリック値)へフォールバックする
+  // (src/model/threadPositionRef.tsのlistThreadPositionRefCandidates()コメント参照)。
+  const resolvedThreadFace = threadFacePlanes.find((p) => p.threadId === thread.id);
+  const positionRefCandidates = listThreadPositionRefCandidates(doc, thread, sketchPlanes, resolvedThreadFace);
   const positionRefKey = thread.positionRef ? `${thread.positionRef.sketchId}:${thread.positionRef.entityId}` : "";
 
   /** 「スケッチの円を参照」ラジオを選んだとき: 候補の先頭を初期選択する(候補が無ければ何もしない)。 */
@@ -216,18 +227,28 @@ export function ThreadEditor({ thread, doc, hasError, isReselecting, onStartRese
       )}
 
       {!isReselecting && (
-        <button
-          type="button"
-          data-testid="btn-reselect-thread-placement"
-          onClick={onStartReselect}
-          style={
-            hasError
-              ? { background: "#5c1f1f", color: "#fff", border: "1px solid #ff6b6b", fontWeight: "bold" }
-              : undefined
-          }
-        >
-          配置し直す
-        </button>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button
+            type="button"
+            data-testid="btn-reselect-thread-placement"
+            onClick={onStartReselect}
+            style={
+              hasError
+                ? { background: "#5c1f1f", color: "#fff", border: "1px solid #ff6b6b", fontWeight: "bold" }
+                : undefined
+            }
+          >
+            配置し直す
+          </button>
+          <button
+            type="button"
+            data-testid="btn-edit-thread-placement-sketch"
+            onClick={onEditPlacementSketch}
+            title="配置基準のスケッチを開きます(未設定なら配置面と同じ面のスケッチを探す/新規作成し、点ツールを起動します)"
+          >
+            配置スケッチを編集
+          </button>
+        </div>
       )}
 
       {isReselecting && (

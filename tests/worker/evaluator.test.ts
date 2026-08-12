@@ -22,6 +22,7 @@ import {
   createCircleEntity,
   createEmptyDocument,
   createLineSegment,
+  createPointEntity,
   createPolygonEntity,
   createRectangleEntity,
   createRegularPolygonEntity,
@@ -33,6 +34,7 @@ import {
   validateFeature,
 } from "../../src/model";
 import type { CadDocument, FilletEdgeRef, MateFaceRef, SketchSegment } from "../../src/model/types";
+import { listThreadPositionRefCandidates } from "../../src/model/threadPositionRef";
 import { checkInterference, evaluateDocument } from "../../src/worker/evaluator";
 
 const initOpenCascade = initOpenCascadeUntyped as unknown as (moduleOverrides: {
@@ -2579,6 +2581,47 @@ describe("evaluateDocument (WASM統合): ねじ(Phase 25c、Phase 41で簡易表
     expect(ann.position[2]).toBeCloseTo(20, 6);
   });
 
+  it("positionRef: 面上スケッチの点(Phase 47)の座標を配置位置として解決し、threadPositionUpdatesへ書き戻す", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: boxDoc, extrude } = buildBoxDoc(20);
+    const boxResult = evaluateDocument(boxDoc);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const topFace = findTopFace(boxResult.shape);
+    boxResult.shape.delete();
+
+    // 押し出さない、位置決め専用の点(Phase 47)を1つ置く。
+    const point = createPointEntity({ position: [5, -6] });
+    const { doc: withSketch, feature: faceSketch } = addSketchFeature(boxDoc, {
+      name: "FaceSketch1",
+      plane: { kind: "face", featureId: extrude.id, faceId: topFace.faceId, center: topFace.center, normal: topFace.normal },
+      entities: [point],
+    });
+
+    const { doc, feature: thread } = addThreadFeature(withSketch, {
+      name: "M6ねじ1",
+      hand: "male",
+      preset: "M6",
+      length: 5,
+      face: topFace,
+      position: [0, 0],
+      direction: 1,
+    });
+    const docWithRef = patchThreadPositionRef(doc, thread.id, { sketchId: faceSketch.id, entityId: point.id });
+
+    const result = evaluateDocument(docWithRef);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    result.shape?.delete();
+
+    expect(result.threadPositionUpdates).toEqual([{ featureId: thread.id, position: [5, -6] }]);
+    expect(result.threadAnnotations.length).toBe(1);
+    const ann = result.threadAnnotations[0];
+    expect(ann.position[0]).toBeCloseTo(5, 6);
+    expect(ann.position[1]).toBeCloseTo(-6, 6);
+    expect(ann.position[2]).toBeCloseTo(20, 6);
+  });
+
   it("positionRef: 参照先が面上スケッチでない(world平面)場合は評価エラーになる", (ctx) => {
     ctx.skip(!wasmLoaded, SKIP_NOTE);
     const { doc: boxDoc, extrude } = buildBoxDoc(20);
@@ -2677,6 +2720,67 @@ describe("evaluateDocument (WASM統合): ねじ(Phase 25c、Phase 41で簡易表
     if (result.ok) return;
     expect(result.featureId).toBe(thread.id);
     expect(result.message).toContain("見つかりません");
+  });
+
+  // ---- Phase 47 バグ修正: 面上スケッチの円がねじの配置基準候補として見つからない ----
+  // 実際のUI操作(箱 → 面にスケッチ → 円 → 同じ面にねじ配置)を模したシナリオでは
+  // thread.face.center/normalとsketchPlanesはどちらも同じ評価内で同じ面から解決されるため
+  // ズレない。しかし「ねじを配置した後で、上流フィーチャー(押し出し距離等)を変更する」という
+  // ごく普通の操作を行うと、sketchPlanesは常に再解決される一方、thread.face.center/normalは
+  // 初回配置クリック時点の値のまま書き戻されないため古びる。修正前はlistThreadPositionRefCandidates()
+  // がthread.face.centerを直接比較に使っていたため候補が消えていた(この場合に限らず、raw値と
+  // 解決値という起源の異なる2つのスナップショットを素朴に比較すること自体が本質的に脆い設計だった)。
+  it("Phase 47: ねじ配置後に箱の高さを変更しても、evaluateDocument()のthreadFacePlanesを使えば配置基準候補が見つかる(修正前はthread.face.center直接比較で候補が消えていた)", (ctx) => {
+    ctx.skip(!wasmLoaded, SKIP_NOTE);
+    const { doc: boxDoc, extrude } = buildBoxDoc(20);
+    const boxResult = evaluateDocument(boxDoc);
+    expect(boxResult.ok).toBe(true);
+    if (!boxResult.ok) return;
+    const topFace = findTopFace(boxResult.shape);
+    boxResult.shape.delete();
+
+    const circle = createCircleEntity({ center: [3, -4], radius: 2 });
+    const { doc: withSketch, feature: faceSketch } = addSketchFeature(boxDoc, {
+      name: "FaceSketch1",
+      plane: { kind: "face", featureId: extrude.id, faceId: topFace.faceId, center: topFace.center, normal: topFace.normal },
+      entities: [circle],
+    });
+
+    const { doc: withThread, feature: thread } = addThreadFeature(withSketch, {
+      name: "M6ねじ1",
+      hand: "male",
+      preset: "M6",
+      length: 5,
+      face: topFace, // 配置時点(高さ20)のクリック値。以後書き戻されない。
+      position: [0, 0],
+      direction: 1,
+    });
+
+    // ユーザーが後から箱の高さを20→30へ変更する(ごく普通の寸法編集)。
+    const resizedDoc = patchExtrudeFeature(withThread, extrude.id, { distance: 30 });
+    const result = evaluateDocument(resizedDoc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    result.shape?.delete();
+
+    const threadFeature = resizedDoc.features.find((f) => f.id === thread.id);
+    if (!threadFeature || threadFeature.type !== "thread") throw new Error("テストセットアップ失敗");
+
+    // thread.face.centerは古い(Z=20のまま)。sketchPlanesは新しい面(Z=30)へ再解決されている。
+    expect(threadFeature.face.center[2]).toBeCloseTo(20, 6);
+    const sketchPlane = result.sketchPlanes.find((p) => p.sketchId === faceSketch.id);
+    expect(sketchPlane?.origin[2]).toBeCloseTo(30, 6);
+
+    // evaluateDocument()はthreadFacePlanesとして「今回実際に解決した配置面」(Z=30)を返す。
+    const threadFacePlane = result.threadFacePlanes.find((p) => p.threadId === thread.id);
+    expect(threadFacePlane?.center[2]).toBeCloseTo(30, 6);
+
+    // 修正前の挙動(thread.face.centerを直接比較): 候補が見つからない(このバグの再現)。
+    expect(listThreadPositionRefCandidates(resizedDoc, threadFeature, result.sketchPlanes)).toEqual([]);
+
+    // 修正後(threadFacePlanesを渡す): 候補が正しく見つかる。
+    const candidates = listThreadPositionRefCandidates(resizedDoc, threadFeature, result.sketchPlanes, threadFacePlane);
+    expect(candidates).toEqual([{ sketchId: faceSketch.id, entityId: circle.id, label: "FaceSketch1 の 円1" }]);
   });
 });
 

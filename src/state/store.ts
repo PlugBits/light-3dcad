@@ -15,14 +15,17 @@ import {
   createEmptyDocument,
   effectiveFeatureCount,
   findFeature,
+  moveFeatureBeforeIfAfter,
   patchPartInstanceFeature,
   patchThreadPosition,
+  patchThreadPositionRef,
   removeFeatureCascade,
   resolveEvaluationDocument,
   setRollbackIndex as setDocRollbackIndex,
 } from "../model/document";
 import { createRectangleEntity } from "../model/entity";
 import { threadDrillDiameter } from "../model/threadPresets";
+import { findFaceSketchOnFace, resolvePendingThreadPlacementLink, type PendingThreadPlacementLink } from "../model/threadPositionRef";
 import type {
   CadDocument,
   ExtrudeFeature,
@@ -47,6 +50,7 @@ import type {
   SketchPlaneInfo,
   SolvedPlacement,
   ThreadAnnotation,
+  ThreadFacePlaneInfo,
   ThreadPositionUpdate,
   WorkerResponse,
 } from "../protocol/messages";
@@ -354,6 +358,21 @@ interface CadStoreState {
    */
   selectedEntityId: string | null;
   /**
+   * ねじの「配置スケッチを編集」ガイド付きフロー(Phase 47)の保留リンク。設定中は、次に
+   * このスケッチ以外のフィーチャーが選択された時点(スケッチ終了含む)でselectFeature()が
+   * 自動的に消費する(resolvePendingThreadPlacementLink()、src/model/threadPositionRef.ts参照)。
+   * 通常はnull。
+   */
+  pendingThreadPlacementLink: PendingThreadPlacementLink | null;
+  setPendingThreadPlacementLink: (link: PendingThreadPlacementLink | null) => void;
+  /**
+   * 直前のselectFeature()呼び出しでpendingThreadPlacementLinkが自動消費され、positionRefが
+   * 設定された際のトーストメッセージ(Phase 47)。App.tsx側がuseEffectで検知して
+   * showTransientMessage()を呼び、直後にnullへ戻す(一度きりの通知、Phase 29a由来の
+   * 「トースト用トリガーフラグ」パターンと同じ設計)。通常はnull。
+   */
+  pendingThreadAutoLinkMessage: string | null;
+  /**
    * ビューア上のスケッチ線直接クリック(Phase 31b)による選択。対象スケッチをselectedFeatureIdに、
    * クリックしたentity/segmentのidをselectedEntityIdに設定する。
    */
@@ -380,6 +399,13 @@ interface CadStoreState {
   bodyOperationTargets: BodyOperationTarget[];
   /** ねじフィーチャーの簡易表示用メタデータ(Phase 41、ビューアの二重円+ヘリックス線オーバーレイに使う派生状態)。 */
   threadAnnotations: ThreadAnnotation[];
+  /**
+   * 各threadフィーチャーが直近の評価で実際に解決した配置面(Phase 47)。ThreadEditorの
+   * positionRef候補一覧(listThreadPositionRefCandidates())が、フィーチャー自身に保存された
+   * face.center/normal(初回配置時のクリック値、以後再解決されず古びうる)ではなくこちらを使うことで、
+   * 配置後に上流フィーチャーの変更で面が動いても「同じ面」判定がずれない。
+   */
+  threadFacePlanes: ThreadFacePlaneInfo[];
   errorMessage: string | null;
   errorFeatureId: FeatureId | null;
   /** 現在表示中のmesh/faceInfo/errorに対応する最新のevaluateリクエストID(古い応答の破棄に使う)。 */
@@ -508,6 +534,16 @@ interface CadStoreState {
    * 平面でない面が選択されている、またはボディが存在しない場合は何もしない。
    */
   addFaceSketch: () => void;
+  /**
+   * ThreadEditorの「配置スケッチを編集」ガイド付きフロー(Phase 47)。thread.positionRefが
+   * 設定済みならその参照先スケッチのidをそのまま返す(guided:false、新規リンクは張らない)。
+   * 未設定なら、threadの配置面と同じ面上のface参照スケッチを探し(見つからなければ
+   * addFaceSketch()と同じ経路でThreadSketchNという名前のスケッチを新規作成し)、
+   * pendingThreadPlacementLinkを設定してからそのスケッチのidを返す(guided:true。呼び出し元
+   * [App.tsx]がこのスケッチを選択してスケッチモードへ入り、点ツールを事前アクティブ化する)。
+   * threadフィーチャーが見つからない、ボディが存在しない場合はnull。
+   */
+  editThreadPlacementSketch: (threadId: FeatureId) => { sketchId: FeatureId; guided: boolean } | null;
   /** 現在のドキュメントをSTLとしてエクスポートする(exporting/exportErrorはストアで管理)。 */
   exportStl: () => Promise<Blob>;
   /** 現在のドキュメントをSTEPとしてエクスポートする(Phase 26。exporting/exportErrorはexportStlと共有)。 */
@@ -671,6 +707,7 @@ function applyEvaluated(
       bodyGroups: response.bodyGroups,
       bodyOperationTargets: response.bodyOperationTargets,
       threadAnnotations: response.threadAnnotations,
+      threadFacePlanes: response.threadFacePlanes,
       errorMessage: null,
       errorFeatureId: null,
       kernelCrashed: false,
@@ -693,6 +730,9 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   selectedFeatureId: null,
   selectedEntityId: null,
   selectSketchEntity: (sketchId, entityId) => set({ selectedFeatureId: sketchId, selectedEntityId: entityId }),
+  pendingThreadPlacementLink: null,
+  setPendingThreadPlacementLink: (link) => set({ pendingThreadPlacementLink: link }),
+  pendingThreadAutoLinkMessage: null,
 
   status: "initializing",
   mesh: null,
@@ -703,6 +743,7 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
   bodyGroups: [],
   bodyOperationTargets: [],
   threadAnnotations: [],
+  threadFacePlanes: [],
   errorMessage: null,
   errorFeatureId: null,
   latestEvaluateRequestId: null,
@@ -881,7 +922,21 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
     });
   },
 
-  selectFeature: (featureId) => set({ selectedFeatureId: featureId, selectedEntityId: null }),
+  selectFeature: (featureId) => {
+    // ねじの「配置スケッチを編集」ガイド付きフロー(Phase 47)の保留リンクを、そのスケッチ以外へ
+    // 選択が移るたび(スケッチ終了含む)に消費する。updateDocument()経由(通常の履歴付き更新)で
+    // positionRefを書き戻すため、undo/redoの対象になる(タスク要件: 「undo-friendly」)。
+    const pending = get().pendingThreadPlacementLink;
+    if (pending && pending.sketchId !== featureId) {
+      set({ pendingThreadPlacementLink: null });
+      const resolved = resolvePendingThreadPlacementLink(get().doc, pending);
+      if (resolved) {
+        void get().updateDocument((d) => patchThreadPositionRef(d, pending.threadId, { sketchId: pending.sketchId, entityId: resolved.entityId }));
+        set({ pendingThreadAutoLinkMessage: `ねじの配置基準に ${resolved.label} を設定しました` });
+      }
+    }
+    set({ selectedFeatureId: featureId, selectedEntityId: null });
+  },
 
   setRollbackIndex: (index) => {
     // nextDocはここでローカルに計算する(updateDocument()はPhase 35cでGCS初期化待ちのため
@@ -1051,6 +1106,61 @@ export const useCadStore = create<CadStoreState>((set, get) => ({
     });
     get().updateDocument(() => nextDoc);
     set({ selectedFeatureId: feature.id, selectedFace: null });
+  },
+
+  editThreadPlacementSketch: (threadId) => {
+    const doc = get().doc;
+    const thread = doc.features.find((f) => f.id === threadId);
+    if (!thread || thread.type !== "thread") return null;
+
+    if (thread.positionRef) {
+      return { sketchId: thread.positionRef.sketchId, guided: false };
+    }
+
+    // 直近評価で実際に解決した配置面(Phase 47、無ければthread.face[初回配置クリック値]へ
+    // フォールバック。src/model/threadPositionRef.tsのlistThreadPositionRefCandidates()と同じ考え方)。
+    const resolvedFace = get().threadFacePlanes.find((p) => p.threadId === threadId) ?? thread.face;
+    const existing = findFaceSketchOnFace(doc, resolvedFace, get().sketchPlanes);
+    if (existing) {
+      // evaluator.tsはdoc.featuresを先頭から順に評価するため、positionRefが参照するスケッチは
+      // threadより前に登場している必要がある(moveFeatureBeforeIfAfter()参照)。既存スケッチが
+      // 偶然threadより後ろにある場合のみ並べ替える(通常は既に前にあるため大半はno-op)。
+      const reorderedDoc = moveFeatureBeforeIfAfter(doc, existing.id, threadId);
+      if (reorderedDoc !== doc) get().updateDocument(() => reorderedDoc);
+      get().setPendingThreadPlacementLink({ threadId, sketchId: existing.id });
+      return { sketchId: existing.id, guided: true };
+    }
+
+    // 履歴末尾から最初に見つかるextrudeフィーチャー = 現在のボディを生成したフィーチャー
+    // (addFaceSketch()と同じ考え方)。
+    let lastExtrude: ExtrudeFeature | null = null;
+    for (let i = doc.features.length - 1; i >= 0; i -= 1) {
+      const f = doc.features[i];
+      if (f.type === "extrude") {
+        lastExtrude = f;
+        break;
+      }
+    }
+    if (!lastExtrude) return null;
+
+    const { doc: appended, feature } = addSketchFeature(doc, {
+      name: nextFeatureName(doc, "ThreadSketch"),
+      plane: {
+        kind: "face",
+        featureId: lastExtrude.id,
+        faceId: thread.face.faceId,
+        center: resolvedFace.center,
+        normal: resolvedFace.normal,
+      },
+      entities: [],
+    });
+    // addSketchFeature()は末尾に追加するが、このスケッチはthread(既存フィーチャー)より前に
+    // 評価される必要がある(moveFeatureBeforeIfAfter()参照)。
+    const nextDoc = moveFeatureBeforeIfAfter(appended, feature.id, threadId);
+
+    get().updateDocument(() => nextDoc);
+    get().setPendingThreadPlacementLink({ threadId, sketchId: feature.id });
+    return { sketchId: feature.id, guided: true };
   },
 
   exportStl: async () => {

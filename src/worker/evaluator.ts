@@ -83,6 +83,7 @@ import type {
   SketchPlaneInfo,
   SolvedPlacement,
   ThreadAnnotation,
+  ThreadFacePlaneInfo,
   ThreadPositionUpdate,
 } from "../protocol/messages";
 
@@ -135,6 +136,12 @@ export interface EvaluationSuccess {
    * 持つthreadフィーチャーが無ければ空配列(src/protocol/messages.tsのThreadPositionUpdate参照)。
    */
   threadPositionUpdates: ThreadPositionUpdate[];
+  /**
+   * 各threadフィーチャーが今回の評価で実際に解決した配置面のcenter/normal(Phase 47)。
+   * doc.features中の全threadフィーチャーが対象(出現順、src/protocol/messages.tsの
+   * ThreadFacePlaneInfo参照)。
+   */
+  threadFacePlanes: ThreadFacePlaneInfo[];
   /**
    * extrude/revolveフィーチャー→実際に作用したボディのfeatureId対応(Phase 46: 押し出し選択時の
    * 対象ハイライト用)。doc.features中の全extrude/revolveフィーチャーが対象(フィーチャーが無ければ
@@ -330,6 +337,10 @@ function entityDrawing(entity: SketchEntity): Drawing {
   if (entity.kind === "regularPolygon") {
     return regularPolygonDrawing(entity);
   }
+  if (entity.kind === "point") {
+    // 呼び出し元(buildDrawingParts)がpointエンティティを常に除外するため到達しないはずのガード。
+    throw new Error("点エンティティは押し出し/回転体の対象にできません");
+  }
   return polygonDrawing(entity.points, entity.corners, entity.bulges);
 }
 
@@ -408,7 +419,10 @@ const REGION_PROXY_PREFIX = "__region_outer__";
  * 1つも検出できない場合は「閉じた領域がありません」、segments自体が無い(entitiesのみ運用)
  * 場合は従来どおり「スケッチに図形がありません」。
  */
-function buildDrawingParts(entities: SketchEntity[], segments: SketchSegment[] | undefined): DrawingParts {
+function buildDrawingParts(rawEntities: SketchEntity[], segments: SketchSegment[] | undefined): DrawingParts {
+  // 点(Phase 47)は面積を持たない位置決め専用マーカーのため、押し出し/回転体のプロファイル構築から
+  // 常に除外する(外形にも穴にもならない。ボディの押し出しには使わないentities/kind一覧に含めない)。
+  const entities = rawEntities.filter((e) => e.kind !== "point");
   const regions = segments && segments.length > 0 ? findClosedRegions(segments) : [];
 
   if (entities.length === 0 && regions.length === 0) {
@@ -911,8 +925,8 @@ function orientLocalSolidToWorld(shape: Shape3D, position: Tuple3, axisDir: Tupl
 /**
  * ねじの配置基準参照(positionRef、Phase 46: ねじのスケッチ参照配置)を解決し、面ローカル2D座標
  * (u, v)を返す。参照先スケッチはthreadFace(evaluator.tsが解決した現在のねじ配置面のcenter/normal)と
- * ほぼ同じ面上のface参照スケッチである必要があり、参照先の円(entityId、circleエンティティ)の中心を
- * そのまま面ローカル座標として使う(sketchのローカル2D基底はsrc/sketch/facePlaneBasis.tsの
+ * ほぼ同じ面上のface参照スケッチである必要があり、参照先の円/点(entityId、circle/pointエンティティ、
+ * Phase 47でpoint追加)の中心/座標をそのまま面ローカル座標として使う(sketchのローカル2D基底はsrc/sketch/facePlaneBasis.tsの
  * computeFacePlaneBasis()が中心・法線のみから決定的に求めるため、同じ面ならスケッチのローカル原点/
  * 軸方向とねじの面ローカル座標系は完全に一致する)。
  * 参照先が見つからない/面が異なる場合はfeatureId付きエラー(呼び出し元のtry/catchで捕捉される)。
@@ -938,10 +952,10 @@ function resolveThreadPositionRef(
     throw new Error(`ねじの配置基準のスケッチ(${refSketch.name})はねじの配置面と異なる面です`);
   }
   const entity = refSketch.entities.find((e) => e.id === ref.entityId);
-  if (!entity || entity.kind !== "circle") {
-    throw new Error(`ねじの配置基準の円(${ref.entityId})が見つかりません`);
+  if (!entity || (entity.kind !== "circle" && entity.kind !== "point")) {
+    throw new Error(`ねじの配置基準の円/点(${ref.entityId})が見つかりません`);
   }
-  return entity.center;
+  return entity.kind === "circle" ? entity.center : entity.position;
 }
 
 /**
@@ -956,13 +970,17 @@ function resolveThreadPositionRef(
  * 求めた面ローカル座標を使う(sketches/resolvedFacePlanesはこの解決にのみ使う)。
  * 戻り値のannotationはビューアが二重円+ヘリックス線オーバーレイを描くための1件、positionLocalは
  * 実際に使った面ローカル座標(positionRef経由ならevaluate応答経由でfeature.positionへ書き戻される)。
+ * resolvedFaceは今回の評価で実際に特定できた配置面のcenter/normal(Phase 47、feature.face.center/normal
+ * [ユーザーが最初にねじを配置した時点のクリック値、以後再解決されない]とは別物。positionRef候補一覧
+ * [listThreadPositionRefCandidates()]はこちらを使うことで、配置後に上流フィーチャー[箱の寸法変更等]で
+ * 面が動いても「同じ面」判定がずれない)。
  */
 function applyThreadToBodies(
   bodies: Map<FeatureId, Shape3D>,
   feature: ThreadFeature,
   sketches: Map<FeatureId, SketchFeature>,
   resolvedFacePlanes: Map<FeatureId, { center: Tuple3; normal: Tuple3 }>,
-): { annotation: ThreadAnnotation; positionLocal: [number, number] } {
+): { annotation: ThreadAnnotation; positionLocal: [number, number]; resolvedFace: { center: Tuple3; normal: Tuple3 } } {
   const resolved = resolveFaceGeometryAcrossBodies(bodies, feature.face.faceId, feature.face.center, feature.face.normal);
   const basis = computeFacePlaneBasis(resolved.center, resolved.normal);
   const positionLocal = feature.positionRef
@@ -1003,7 +1021,7 @@ function applyThreadToBodies(
     } finally {
       worldSolid.delete();
     }
-    return { annotation, positionLocal };
+    return { annotation, positionLocal, resolvedFace: { center: resolved.center, normal: resolved.normal } };
   }
 
   // hand === "female": 下穴径の円柱をcutする簡易表現(実ねじ山は作らない、変更なし)。
@@ -1017,7 +1035,7 @@ function applyThreadToBodies(
   } finally {
     worldHole.delete();
   }
-  return { annotation, positionLocal };
+  return { annotation, positionLocal, resolvedFace: { center: resolved.center, normal: resolved.normal } };
 }
 
 /**
@@ -1781,6 +1799,8 @@ interface FeatureEvalSuccess {
   threadAnnotations: ThreadAnnotation[];
   /** positionRef(Phase 46)で解決した配置位置の書き戻し(対象が無ければ空配列)。 */
   threadPositionUpdates: ThreadPositionUpdate[];
+  /** 各threadフィーチャーが今回の評価で実際に解決した配置面(Phase 47、ねじが無ければ空配列)。 */
+  threadFacePlanes: ThreadFacePlaneInfo[];
   /** extrude/revolveフィーチャー→実際に作用したボディのfeatureId対応(Phase 46、フィーチャーが無ければ空配列)。 */
   bodyOperationTargets: BodyOperationTarget[];
 }
@@ -1827,6 +1847,10 @@ function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
   const threadAnnotations: ThreadAnnotation[] = [];
   // positionRef(Phase 46)で解決した配置位置の書き戻し。positionRefを持つthreadフィーチャーのみ積む。
   const threadPositionUpdates: ThreadPositionUpdate[] = [];
+  // 各threadフィーチャーが今回の評価で実際に解決した配置面のcenter/normal(Phase 47、
+  // listThreadPositionRefCandidates()のUI候補一覧がfeature.face[初回配置時のクリック値、以後不変]
+  // ではなくこちらを使うことで、上流フィーチャーの変更で面が動いても「同じ面」判定がずれない)。
+  const threadFacePlanes: ThreadFacePlaneInfo[] = [];
   // extrude/revolveフィーチャー→実際に作用したボディのfeatureId対応(Phase 46)。
   const bodyOperationTargets: BodyOperationTarget[] = [];
   let currentFeatureId: FeatureId | undefined;
@@ -1893,6 +1917,7 @@ function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
         }
         const applied = applyThreadToBodies(bodies, feature, sketches, resolvedFacePlanes);
         threadAnnotations.push(applied.annotation);
+        threadFacePlanes.push({ threadId: feature.id, center: applied.resolvedFace.center, normal: applied.resolvedFace.normal });
         if (feature.positionRef) {
           threadPositionUpdates.push({ featureId: feature.id, position: applied.positionLocal });
         }
@@ -1975,6 +2000,7 @@ function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
     solvedPlacements,
     threadAnnotations,
     threadPositionUpdates,
+    threadFacePlanes,
     bodyOperationTargets,
   };
 }
@@ -1987,7 +2013,7 @@ function evaluateFeatures(doc: CadDocument): FeatureEvalResult {
 export function evaluateDocument(doc: CadDocument): EvaluationResult {
   const result = evaluateFeatures(doc);
   if (!result.ok) return result;
-  const { bodies, sketches, resolvedFacePlanes, referenceEdgesById, solvedPlacements, threadAnnotations, threadPositionUpdates, bodyOperationTargets } = result;
+  const { bodies, sketches, resolvedFacePlanes, referenceEdgesById, solvedPlacements, threadAnnotations, threadPositionUpdates, threadFacePlanes, bodyOperationTargets } = result;
 
   // 各ボディの面ID集合(Phase 28a)を、compound化してbodiesをdelete()する前に集めておく。
   const bodyGroups: BodyGroup[] = [];
@@ -2028,6 +2054,7 @@ export function evaluateDocument(doc: CadDocument): EvaluationResult {
     solvedPlacements,
     threadAnnotations,
     threadPositionUpdates,
+    threadFacePlanes,
     bodyOperationTargets,
   };
 }

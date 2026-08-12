@@ -191,6 +191,21 @@ export interface ThreadPositionUpdate {
 }
 
 /**
+ * threadフィーチャー1件が今回の評価で実際に解決した配置面のcenter/normal(Phase 47)。
+ * ThreadFeature.face.center/normal(ユーザーが最初にねじを配置した時点のクリック値、以後
+ * evaluator.tsが再解決しても書き戻されない)とは別物。listThreadPositionRefCandidates()の
+ * 「配置基準スケッチと同じ面かどうか」判定はこちら(evaluator.tsが実際に使った、SketchPlaneInfoと
+ * 同じ解決経路[resolveFaceGeometry系のhashCode優先+幾何フォールバック]で得た値)を使うことで、
+ * ねじ配置後に上流フィーチャー(箱の寸法変更等)で面が動いても判定がずれない。
+ * threadフィーチャーが無い、またはその評価が対象ボディ無しで失敗した場合はエントリを作らない。
+ */
+export interface ThreadFacePlaneInfo {
+  threadId: FeatureId;
+  center: [number, number, number];
+  normal: [number, number, number];
+}
+
+/**
  * extrude/revolveフィーチャー1件が実際に作用したボディのfeatureId(Phase 46: 押し出し選択時の
  * 対象ハイライト用)。bodyFeatureIdはbodyGroups[].featureIdと同じ値(そのボディを作ったnewBody
  * フィーチャーのid)で、operation:"newBody"ならfeatureId自身、"cut"/"add"ならevaluator.tsの
@@ -257,6 +272,8 @@ export type WorkerResponse =
       threadAnnotations: ThreadAnnotation[];
       /** positionRef(Phase 46)で解決した配置位置の書き戻し。対象のthreadフィーチャーが無ければ空配列。 */
       threadPositionUpdates: ThreadPositionUpdate[];
+      /** 各threadフィーチャーが今回の評価で実際に解決した配置面(Phase 47)。ねじが無ければ空配列。 */
+      threadFacePlanes: ThreadFacePlaneInfo[];
       /** extrude/revolveフィーチャー→実際に作用したボディのfeatureId対応(Phase 46)。フィーチャーが無ければ空配列。 */
       bodyOperationTargets: BodyOperationTarget[];
     }
