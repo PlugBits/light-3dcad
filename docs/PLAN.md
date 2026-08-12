@@ -1190,3 +1190,11 @@ E2E 51→52件全通過(2分割でBash実行、share-link.spec.tsの1件は既�
 gate結果: tsc(app/e2e両方)エラーなし、Vitest 691→708件通過+1skip(positionRef解決・面不一致/
 参照切れエラー・往復シリアライズの単体テスト17件を追加)、UIバンドルgzip263.6KB(+1.6KB、
 上限350KB内)、E2E 52→54件全通過(3分割でBash実行)。
+
+## Phase 47: ねじ配置基準バグ修正+点(point)エンティティ+配置スケッチ編集ガイド付きフロー
+
+配置基準の「同じ面」判定をthread.face(初期クリック値、上流変更で古びうる)ではなく評価時再解決値
+(ThreadFacePlaneInfo)で行うよう修正し、SolidWorks風の点エンティティ(GCS/ビューア/描画ツール/
+positionRef対応)とThreadEditorの「配置スケッチを編集」ガイド付きフローを追加した。
+gate結果: tsc(app/e2e両方)エラーなし、Vitest 708→728件通過+1skip、UIバンドルgzip265.1KB(+1.5KB、
+上限350KB内)、E2E 54→56件全通過(3分割でBash実行)。
