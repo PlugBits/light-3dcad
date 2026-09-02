@@ -8,7 +8,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { setConstraintLabelOffset, setDimensionOffset, setSketchConstraints, updateSketchEntity } from "../model/document";
 import type { CadDocument, SketchEntity, SketchFeature, SketchSegment } from "../model/types";
 import { arcGeometryFromBulge } from "../sketch/bulge";
-import { resolveLineRefPoints } from "../sketch/entityEdges";
+import { normalizeMovableLineRef, resolveLineRefPoints } from "../sketch/entityEdges";
 import {
   computeConstraintDimensions,
   constraintDimensionKey,
@@ -118,8 +118,8 @@ function constraintDimensionGraphics(
     return computeLinearDimensionGraphics(seg.p1, seg.p2, ov);
   }
   if (dimension.kind === "seg-distance") {
-    const pa = pointFromRef(segments, dimension.a);
-    const pb = pointFromRef(segments, dimension.b);
+    const pa = pointFromRef(segments, dimension.a, entities);
+    const pb = pointFromRef(segments, dimension.b, entities);
     if (!pa || !pb) return null;
     if (dimension.axis === "x" || dimension.axis === "y") return computeAxisDimensionGraphics(pa, pb, dimension.axis, ov);
     return computeLinearDimensionGraphics(pa, pb, ov);
@@ -130,7 +130,7 @@ function constraintDimensionGraphics(
     return computeLinearDimensionGraphics(c, dimension.origin, ov);
   }
   if (dimension.kind === "point-distance-origin") {
-    const p = pointFromRef(segments, dimension.point);
+    const p = pointFromRef(segments, dimension.point, entities);
     if (!p) return null;
     if (dimension.axis === "x" || dimension.axis === "y") return computeAxisDimensionGraphics(p, dimension.origin, dimension.axis, ov);
     return computeLinearDimensionGraphics(p, dimension.origin, ov);
@@ -157,7 +157,7 @@ function constraintDimensionGraphics(
     return computeLinearDimensionGraphics(c, foot, ov);
   }
   if (dimension.kind === "point-distance-line") {
-    const p = pointFromRef(segments, dimension.point);
+    const p = pointFromRef(segments, dimension.point, entities);
     const line = resolveLineRefPoints(dimension.line, entities, segments);
     if (!p || !line) return null;
     // 端点から直線への垂線の足を寸法のもう一端にする(entity-distance-lineと同じ考え方)。
@@ -171,17 +171,18 @@ function constraintDimensionGraphics(
     return computeLinearDimensionGraphics(p, foot, ov);
   }
   if (dimension.kind === "seg-distance-line-line") {
-    const segA = segments.find((s) => s.id === dimension.a);
-    const segB = segments.find((s) => s.id === dimension.b);
-    if (!segA || !segB) return null;
+    // Phase 48: a/bは自由な線分のsegmentId(素の文字列)に加えMovableLineRef(entityEdge)も指定できる。
+    const lineA = resolveLineRefPoints(normalizeMovableLineRef(dimension.a), entities, segments);
+    const lineB = resolveLineRefPoints(normalizeMovableLineRef(dimension.b), entities, segments);
+    if (!lineA || !lineB) return null;
     // 線分aの中点から線分b(無限直線扱い)への垂線の足までを寸法線にする(両線分間の垂直寸法線)。
-    const mid: Point2 = [(segA.p1[0] + segA.p2[0]) / 2, (segA.p1[1] + segA.p2[1]) / 2];
-    const dx = segB.p2[0] - segB.p1[0];
-    const dy = segB.p2[1] - segB.p1[1];
+    const mid: Point2 = [(lineA[0][0] + lineA[1][0]) / 2, (lineA[0][1] + lineA[1][1]) / 2];
+    const dx = lineB[1][0] - lineB[0][0];
+    const dy = lineB[1][1] - lineB[0][1];
     const lenSq = dx * dx + dy * dy;
     if (lenSq < 1e-12) return null;
-    const t = ((mid[0] - segB.p1[0]) * dx + (mid[1] - segB.p1[1]) * dy) / lenSq;
-    const foot: Point2 = [segB.p1[0] + t * dx, segB.p1[1] + t * dy];
+    const t = ((mid[0] - lineB[0][0]) * dx + (mid[1] - lineB[0][1]) * dy) / lenSq;
+    const foot: Point2 = [lineB[0][0] + t * dx, lineB[0][1] + t * dy];
     return computeLinearDimensionGraphics(mid, foot, ov);
   }
   // seg-angle-line-line(Phase 24)は弧の描画をv1では省略し、ラベルのみ表示する(既知の制限)。
@@ -436,13 +437,13 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
       if (feature?.type !== "sketch") return null;
       const beforeSegments = feature.segments ?? [];
       if (dimension.kind === "seg-distance") {
-        const pa = pointFromRef(beforeSegments, dimension.a);
-        const pb = pointFromRef(beforeSegments, dimension.b);
+        const pa = pointFromRef(beforeSegments, dimension.a, feature.entities);
+        const pb = pointFromRef(beforeSegments, dimension.b, feature.entities);
         if (!pa || !pb) return null;
         return describeAxisDistanceConflict(pa, pb, value, axis);
       }
       if (dimension.kind === "point-distance-origin") {
-        const p = pointFromRef(beforeSegments, dimension.point);
+        const p = pointFromRef(beforeSegments, dimension.point, feature.entities);
         if (!p) return null;
         return describeAxisDistanceConflict(p, dimension.origin, value, axis);
       }

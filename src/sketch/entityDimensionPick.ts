@@ -9,6 +9,7 @@
 // entity自身のフィールド(radius/width/height)を直接更新する形にする(CadViewer.tsのコメント・
 // App.tsxのhandleApplyDimensionTarget参照)。
 import type { SketchEntity } from "../model/types";
+import { regularPolygonEdgePoints, slotEdgePoints } from "./entityEdges";
 
 export type Point2 = [number, number];
 
@@ -124,7 +125,46 @@ function nearestPolygonEdgeHit(point: Point2, entity: Extract<SketchEntity, { ki
 }
 
 /**
- * entities(rectangle/circle、includePolygon指定時はpolygonの辺も。他の種別は対象外)の中から、
+ * regularPolygonの辺のうち点に最も近いものを求める(nearestPolygonEdgeHitのregularPolygon版、Phase 48)。
+ */
+function nearestRegularPolygonEdgeHit(point: Point2, entity: Extract<SketchEntity, { kind: "regularPolygon" }>): EntityDimensionHit {
+  let best = { dist: Infinity, a: [0, 0] as Point2, b: [0, 0] as Point2, edgeIndex: 0 };
+  for (let i = 0; i < entity.sides; i += 1) {
+    const [a, b] = regularPolygonEdgePoints(entity, i);
+    const d = distPointToSegment(point, a, b);
+    if (d < best.dist) best = { dist: d, a, b, edgeIndex: i };
+  }
+  return {
+    entityId: entity.id,
+    kind: "entity-edge",
+    dist: best.dist,
+    highlightPoints: [best.a, best.b],
+    edgeIndex: best.edgeIndex,
+  };
+}
+
+/**
+ * slotの2本の直線辺のうち点に最も近いものを求める(nearestPolygonEdgeHitのslot版、Phase 48)。
+ * 半円キャップ(円弧)はLineRefで表現できないため対象外(src/sketch/entityEdges.tsのslotEdgePoints参照)。
+ */
+function nearestSlotEdgeHit(point: Point2, entity: Extract<SketchEntity, { kind: "slot" }>): EntityDimensionHit {
+  let best = { dist: Infinity, a: [0, 0] as Point2, b: [0, 0] as Point2, edgeIndex: 0 };
+  for (let i = 0; i < 2; i += 1) {
+    const [a, b] = slotEdgePoints(entity, i);
+    const d = distPointToSegment(point, a, b);
+    if (d < best.dist) best = { dist: d, a, b, edgeIndex: i };
+  }
+  return {
+    entityId: entity.id,
+    kind: "entity-edge",
+    dist: best.dist,
+    highlightPoints: [best.a, best.b],
+    edgeIndex: best.edgeIndex,
+  };
+}
+
+/**
+ * entities(rectangle/circle、includePolygon指定時はpolygon/regularPolygon/slotの辺も。他の種別は対象外)の中から、
  * 点に最も近いヒット対象を1つ返す(許容距離の判定は呼び出し側でdistを見て行う。距離が最小の
  * ものを常に1件返す。対象が1つも無ければnull)。
  * includePolygon(既定false、UI改善対応): circle-distance-edgeの2点目候補としてpolygonの辺も
@@ -152,6 +192,10 @@ export function findEntityDimensionHit(
       hit = nearestRectangleEdgeHit(point, entity);
     } else if (entity.kind === "polygon" && includePolygon && entity.points.length >= 2) {
       hit = nearestPolygonEdgeHit(point, entity);
+    } else if (entity.kind === "regularPolygon" && includePolygon) {
+      hit = nearestRegularPolygonEdgeHit(point, entity);
+    } else if (entity.kind === "slot" && includePolygon) {
+      hit = nearestSlotEdgeHit(point, entity);
     } else {
       continue;
     }

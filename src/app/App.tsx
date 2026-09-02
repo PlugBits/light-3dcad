@@ -76,8 +76,7 @@ import {
   addTangentArcLineConstraint,
   addTangentEntityConstraint,
   addTangentSegmentConstraint,
-  angleBetweenSegmentAndLine,
-  angleBetweenSegments,
+  angleBetweenLines,
   describeAxisDistanceConflict,
   distanceBetweenRefs,
   foldToAcuteAngle,
@@ -109,6 +108,7 @@ import {
   isShareLinkSupported,
   SHARE_LINK_WARN_CHARS,
 } from "../project/shareLink";
+import { resolveLineRefPoints } from "../sketch/entityEdges";
 import { distanceBetweenPoints, distancePointToLine } from "../sketch/positionDimensions";
 import { worldOriginLocal } from "../sketch/originRef";
 import { rectangleFromCorners, regularPolygonVertices } from "../sketch/shapeFromPoints";
@@ -1922,8 +1922,7 @@ export default function App() {
           // セグメント端点↔原点の距離(追加項目: 原点ピック常時有効化。頂点ベースの寸法指定、
           // Phase 30でX/Y距離にも対応)。
           titleLabel = "端点↔原点の距離 (mm)";
-          const seg = segments.find((s) => s.id === target.point.segmentId);
-          const p = seg ? (target.point.end === "p1" ? seg.p1 : seg.p2) : null;
+          const p = pointFromRef(segments, target.point, entities);
           initialValue = p ? distanceBetweenPoints(p, originLocal) : 0;
           axisOptions = true;
           allowZero = true;
@@ -1931,8 +1930,7 @@ export default function App() {
           // 頂点↔線の距離(頂点ベースの寸法指定、Phase 30新設)。circle-distance-edge/refedgeと同じ
           // 考え方だが対象がcircleの中心ではなく自由な端点である点のみが異なる。
           titleLabel = target.line.kind === "refEdge" ? "端点↔参照エッジの距離 (mm)" : "端点↔辺の距離 (mm)";
-          const seg = segments.find((s) => s.id === target.point.segmentId);
-          const p = seg ? (target.point.end === "p1" ? seg.p1 : seg.p2) : null;
+          const p = pointFromRef(segments, target.point, entities);
           initialValue = p ? distancePointToLine(p, target.edgeA, target.edgeB) : 0;
           allowZero = true;
           hintLabel =
@@ -1967,25 +1965,27 @@ export default function App() {
           allowZero = true;
         }
         if (target.kind === "line-line") {
-          // 線分↔線分の寸法(Phase 24): ほぼ平行(折り畳み角<5度)なら平行距離、それ以外は角度を
-          // デフォルト選択する。逆向きに描いた平行線(なす角≈180度)も折り畳んで平行判定するため、
-          // foldToAcuteAngle/isNearlyParallelAngleを介す(素の角度<5度だけを見ていた旧実装のバグ修正)。
-          const segA = segments.find((s) => s.id === target.a);
-          const segB = segments.find((s) => s.id === target.b);
-          const angle = segA && segB ? angleBetweenSegments(segA, segB) : null;
+          // 線分↔線分の寸法(Phase 24、Phase 48でrectangle/polygon/regularPolygon/slotの辺にも拡張):
+          // ほぼ平行(折り畳み角<5度)なら平行距離、それ以外は角度をデフォルト選択する。逆向きに描いた
+          // 平行線(なす角≈180度)も折り畳んで平行判定するため、foldToAcuteAngle/isNearlyParallelAngleを
+          // 介す(素の角度<5度だけを見ていた旧実装のバグ修正)。
+          const lineA = resolveLineRefPoints(target.a, entities, segments);
+          const lineB = resolveLineRefPoints(target.b, entities, segments);
+          const angle = lineA && lineB ? angleBetweenLines(lineA[0], lineA[1], lineB[0], lineB[1]) : null;
           const foldedAngle = angle !== null ? foldToAcuteAngle(angle) : 0;
-          const distanceValue = segA && segB ? distancePointToLine(segA.p1, segB.p1, segB.p2) : 0;
+          const distanceValue = lineA && lineB ? distancePointToLine(lineA[0], lineB[0], lineB[1]) : 0;
           const initial: "distance" | "angle" = isNearlyParallelAngle(angle) ? "distance" : "angle";
           quantityOptions = { distanceValue, angleValue: foldedAngle, initial };
           titleLabel = initial === "distance" ? "距離 (mm)" : "角度 (°)";
           initialValue = initial === "distance" ? distanceValue : foldedAngle;
         } else if (target.kind === "line-refedge") {
-          // 線分↔参照エッジの寸法(Phase 24項目2): line-lineと同じく距離/角度を選べる。参照エッジは
-          // 固定線として扱うため、残差は線分側の端点から参照エッジ直線への距離・角度。
-          const segA = segments.find((s) => s.id === target.a);
-          const angle = segA ? angleBetweenSegmentAndLine(segA, target.edgeA, target.edgeB) : null;
+          // 線分/辺↔参照エッジの寸法(Phase 24項目2、Phase 48でrectangle/polygon/regularPolygon/slotの
+          // 辺にも拡張): line-lineと同じく距離/角度を選べる。参照エッジは固定線として扱うため、
+          // 残差は線分側の端点から参照エッジ直線への距離・角度。
+          const lineA = resolveLineRefPoints(target.a, entities, segments);
+          const angle = lineA ? angleBetweenLines(lineA[0], lineA[1], target.edgeA, target.edgeB) : null;
           const foldedAngle = angle !== null ? foldToAcuteAngle(angle) : 0;
-          const distanceValue = segA ? distancePointToLine(segA.p1, target.edgeA, target.edgeB) : 0;
+          const distanceValue = lineA ? distancePointToLine(lineA[0], target.edgeA, target.edgeB) : 0;
           const initial: "distance" | "angle" = isNearlyParallelAngle(angle) ? "distance" : "angle";
           quantityOptions = { distanceValue, angleValue: foldedAngle, initial };
           titleLabel = initial === "distance" ? "距離 (mm)" : "角度 (°)";
