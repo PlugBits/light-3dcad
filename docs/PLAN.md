@@ -1198,3 +1198,16 @@ gate結果: tsc(app/e2e両方)エラーなし、Vitest 691→708件通過+1skip(
 positionRef対応)とThreadEditorの「配置スケッチを編集」ガイド付きフローを追加した。
 gate結果: tsc(app/e2e両方)エラーなし、Vitest 708→728件通過+1skip、UIバンドルgzip265.1KB(+1.5KB、
 上限350KB内)、E2E 54→56件全通過(3分割でBash実行)。
+
+## Phase 48: 全スケッチ要素を寸法/基準エッジ対応に拡張(EntityVertexRef/MovableLineRef新設)
+
+「矩形の寸法が基準エッジ等から選べない」報告対応。EntityVertexRef(entityの頂点)を新設して
+distance/distancePointOrigin/distancePointLine/coincidentOriginをPointRefと併用可能にし、
+MovableLineRef(entityEdge|segmentEdge)でdistanceLineLine/angleLineLine/distanceLineRefEdge/
+angleLineRefEdgeのa/segmentIdを一般化(素の文字列は後方互換)。rectangle/polygon/regularPolygon/
+slot/pointの頂点・辺(regularPolygon/slotはentityEdge自体が未対応だった)をGCS(gcsAdapter.ts、
+補助点+difference拘束で中心/並進オフセットに追従)・寸法ツール(CadViewerの辺↔参照エッジ/線分の
+相互組み合わせを追加、頂点をセグメント端点と同じ優先度でピック)・表示名(displayNames.ts)まで
+一貫対応させた。constraint tool(垂直/同心/接線)は今回スコープ外(セグメント/circleのまま)。
+gate結果: tsc(app/e2e両方)エラーなし、Vitest 728→768件通過+1skip、UIバンドルgzip266.4KB
+(+1.3KB、上限350KB内)、E2E 56→58件全通過(3分割でBash実行、entity-dimension.spec.ts新設)。
