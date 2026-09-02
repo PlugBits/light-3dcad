@@ -22,10 +22,11 @@
 // 全primitiveを再構築する(スパイクの計測で複合ケースでも1ms未満、毎フレームのドラッグでも
 // 十分高速なことを確認済み。sketch_param経由の差分更新は複雑さに見合わないため採用しない)。
 import { Algorithm, GcsWrapper, make_gcs_wrapper, type SketchPrimitive } from "@salusoft89/planegcs";
-import type { ArcRef, EntityRef, LineRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
+import type { ArcRef, EntityRef, EntityVertexRef, LineRef, MovableLineRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
 import { arcGeometryFromBulge } from "./bulge";
 import { constraintDisplayText } from "./displayNames";
-import { rectangleEdgePointsAtCenter, resolveLineRefPoints } from "./entityEdges";
+import { entityVertexPoint, normalizeMovableLineRef, rectangleEdgePointsAtCenter, resolveLineRefPoints } from "./entityEdges";
+import { regularPolygonVertices, slotAxisNormal } from "./shapeFromPoints";
 import type { DragTarget, Point2, SolveOptions, SolveResult } from "./solver";
 
 /** solver.tsのROUND_GRIDと同じ意図(丸め誤差の累積ドリフト対策)。値も同じにして挙動を揃える。 */
@@ -187,9 +188,15 @@ function currentPoint(segmentsById: Map<string, SketchSegment>, ref: PointRef): 
 }
 
 /**
- * rectangle/polygonの補助頂点・辺(entityEdgeライン参照解決用)を必要なentityId分だけ作る。
- * 代表点からの固定オフセットをdifference拘束(param2-param1=difference)で連結することで、
- * 代表点が動けば補助頂点・辺も追従する剛体並進を実現する(スパイクレポートの表の通り)。
+ * rectangle/polygon/regularPolygon/slotの補助頂点・辺(entityEdge/EntityVertexRef参照解決用、
+ * Phase 48でregularPolygon/slotに拡張)を必要なentityId分だけ作る。代表点からの固定オフセットを
+ * difference拘束(param2-param1=difference)で連結することで、代表点が動けば補助頂点・辺も追従する
+ * 剛体並進を実現する(スパイクレポートの表の通り)。rectangle/regularPolygonは代表点=中心(実座標)、
+ * polygon/slotは代表点=並進オフセット(初期値[0,0])なので、オフセット計算式が異なる
+ * (repInit()と同じ使い分け)。
+ * 補助頂点のidはcornerPointId(entityId, i)で、entityVertexPoint()のvertexIndexと同じiを使う
+ * (rectangle/polygon/regularPolygonの頂点、slotのi=0/1は中心線の始点/終点)。slotはさらに
+ * 直線辺(edgeLineId 0/1)専用の補助点(i=2..5、頂点としては公開しない)も作る。
  */
 function ensureEntityEdges(ctx: BuildContext, entityId: string) {
   const entity = ctx.entitiesById.get(entityId);
@@ -218,7 +225,87 @@ function ensureEntityEdges(ctx: BuildContext, entityId: string) {
     for (let i = 0; i < n; i += 1) {
       addLine(ctx, edgeLineId(entityId, i), cornerPointId(entityId, i), cornerPointId(entityId, (i + 1) % n));
     }
+  } else if (entity.kind === "regularPolygon") {
+    const verts = regularPolygonVertices(entity.center, entity.radius, entity.sides, entity.rotation ?? 0);
+    const n = verts.length;
+    if (n === 0 || ctx.lines.has(edgeLineId(entityId, 0))) return;
+    const [cx, cy] = entity.center;
+    verts.forEach((v, i) => {
+      addPoint(ctx, cornerPointId(entityId, i), v[0], v[1], false);
+      pushDifference(ctx, `${entityId}#cx${i}`, rep, "x", cornerPointId(entityId, i), "x", v[0] - cx);
+      pushDifference(ctx, `${entityId}#cy${i}`, rep, "y", cornerPointId(entityId, i), "y", v[1] - cy);
+    });
+    for (let i = 0; i < n; i += 1) {
+      addLine(ctx, edgeLineId(entityId, i), cornerPointId(entityId, i), cornerPointId(entityId, (i + 1) % n));
+    }
+  } else if (entity.kind === "slot") {
+    if (ctx.lines.has(edgeLineId(entityId, 0))) return;
+    // vertexIndex 0/1 = 中心線の始点/終点(両端キャップの中心、EntityVertexRefが公開する頂点)。
+    // 代表点(rep)はslotの並進オフセット(初期値[0,0])なので、difference値はstart/endの絶対座標そのもの。
+    addPoint(ctx, cornerPointId(entityId, 0), entity.start[0], entity.start[1], false);
+    addPoint(ctx, cornerPointId(entityId, 1), entity.end[0], entity.end[1], false);
+    pushDifference(ctx, `${entityId}#cx0`, rep, "x", cornerPointId(entityId, 0), "x", entity.start[0]);
+    pushDifference(ctx, `${entityId}#cy0`, rep, "y", cornerPointId(entityId, 0), "y", entity.start[1]);
+    pushDifference(ctx, `${entityId}#cx1`, rep, "x", cornerPointId(entityId, 1), "x", entity.end[0]);
+    pushDifference(ctx, `${entityId}#cy1`, rep, "y", cornerPointId(entityId, 1), "y", entity.end[1]);
+    // 直線辺(edgeIndex 0/1)専用の補助点(i=2..5、頂点としては公開しない。半円キャップの円弧自体は
+    // LineRef[直線のみ]で表現できないため辺として対象外、src/sketch/entityEdges.tsのslotEdgePoints参照)。
+    const r = entity.width / 2;
+    const n = slotAxisNormal(entity.start, entity.end);
+    const a: Point2 = [entity.start[0] + n[0] * r, entity.start[1] + n[1] * r];
+    const b: Point2 = [entity.end[0] + n[0] * r, entity.end[1] + n[1] * r];
+    const c: Point2 = [entity.end[0] - n[0] * r, entity.end[1] - n[1] * r];
+    const d: Point2 = [entity.start[0] - n[0] * r, entity.start[1] - n[1] * r];
+    ([[2, a], [3, b], [4, c], [5, d]] as [number, Point2][]).forEach(([i, p]) => {
+      addPoint(ctx, cornerPointId(entityId, i), p[0], p[1], false);
+      pushDifference(ctx, `${entityId}#cx${i}`, rep, "x", cornerPointId(entityId, i), "x", p[0]);
+      pushDifference(ctx, `${entityId}#cy${i}`, rep, "y", cornerPointId(entityId, i), "y", p[1]);
+    });
+    addLine(ctx, edgeLineId(entityId, 0), cornerPointId(entityId, 2), cornerPointId(entityId, 3));
+    addLine(ctx, edgeLineId(entityId, 1), cornerPointId(entityId, 5), cornerPointId(entityId, 4));
   }
+}
+
+/** EntityVertexRef(Phase 48)が指すGCS点(cornerPointId)を確実に作った上でそのidを返す。存在しなければnull。 */
+function ensureEntityVertexPointId(ctx: BuildContext, ref: EntityVertexRef): string | null {
+  const entity = ctx.entitiesById.get(ref.entityId);
+  if (!entity) return null;
+  if (entity.kind === "point") {
+    // pointエンティティは代表点(repPointId)自体が実座標なので、専用の補助点は作らない。
+    return ref.vertexIndex === 0 ? repPointId(ref.entityId) : null;
+  }
+  ensureEntityEdges(ctx, ref.entityId);
+  const id = cornerPointId(ref.entityId, ref.vertexIndex);
+  return ctx.points.has(id) ? id : null;
+}
+
+/**
+ * PointRef(セグメント端点)、またはEntityVertexRef(entityの頂点、Phase 48)のGCS点idを返す
+ * (必要ならensureEntityVertexPointId経由で補助点を作る)。存在しない参照先はnull。
+ */
+function resolvePointOrVertexId(ctx: BuildContext, ref: PointRef | EntityVertexRef): string | null {
+  if ("segmentId" in ref) return ctx.segmentsById.has(ref.segmentId) ? pointRefId(ref) : null;
+  return ensureEntityVertexPointId(ctx, ref);
+}
+
+/** PointRef|EntityVertexRefの現在座標(拘束構築時点の符号決定・退化回避ナッジに使う、currentPointの拡張版)。 */
+function currentPointOrVertex(ctx: BuildContext, ref: PointRef | EntityVertexRef): Point2 {
+  if ("segmentId" in ref) return currentPoint(ctx.segmentsById, ref);
+  const entity = ctx.entitiesById.get(ref.entityId);
+  return entity ? (entityVertexPoint(entity, ref.vertexIndex) ?? [0, 0]) : [0, 0];
+}
+
+/** LineRef|MovableLineRefの一方(a側、Phase 48)をGCSのline idと、その"p1"点id(p2l_distanceのp_id用)に解決する。 */
+function resolveMovableLine(ctx: BuildContext, ref: MovableLineRef): { lineId: string; p1Id: string } | null {
+  if (ref.kind === "segmentEdge") {
+    if (!ctx.segmentsById.has(ref.segmentId)) return null;
+    return { lineId: chordLineId(ref.segmentId), p1Id: pointId(ref.segmentId, "p1") };
+  }
+  ensureEntityEdges(ctx, ref.entityId);
+  const lineId = edgeLineId(ref.entityId, ref.edgeIndex);
+  const line = ctx.lines.get(lineId) as { p1_id?: string } | undefined;
+  if (!line || !line.p1_id) return null;
+  return { lineId, p1Id: line.p1_id };
 }
 
 /**
@@ -495,22 +582,23 @@ function addConstraint(ctx: BuildContext, c: SketchConstraint) {
       break;
     }
     case "distance": {
-      const a = ctx.segmentsById.get(c.a.segmentId);
-      const b = ctx.segmentsById.get(c.b.segmentId);
-      if (!a || !b) return;
+      // Phase 48: a/bはPointRef(セグメント端点)に加えEntityVertexRef(entityの頂点)も指定できる。
+      const aId = resolvePointOrVertexId(ctx, c.a);
+      const bId = resolvePointOrVertexId(ctx, c.b);
+      if (!aId || !bId) return;
       if (c.axis === "x" || c.axis === "y") {
         const axisIdx = c.axis === "x" ? 0 : 1;
         const prop = c.axis;
-        const cur = currentPoint(ctx.segmentsById, c.b)[axisIdx] - currentPoint(ctx.segmentsById, c.a)[axisIdx];
+        const cur = currentPointOrVertex(ctx, c.b)[axisIdx] - currentPointOrVertex(ctx, c.a)[axisIdx];
         const target = c.signed === true ? c.value : signOf(cur) * c.value;
-        pushDifference(ctx, c.id, pointRefId(c.a), prop, pointRefId(c.b), prop, target);
+        pushDifference(ctx, c.id, aId, prop, bId, prop, target);
       } else {
-        nudgeIfCoincidentForDirectDistance(ctx, pointRefId(c.a), pointRefId(c.b), c.value);
+        nudgeIfCoincidentForDirectDistance(ctx, aId, bId, c.value);
         ctx.constraints.push({
           id: gcsConstraintId(c.id),
           type: "p2p_distance",
-          p1_id: pointRefId(c.a),
-          p2_id: pointRefId(c.b),
+          p1_id: aId,
+          p2_id: bId,
           distance: c.value,
         });
       }
@@ -559,19 +647,21 @@ function addConstraint(ctx: BuildContext, c: SketchConstraint) {
       break;
     }
     case "distancePointOrigin": {
-      if (!ctx.segmentsById.has(c.point.segmentId)) return;
+      // Phase 48: pointはPointRefに加えEntityVertexRef(entityの頂点)も指定できる。
+      const pid = resolvePointOrVertexId(ctx, c.point);
+      if (!pid) return;
       const origin = c.originLocal ?? [0, 0];
       const oid = originPointId(c.id);
       addPoint(ctx, oid, origin[0], origin[1], true);
       if (c.axis === "x" || c.axis === "y") {
         const axisIdx = c.axis === "x" ? 0 : 1;
         const prop = c.axis;
-        const cur = currentPoint(ctx.segmentsById, c.point)[axisIdx] - origin[axisIdx];
+        const cur = currentPointOrVertex(ctx, c.point)[axisIdx] - origin[axisIdx];
         const target = c.signed === true ? c.value : signOf(cur) * c.value;
-        pushDifference(ctx, c.id, oid, prop, pointRefId(c.point), prop, target);
+        pushDifference(ctx, c.id, oid, prop, pid, prop, target);
       } else {
-        nudgeIfCoincidentForDirectDistance(ctx, pointRefId(c.point), oid, c.value);
-        ctx.constraints.push({ id: gcsConstraintId(c.id), type: "p2p_distance", p1_id: pointRefId(c.point), p2_id: oid, distance: c.value });
+        nudgeIfCoincidentForDirectDistance(ctx, pid, oid, c.value);
+        ctx.constraints.push({ id: gcsConstraintId(c.id), type: "p2p_distance", p1_id: pid, p2_id: oid, distance: c.value });
       }
       break;
     }
@@ -579,8 +669,18 @@ function addConstraint(ctx: BuildContext, c: SketchConstraint) {
       const origin = c.originLocal ?? [0, 0];
       const oid = originPointId(c.id);
       addPoint(ctx, oid, origin[0], origin[1], true);
-      const targetId = "segmentId" in c.point ? pointRefId(c.point) : entityRepId(c.point);
-      if ("segmentId" in c.point ? !ctx.segmentsById.has(c.point.segmentId) : !ctx.entitiesById.has(c.point.entityId)) return;
+      // Phase 48: pointはPointRef|EntityRef(既存)に加えEntityVertexRef(entityの頂点)も指定できる。
+      // EntityRef(円/点の代表点)とEntityVertexRef(頂点)はどちらも"entityId"を持つため、
+      // "vertexIndex"の有無で判別する("segmentId" in判定はPointRefのみを弾く)。
+      let targetId: string | null;
+      if ("segmentId" in c.point) {
+        targetId = resolvePointOrVertexId(ctx, c.point);
+      } else if ("vertexIndex" in c.point) {
+        targetId = resolvePointOrVertexId(ctx, c.point);
+      } else {
+        targetId = ctx.entitiesById.has(c.point.entityId) ? entityRepId(c.point) : null;
+      }
+      if (!targetId) return;
       ctx.constraints.push({ id: gcsConstraintId(c.id), type: "p2p_coincident", p1_id: targetId, p2_id: oid });
       break;
     }
@@ -614,10 +714,12 @@ function addConstraint(ctx: BuildContext, c: SketchConstraint) {
       break;
     }
     case "distancePointLine": {
-      if (!ctx.segmentsById.has(c.point.segmentId)) return;
+      // Phase 48: pointはPointRefに加えEntityVertexRef(entityの頂点)も指定できる。
+      const pid = resolvePointOrVertexId(ctx, c.point);
+      if (!pid) return;
       const lineId = resolveLineToGcsLineId(ctx, c.id, c.line);
       if (!lineId) return;
-      ctx.constraints.push({ id: gcsConstraintId(c.id), type: "p2l_distance", p_id: pointRefId(c.point), l_id: lineId, distance: c.value });
+      ctx.constraints.push({ id: gcsConstraintId(c.id), type: "p2l_distance", p_id: pid, l_id: lineId, distance: c.value });
       break;
     }
     case "perpendicular": {
@@ -675,50 +777,60 @@ function addConstraint(ctx: BuildContext, c: SketchConstraint) {
       break;
     }
     case "distanceLineLine": {
-      if (!ctx.segmentsById.has(c.a) || !ctx.segmentsById.has(c.b)) return;
-      ctx.constraints.push({ id: gcsConstraintId(c.id, 0), type: "parallel", l1_id: chordLineId(c.a), l2_id: chordLineId(c.b) });
+      // Phase 48: a/bは自由な線分のsegmentId(旧データ、素の文字列)に加えMovableLineRef
+      // (rectangle/polygon/regularPolygon/slotの辺、entityEdge)も指定できる。
+      const la = resolveMovableLine(ctx, normalizeMovableLineRef(c.a));
+      const lb = resolveMovableLine(ctx, normalizeMovableLineRef(c.b));
+      if (!la || !lb) return;
+      ctx.constraints.push({ id: gcsConstraintId(c.id, 0), type: "parallel", l1_id: la.lineId, l2_id: lb.lineId });
       ctx.constraints.push({
         id: gcsConstraintId(c.id, 1),
         type: "p2l_distance",
-        p_id: pointId(c.a, "p1"),
-        l_id: chordLineId(c.b),
+        p_id: la.p1Id,
+        l_id: lb.lineId,
         distance: c.value,
       });
       break;
     }
     case "angleLineLine": {
-      if (!ctx.segmentsById.has(c.a) || !ctx.segmentsById.has(c.b)) return;
+      const la = resolveMovableLine(ctx, normalizeMovableLineRef(c.a));
+      const lb = resolveMovableLine(ctx, normalizeMovableLineRef(c.b));
+      if (!la || !lb) return;
       ctx.constraints.push({
         id: gcsConstraintId(c.id),
         type: "l2l_angle_ll",
-        l1_id: chordLineId(c.a),
-        l2_id: chordLineId(c.b),
+        l1_id: la.lineId,
+        l2_id: lb.lineId,
         angle: (c.value * Math.PI) / 180,
       });
       break;
     }
     case "distanceLineRefEdge": {
-      if (!ctx.segmentsById.has(c.segmentId)) return;
+      // Phase 48: segmentId(フィールド名は後方互換で維持)は素の文字列(自由な線分)に加え
+      // MovableLineRef(entityEdge)も指定できる。
+      const la = resolveMovableLine(ctx, normalizeMovableLineRef(c.segmentId));
+      if (!la) return;
       const lineId = resolveLineToGcsLineId(ctx, c.id, c.line);
       if (!lineId) return;
-      ctx.constraints.push({ id: gcsConstraintId(c.id, 0), type: "parallel", l1_id: chordLineId(c.segmentId), l2_id: lineId });
+      ctx.constraints.push({ id: gcsConstraintId(c.id, 0), type: "parallel", l1_id: la.lineId, l2_id: lineId });
       ctx.constraints.push({
         id: gcsConstraintId(c.id, 1),
         type: "p2l_distance",
-        p_id: pointId(c.segmentId, "p1"),
+        p_id: la.p1Id,
         l_id: lineId,
         distance: c.value,
       });
       break;
     }
     case "angleLineRefEdge": {
-      if (!ctx.segmentsById.has(c.segmentId)) return;
+      const la = resolveMovableLine(ctx, normalizeMovableLineRef(c.segmentId));
+      if (!la) return;
       const lineId = resolveLineToGcsLineId(ctx, c.id, c.line);
       if (!lineId) return;
       ctx.constraints.push({
         id: gcsConstraintId(c.id),
         type: "l2l_angle_ll",
-        l1_id: chordLineId(c.segmentId),
+        l1_id: la.lineId,
         l2_id: lineId,
         angle: (c.value * Math.PI) / 180,
       });
@@ -983,6 +1095,16 @@ function evaluateResidual(
   entitiesById: Map<string, SketchEntity>,
 ): number {
   const segPoint = (ref: PointRef): Point2 => currentPoint(segmentsById, ref);
+  // Phase 48: distance/distancePointOrigin/distancePointLineのa/b/pointはPointRefに加え
+  // EntityVertexRef(entityの頂点)も指定できる。
+  const pointOrVertex = (ref: PointRef | EntityVertexRef): Point2 => {
+    if ("segmentId" in ref) return segPoint(ref);
+    const entity = entitiesById.get(ref.entityId);
+    return entity ? (entityVertexPoint(entity, ref.vertexIndex) ?? [0, 0]) : [0, 0];
+  };
+  // Phase 48: distanceLineLine/angleLineLine(a/b)・distanceLineRefEdge/angleLineRefEdge(segmentId)は
+  // 素の文字列(自由な線分のsegmentId、後方互換)に加えMovableLineRef(entityEdge)も指定できる。
+  const movableLine = (ref: string | MovableLineRef): [Point2, Point2] | null => resolveLineRefPoints(normalizeMovableLineRef(ref), entities, segments);
   const axisSignedOrAbs = (d: number, value: number, signed: boolean | undefined): number =>
     signed === true ? Math.abs(d - value) : Math.abs(Math.abs(d) - value);
 
@@ -1002,8 +1124,8 @@ function evaluateResidual(
       return s ? Math.abs(ptDist(s.p1, s.p2) - c.value) : 0;
     }
     case "distance": {
-      const a = segPoint(c.a);
-      const b = segPoint(c.b);
+      const a = pointOrVertex(c.a);
+      const b = pointOrVertex(c.b);
       if (c.axis === "x" || c.axis === "y") {
         const i = c.axis === "x" ? 0 : 1;
         return axisSignedOrAbs(b[i] - a[i], c.value, c.signed);
@@ -1036,7 +1158,7 @@ function evaluateResidual(
       return Math.abs(ptDist(p, origin) - c.value);
     }
     case "distancePointOrigin": {
-      const p = segPoint(c.point);
+      const p = pointOrVertex(c.point);
       const origin = c.originLocal ?? [0, 0];
       if (c.axis === "x" || c.axis === "y") {
         const i = c.axis === "x" ? 0 : 1;
@@ -1046,7 +1168,8 @@ function evaluateResidual(
     }
     case "coincidentOrigin": {
       const origin = c.originLocal ?? [0, 0];
-      const p = "segmentId" in c.point ? segPoint(c.point) : repPointConcrete(entitiesById.get(c.point.entityId));
+      const p =
+        "segmentId" in c.point || "vertexIndex" in c.point ? pointOrVertex(c.point) : repPointConcrete(entitiesById.get(c.point.entityId));
       return ptDist(p, origin);
     }
     case "distanceEntityEntity": {
@@ -1069,7 +1192,7 @@ function evaluateResidual(
       return Math.abs(Math.abs(perpDistanceSigned(repPointConcrete(e), line[0], line[1])) - c.value);
     }
     case "distancePointLine": {
-      const p = segPoint(c.point);
+      const p = pointOrVertex(c.point);
       const line = resolveLineRefPoints(c.line, entities, segments);
       if (!line) return 0;
       return Math.abs(Math.abs(perpDistanceSigned(p, line[0], line[1])) - c.value);
@@ -1112,34 +1235,34 @@ function evaluateResidual(
       return Math.abs(ptDist(repPointConcrete(e), repPointConcrete(other)) - target);
     }
     case "distanceLineLine": {
-      const a = segmentsById.get(c.a);
-      const b = segmentsById.get(c.b);
+      const a = movableLine(c.a);
+      const b = movableLine(c.b);
       if (!a || !b) return 0;
-      const r1 = Math.abs(Math.abs(perpDistanceSigned(a.p1, b.p1, b.p2)) - c.value);
-      const r2 = Math.abs(Math.abs(perpDistanceSigned(a.p2, b.p1, b.p2)) - c.value);
+      const r1 = Math.abs(Math.abs(perpDistanceSigned(a[0], b[0], b[1])) - c.value);
+      const r2 = Math.abs(Math.abs(perpDistanceSigned(a[1], b[0], b[1])) - c.value);
       return Math.max(r1, r2);
     }
     case "angleLineLine": {
-      const a = segmentsById.get(c.a);
-      const b = segmentsById.get(c.b);
+      const a = movableLine(c.a);
+      const b = movableLine(c.b);
       if (!a || !b) return 0;
-      return Math.abs(angleBetweenDeg(dirVec(a.p1, a.p2), dirVec(b.p1, b.p2)) - c.value);
+      return Math.abs(angleBetweenDeg(dirVec(a[0], a[1]), dirVec(b[0], b[1])) - c.value);
     }
     case "distanceLineRefEdge": {
-      const s = segmentsById.get(c.segmentId);
+      const s = movableLine(c.segmentId);
       if (!s) return 0;
       const line = resolveLineRefPoints(c.line, entities);
       if (!line) return 0;
-      const r1 = Math.abs(Math.abs(perpDistanceSigned(s.p1, line[0], line[1])) - c.value);
-      const r2 = Math.abs(Math.abs(perpDistanceSigned(s.p2, line[0], line[1])) - c.value);
+      const r1 = Math.abs(Math.abs(perpDistanceSigned(s[0], line[0], line[1])) - c.value);
+      const r2 = Math.abs(Math.abs(perpDistanceSigned(s[1], line[0], line[1])) - c.value);
       return Math.max(r1, r2);
     }
     case "angleLineRefEdge": {
-      const s = segmentsById.get(c.segmentId);
+      const s = movableLine(c.segmentId);
       if (!s) return 0;
       const line = resolveLineRefPoints(c.line, entities);
       if (!line) return 0;
-      return Math.abs(angleBetweenDeg(dirVec(s.p1, s.p2), dirVec(line[0], line[1])) - c.value);
+      return Math.abs(angleBetweenDeg(dirVec(s[0], s[1]), dirVec(line[0], line[1])) - c.value);
     }
   }
 }
