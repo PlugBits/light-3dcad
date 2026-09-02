@@ -311,6 +311,27 @@ export function upsertDistancePointLineConstraint(
   return [...constraints, { id: generateId("constraint"), kind: "distancePointLine", point, line, value }];
 }
 
+/**
+ * 辺(MovableLineRef、rectangle/polygon/regularPolygon/slotの辺、または自由な線分)↔原点のdistanceLineOrigin
+ * 拘束を追加/更新する(Phase 48b: 寸法ツールの原点との組み合わせを辺にも拡張)。
+ * upsertDistanceEntityOriginConstraintのMovableLineRef版。originLocalの意味・扱いは同じ
+ * (axis/signedは無し、常に直線[垂直]距離のみ)。
+ */
+export function upsertDistanceLineOriginConstraint(
+  constraints: readonly SketchConstraint[],
+  line: MovableLineRef,
+  value: number,
+  originLocal?: [number, number],
+): SketchConstraint[] {
+  const idx = constraints.findIndex((c) => c.kind === "distanceLineOrigin" && sameMovableLineRef(c.line, line));
+  if (idx >= 0) {
+    const next = constraints.slice();
+    next[idx] = { ...next[idx], value, ...(originLocal ? { originLocal } : {}) } as SketchConstraint;
+    return next;
+  }
+  return [...constraints, { id: generateId("constraint"), kind: "distanceLineOrigin", line, value, originLocal }];
+}
+
 /** エンティティが固定(fixEntity拘束を持つ)かどうか。circle/rectangle/polygon/regularPolygon/slotいずれも対象。 */
 export function isEntityFixed(constraints: readonly SketchConstraint[], entityId: string): boolean {
   return constraints.some((c) => c.kind === "fixEntity" && c.entity.entityId === entityId);
@@ -729,6 +750,20 @@ export interface PointLineDimension {
   anchor: Point2;
   labelOffset?: Point2;
 }
+/**
+ * 辺↔原点の垂直距離(mm、Phase 48b)。EntityLineDimensionの原点版(対象が円の中心ではなく辺、
+ * かつ相手が線ではなく原点)で、lineはMovableLineRef(entityEdge/segmentEdge)のみ。
+ */
+export interface LineOriginDimension {
+  kind: "line-distance-origin";
+  constraintId: string;
+  line: MovableLineRef;
+  value: number;
+  anchor: Point2;
+  /** 「原点」の実座標(ワールド原点のスケッチローカル投影、仕様変更対応)。寸法線の描画に使う。 */
+  origin: Point2;
+  labelOffset?: Point2;
+}
 /** 2直線の平行距離(mm、Phase 24)。寸法線は両線分間の垂直寸法線(src/components/DimensionOverlay.tsx参照)。 */
 export interface SegDistanceLineLineDimension {
   kind: "seg-distance-line-line";
@@ -758,6 +793,7 @@ export type ConstraintDimension =
   | EntityEntityDimension
   | EntityLineDimension
   | PointLineDimension
+  | LineOriginDimension
   | SegDistanceLineLineDimension
   | SegAngleLineLineDimension;
 
@@ -838,6 +874,20 @@ export function computeConstraintDimensions(
         lenSq < 1e-18 ? a : [a[0] + (((center[0] - a[0]) * dx + (center[1] - a[1]) * dy) / lenSq) * dx, a[1] + (((center[0] - a[0]) * dx + (center[1] - a[1]) * dy) / lenSq) * dy];
       const anchor: Point2 = [(center[0] + foot[0]) / 2, (center[1] + foot[1]) / 2];
       dims.push({ kind: "entity-distance-line", constraintId: c.id, entityId: c.entity.entityId, line: c.line, value: c.value, anchor, labelOffset: c.labelOffset });
+      continue;
+    }
+    if (c.kind === "distanceLineOrigin") {
+      const line = resolveLineRefPoints(c.line, entities, segments);
+      if (!line) continue;
+      const origin: Point2 = c.originLocal ?? [0, 0];
+      const [a, b] = line;
+      const dx = b[0] - a[0];
+      const dy = b[1] - a[1];
+      const lenSq = dx * dx + dy * dy;
+      const foot: Point2 =
+        lenSq < 1e-18 ? a : [a[0] + (((origin[0] - a[0]) * dx + (origin[1] - a[1]) * dy) / lenSq) * dx, a[1] + (((origin[0] - a[0]) * dx + (origin[1] - a[1]) * dy) / lenSq) * dy];
+      const anchor: Point2 = [(origin[0] + foot[0]) / 2, (origin[1] + foot[1]) / 2];
+      dims.push({ kind: "line-distance-origin", constraintId: c.id, line: c.line, value: c.value, anchor, origin, labelOffset: c.labelOffset });
       continue;
     }
     if (c.kind === "distanceLineLine" || c.kind === "angleLineLine") {

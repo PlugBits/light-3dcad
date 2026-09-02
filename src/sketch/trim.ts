@@ -310,6 +310,8 @@ export function collectReferencedIds(c: SketchConstraint): string[] {
       return [c.entity.entityId, ...lineRefReferencedIds(c.line)];
     case "distancePointLine":
       return [pointOrVertexRefReferencedId(c.point), ...lineRefReferencedIds(c.line)];
+    case "distanceLineOrigin":
+      return [movableLineRefReferencedId(c.line)];
     case "perpendicular":
       return [c.a, c.b];
     case "distanceLineLine":

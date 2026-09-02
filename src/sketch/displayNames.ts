@@ -156,6 +156,7 @@ export const CONSTRAINT_KIND_LABELS: Record<SketchConstraint["kind"], string> = 
   distanceEntityEntity: "中心間距離",
   distanceEntityLine: "中心↔辺距離",
   distancePointLine: "端点↔辺距離",
+  distanceLineOrigin: "辺↔原点距離",
   fixEntity: "円の固定",
   fixArc: "円弧の固定",
   perpendicular: "垂直",
@@ -212,6 +213,8 @@ export function describeConstraint(
       return `${entityDisplayNameById(entities, constraint.entity.entityId)} ↔ ${lineRefDisplayName(segments, entities, constraint.line)} = ${formatMm(constraint.value)}mm`;
     case "distancePointLine":
       return `${pointOrVertexRefDisplayName(segments, entities, constraint.point)} ↔ ${lineRefDisplayName(segments, entities, constraint.line)} = ${formatMm(constraint.value)}mm`;
+    case "distanceLineOrigin":
+      return `原点 ↔ ${movableLineRefDisplayName(segments, entities, constraint.line)} = ${formatMm(constraint.value)}mm`;
     case "fixEntity":
       return entityDisplayNameById(entities, constraint.entity.entityId);
     case "fixArc":

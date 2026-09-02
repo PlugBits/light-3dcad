@@ -248,6 +248,26 @@ export type SketchConstraint =
       labelOffset?: [number, number];
     }
   /**
+   * 辺(rectangle/polygon/regularPolygon/slotの辺、または自由な線分セグメント=MovableLineRef)↔原点の
+   * 垂直距離(mm、Phase 48b: 寸法ツールの原点との組み合わせを円/端点に加え辺にも拡張)。
+   * distanceEntityOriginの「対象がcircleエンティティの中心ではなく辺(無限直線扱い)」版で、
+   * 原点の定義・originLocalスナップショットの扱いはdistanceEntityOriginと同一。lineの解決
+   * (entityEdge/segmentEdgeいずれも「今の値」から解決する可動線)はdistanceEntityLine/
+   * distancePointLineのlineフィールドと同じ(src/sketch/entityEdges.tsのresolveLineRefPoints参照)。
+   * 参照エッジ(refEdge、固定スナップショット)との組み合わせは対象外(距離が定数になり実用上不要なため、
+   * LineRefではなくMovableLineRefに絞っている)。X/Y軸成分のみの指定(axis)は無し
+   * (distanceEntityLine/distancePointLineと同じく直線[垂直]距離のみ)。
+   */
+  | {
+      id: string;
+      kind: "distanceLineOrigin";
+      line: MovableLineRef;
+      value: number;
+      originLocal?: [number, number];
+      /** 寸法ラベルのドラッグ移動オフセット(Phase 31a)。省略=既定位置(後方互換)。 */
+      labelOffset?: [number, number];
+    }
+  /**
    * セグメント端点、またはcircleエンティティの中心を原点に一致させる(固定、追加項目)。
    * 拘束ツール(垂直・同心・接線と同じ選択ポップアップ)から追加する。残差は対象点の座標そのもの
    * (x,y、fix/fixEntityと似るが目標値が「作成時点の位置」ではなく常に原点である点が異なる)。

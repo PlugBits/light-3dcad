@@ -648,6 +648,14 @@ export type DimensionToolTarget =
    */
   | { kind: "point-distance-line"; point: PointRef | EntityVertexRef; edgeA: [number, number]; edgeB: [number, number]; line: LineRef }
   /**
+   * 辺(rectangle/polygon/regularPolygon/slotの辺、または自由な線分)↔原点の距離(Phase 48b: 寸法ツールの
+   * 原点との組み合わせを円/端点に加え辺にも拡張)。edgeA/edgeBはピック時点の実座標(現在値のプレビュー
+   * 計算用)、lineは拘束へ保存するMovableLineRef。circle-distance-origin/point-distance-originと同じく
+   * 「原点は動かない」ため、原点→辺/辺→原点のどちらの順でクリックしても同じターゲットになる
+   * (参照エッジ[refEdge]との組み合わせは対象外)。
+   */
+  | { kind: "line-distance-origin"; line: MovableLineRef; edgeA: [number, number]; edgeB: [number, number] }
+  /**
    * 線分↔線分の寸法(Phase 24、Phase 48でrectangle/polygon/regularPolygon/slotの辺にも拡張)。
    * aが1点目(lengthポップアップが開いていた直線セグメント、または辺として選ばれたentityEdge)、
    * bが2点目(後にクリックした直線セグメント/辺)。いずれもLineRef(entityEdge/segmentEdge、refEdgeは
@@ -3832,6 +3840,34 @@ export class CadViewer {
         this.dimensionToolCallbacks?.onTargetPicked({ kind: "point-distance-origin", point }, px, py);
         return;
       }
+      if (this.dimensionPendingLineId) {
+        // 自由な線分(1点目)→原点(2点目、Phase 48b): line-distance-originターゲットになる
+        // (「原点は動かない」ためcircle/端点と同じく向きに依らず対称)。
+        const seg = this.dimensionToolSegments.find((s) => s.id === this.dimensionPendingLineId);
+        const line: MovableLineRef = { kind: "segmentEdge", segmentId: this.dimensionPendingLineId };
+        this.setDimensionPendingLine(null);
+        this.clearDrawingPreview();
+        this.dimensionToolCallbacks?.onTargetPicked(
+          { kind: "line-distance-origin", line, edgeA: seg?.p1 ?? [0, 0], edgeB: seg?.p2 ?? [0, 0] },
+          px,
+          py,
+        );
+        return;
+      }
+      if (this.dimensionPendingEdgeLine && this.dimensionPendingEdgeLine.line.kind !== "refEdge") {
+        // 辺(rectangle/polygon/regularPolygon/slot、1点目)→原点(2点目、Phase 48b):
+        // line-distance-originターゲットになる(参照エッジ[refEdge]との組み合わせは対象外)。
+        const pending = this.dimensionPendingEdgeLine;
+        const line = pending.line as MovableLineRef;
+        this.setDimensionPendingEdge(null);
+        this.clearDrawingPreview();
+        this.dimensionToolCallbacks?.onTargetPicked(
+          { kind: "line-distance-origin", line, edgeA: pending.edgeA, edgeB: pending.edgeB },
+          px,
+          py,
+        );
+        return;
+      }
       if (this.dimensionPendingOrigin) return; // 原点を2連続クリック: 何もしない(同一点の再クリックと同じ扱い)。
       this.setDimensionPendingCircle(null);
       this.setDimensionPendingLine(null);
@@ -4184,6 +4220,18 @@ export class CadViewer {
       // entityHit.kind !== "entity-radius"(=辺のヒット)のとき、findEntityDimensionHit()は
       // rectangle/polygon/regularPolygon/slotいずれもedgeIndexを必ず設定する(entityDimensionPick.ts参照)
       // ため、以下は常にentityEdge(MovableLineRef)になる(refEdgeフォールバックは不要)。
+      if (entityHit.kind !== "entity-radius" && this.dimensionPendingOrigin && entityHit.edgeIndex !== undefined) {
+        // 原点(1点目)→辺(2点目、Phase 48b): line-distance-originターゲットになる(円と同じく
+        // 「原点は動かない」ためクリック順に依らず対称)。
+        this.setDimensionPendingOrigin(false);
+        const line: MovableLineRef = { kind: "entityEdge", entityId: entityHit.entityId, edgeIndex: entityHit.edgeIndex };
+        this.dimensionToolCallbacks?.onTargetPicked(
+          { kind: "line-distance-origin", line, edgeA: entityHit.highlightPoints[0], edgeB: entityHit.highlightPoints[1] },
+          px,
+          py,
+        );
+        return;
+      }
       if (entityHit.kind !== "entity-radius" && this.dimensionPendingRefEdgeLine && entityHit.edgeIndex !== undefined) {
         const pending = this.dimensionPendingRefEdgeLine;
         this.setDimensionPendingRefEdge(null);
@@ -4279,7 +4327,9 @@ export class CadViewer {
     const pendingPointForSegment = this.dimensionPendingPoint;
     this.setDimensionPendingPoint(null);
     // セグメント本体のヒットはdimensionPendingOriginを消費しない(原点↔線分本体の組み合わせは
-    // 未対応、端点のみ対応)。新たな1点目/確定ターゲットに進むため保留を解除する(相互排他の維持)。
+    // kind:"line"のみ対応、円弧は対象外)。消費するかどうかはkind判定後に決めるため、いったん
+    // 保持しておく(直後のsetDimensionPendingOrigin(false)で状態が消える前に読む、Phase 48b)。
+    const originPendingForSegment = this.dimensionPendingOrigin;
     this.setDimensionPendingOrigin(false);
     this.clearDrawingPreview();
     const seg = this.dimensionToolSegments.find((s) => s.id === nearestId);
@@ -4288,6 +4338,14 @@ export class CadViewer {
       this.setDimensionPendingCircle(null);
       this.setDimensionPendingLine(null);
       this.dimensionToolCallbacks?.onTargetPicked({ kind: "radius", segmentId: nearestId }, px, py);
+    } else if (originPendingForSegment && seg.kind === "line") {
+      // 原点(1点目)→自由な線分(2点目、Phase 48b): line-distance-originターゲットになる
+      // (「原点は動かない」ためクリック順に依らず対称)。
+      this.dimensionToolCallbacks?.onTargetPicked(
+        { kind: "line-distance-origin", line: { kind: "segmentEdge", segmentId: seg.id }, edgeA: seg.p1, edgeB: seg.p2 },
+        px,
+        py,
+      );
     } else if (this.dimensionPendingRefEdgeLine) {
       // 参照エッジ(1点目)→自由な線分(2点目、追加項目: 参照エッジを1つ目に選べるようにする改善)。
       // 線分↔参照エッジクリック済み(dimensionPendingLineId)の状態で参照エッジをクリックしたときと

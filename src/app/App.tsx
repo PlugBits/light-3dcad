@@ -91,6 +91,7 @@ import {
   upsertDistanceEntityLineConstraint,
   upsertDistanceEntityOriginConstraint,
   upsertDistanceLineLineConstraint,
+  upsertDistanceLineOriginConstraint,
   upsertDistanceLineRefEdgeConstraint,
   upsertDistancePointLineConstraint,
   upsertDistancePointOriginConstraint,
@@ -1937,6 +1938,14 @@ export default function App() {
             target.line.kind === "refEdge"
               ? "参照エッジは動かず、端点だけが移動します"
               : "長さ拘束の無い線分は伸び、長さ拘束があれば線分ごと平行移動します";
+        } else if (target.kind === "line-distance-origin") {
+          // 辺↔原点の距離(Phase 48b: 寸法ツールの原点との組み合わせを円/端点に加え辺にも拡張)。
+          // point-distance-lineと同じ考え方だが対象がentityの頂点ではなく辺(無限直線扱い)、
+          // 相手が線ではなく原点(常に固定)である点のみが異なる。
+          titleLabel = "辺↔原点の距離 (mm)";
+          initialValue = distancePointToLine(originLocal, target.edgeA, target.edgeB);
+          allowZero = true;
+          hintLabel = "原点は動かず、辺(固定していなければ)が移動します";
         } else if (target.kind === "circle-distance-circle") {
           titleLabel = "中心間の距離 (mm)";
           const from = entities.find((e) => e.id === target.fromEntityId);
@@ -2016,18 +2025,22 @@ export default function App() {
         } else if (state.kind === "circle") {
           setDimensionPendingLabel("1つ目: 円 → 2つ目を選択(原点/円/辺/端面)");
         } else if (state.kind === "line") {
-          setDimensionPendingLabel("1つ目: 線分 → 2つ目の線分/参照エッジ/端点を選択(距離/角度/垂直距離)");
+          // 選択順柔軟化(Phase 48で辺[entityEdge]・Phase 48bで原点との組み合わせにも対応)。
+          setDimensionPendingLabel("1つ目: 線分 → 2つ目の線分/辺/参照エッジ/端点/原点を選択(距離/角度/垂直距離)");
         } else if (state.kind === "edge") {
-          // 選択順柔軟化(UI改善): 辺(矩形・多角形)を1つ目としてクリックした状態。
-          setDimensionPendingLabel("1つ目: 辺 → 次: 円/端点をクリック");
+          // 選択順柔軟化(UI改善): 辺(矩形・多角形等)を1つ目としてクリックした状態。Phase 48で
+          // 線分/参照エッジとの組み合わせ、Phase 48bで原点との組み合わせにも対応した。
+          setDimensionPendingLabel("1つ目: 辺 → 次: 円/端点/線分/参照エッジ/原点をクリック");
         } else if (state.kind === "refedge") {
           // 参照エッジを1つ目に選べるようにする改善(追加項目): ボディ端面参照エッジ(破線)を
-          // 1つ目としてクリックした状態。次は円(円↔参照エッジの距離)・線分(線分↔参照エッジの
-          // 距離/角度)・端点(頂点ベースの寸法指定、Phase 30新設: 端点↔参照エッジの垂直距離)のいずれも選べる。
-          setDimensionPendingLabel("1つ目: 参照エッジ → 次: 円/線分/端点をクリック");
+          // 1つ目としてクリックした状態。次は円(円↔参照エッジの距離)・線分/辺(線分↔参照エッジの
+          // 距離/角度、Phase 48で辺にも対応)・端点(頂点ベースの寸法指定、Phase 30新設: 端点↔参照エッジの
+          // 垂直距離)のいずれも選べる(原点との組み合わせは対象外、Phase 48b)。
+          setDimensionPendingLabel("1つ目: 参照エッジ → 次: 円/線分/辺/端点をクリック");
         } else if (state.kind === "origin") {
-          // 原点ピック常時有効化(追加項目、ユーザー報告対応)。
-          setDimensionPendingLabel("1つ目: 原点 → 2つ目を選択(円/端点)");
+          // 原点ピック常時有効化(追加項目、ユーザー報告対応)。Phase 48でentityの頂点(rectangle等の
+          // 角、点エンティティ含む)、Phase 48bで辺との組み合わせにも対応した。
+          setDimensionPendingLabel("1つ目: 原点 → 2つ目を選択(円/端点/頂点/点/辺)");
         } else {
           // 頂点ベースの寸法指定(Phase 30新設): 端点↔線(自由な線分/rectangle・polygonの辺/
           // 参照エッジ)の垂直距離にも対応。
@@ -2170,7 +2183,9 @@ export default function App() {
                       ? upsertDistanceEntityEntityConstraint(constraints, target.fromEntityId, target.toEntityId, value, axis)
                       : target.kind === "point-distance-line"
                         ? upsertDistancePointLineConstraint(constraints, target.point, target.line, value)
-                        : upsertDistanceEntityLineConstraint(constraints, target.entityId, target.line, value);
+                        : target.kind === "line-distance-origin"
+                          ? upsertDistanceLineOriginConstraint(constraints, target.line, value, originLocal)
+                          : upsertDistanceEntityLineConstraint(constraints, target.entityId, target.line, value);
         return setSketchConstraints(doc, sketchId, next);
       },
       (message) => showTransientMessage(message, "error"),

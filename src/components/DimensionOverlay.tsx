@@ -22,6 +22,7 @@ import {
   upsertDistanceEntityLineConstraint,
   upsertDistanceEntityOriginConstraint,
   upsertDistanceLineLineConstraint,
+  upsertDistanceLineOriginConstraint,
   upsertDistancePointLineConstraint,
   upsertDistancePointOriginConstraint,
   upsertLengthConstraint,
@@ -170,6 +171,20 @@ function constraintDimensionGraphics(
     const foot: Point2 = [a[0] + t * dx, a[1] + t * dy];
     return computeLinearDimensionGraphics(p, foot, ov);
   }
+  if (dimension.kind === "line-distance-origin") {
+    // Phase 48b: lineはMovableLineRef(entityEdge/segmentEdge)のみ。
+    const line = resolveLineRefPoints(normalizeMovableLineRef(dimension.line), entities, segments);
+    if (!line) return null;
+    // 原点から直線への垂線の足を寸法のもう一端にする(entity-distance-lineと同じ考え方)。
+    const [a, b] = line;
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq < 1e-12) return null;
+    const t = ((dimension.origin[0] - a[0]) * dx + (dimension.origin[1] - a[1]) * dy) / lenSq;
+    const foot: Point2 = [a[0] + t * dx, a[1] + t * dy];
+    return computeLinearDimensionGraphics(dimension.origin, foot, ov);
+  }
   if (dimension.kind === "seg-distance-line-line") {
     // Phase 48: a/bは自由な線分のsegmentId(素の文字列)に加えMovableLineRef(entityEdge)も指定できる。
     const lineA = resolveLineRefPoints(normalizeMovableLineRef(dimension.a), entities, segments);
@@ -284,7 +299,12 @@ function isAxisDistanceDimensionKind(kind: ConstraintDimension["kind"]): boolean
  * 長さ・半径・中心↔原点/辺の距離・角度は対象外(従来通り正の数のみ)。
  */
 function isZeroAllowedDimensionKind(kind: ConstraintDimension["kind"]): boolean {
-  return isAxisDistanceDimensionKind(kind) || kind === "point-distance-line" || kind === "seg-distance-line-line";
+  return (
+    isAxisDistanceDimensionKind(kind) ||
+    kind === "point-distance-line" ||
+    kind === "seg-distance-line-line" ||
+    kind === "line-distance-origin"
+  );
 }
 
 const CONSTRAINT_DIMENSION_LABELS: Record<ConstraintDimension["kind"], string> = {
@@ -296,6 +316,7 @@ const CONSTRAINT_DIMENSION_LABELS: Record<ConstraintDimension["kind"], string> =
   "entity-distance-entity": "中心間の距離 (mm)",
   "entity-distance-line": "中心↔辺の距離 (mm)",
   "point-distance-line": "端点↔辺の距離 (mm)",
+  "line-distance-origin": "辺↔原点の距離 (mm)",
   "seg-distance-line-line": "距離 (mm)",
   "seg-angle-line-line": "角度 (°)",
 };
@@ -477,9 +498,11 @@ export function DimensionOverlay({ sketch, basis, viewerRef, visible, onConflict
                       ? upsertDistanceEntityLineConstraint(constraints, dimension.entityId, dimension.line, value)
                       : dimension.kind === "point-distance-line"
                         ? upsertDistancePointLineConstraint(constraints, dimension.point, dimension.line, value)
-                        : dimension.kind === "seg-distance-line-line"
-                          ? upsertDistanceLineLineConstraint(constraints, dimension.a, dimension.b, value)
-                          : upsertAngleLineLineConstraint(constraints, dimension.a, dimension.b, value);
+                        : dimension.kind === "line-distance-origin"
+                          ? upsertDistanceLineOriginConstraint(constraints, dimension.line, value, dimension.origin)
+                          : dimension.kind === "seg-distance-line-line"
+                            ? upsertDistanceLineLineConstraint(constraints, dimension.a, dimension.b, value)
+                            : upsertAngleLineLineConstraint(constraints, dimension.a, dimension.b, value);
         return setSketchConstraints(doc, sketch.id, next);
       },
       onConflictRollback,

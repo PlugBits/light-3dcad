@@ -722,6 +722,19 @@ function addConstraint(ctx: BuildContext, c: SketchConstraint) {
       ctx.constraints.push({ id: gcsConstraintId(c.id), type: "p2l_distance", p_id: pid, l_id: lineId, distance: c.value });
       break;
     }
+    case "distanceLineOrigin": {
+      // Phase 48b: distanceEntityOrigin/distancePointOriginと同じ原点スナップショット(固定点)を、
+      // distanceEntityLine/distancePointLineと同じp2l_distanceでlineへ拘束する
+      // (lineはMovableLineRefのみ[entityEdge/segmentEdge]、resolveLineToGcsLineIdはLineRef全種を
+      // 受け付けるがrefEdgeは型上到達しない)。
+      const lineId = resolveLineToGcsLineId(ctx, c.id, c.line);
+      if (!lineId) return;
+      const origin = c.originLocal ?? [0, 0];
+      const oid = originPointId(c.id);
+      addPoint(ctx, oid, origin[0], origin[1], true);
+      ctx.constraints.push({ id: gcsConstraintId(c.id), type: "p2l_distance", p_id: oid, l_id: lineId, distance: c.value });
+      break;
+    }
     case "perpendicular": {
       if (!ctx.segmentsById.has(c.a) || !ctx.segmentsById.has(c.b)) return;
       ctx.constraints.push({ id: gcsConstraintId(c.id), type: "perpendicular_ll", l1_id: chordLineId(c.a), l2_id: chordLineId(c.b) });
@@ -1196,6 +1209,12 @@ function evaluateResidual(
       const line = resolveLineRefPoints(c.line, entities, segments);
       if (!line) return 0;
       return Math.abs(Math.abs(perpDistanceSigned(p, line[0], line[1])) - c.value);
+    }
+    case "distanceLineOrigin": {
+      const line = resolveLineRefPoints(c.line, entities, segments);
+      if (!line) return 0;
+      const origin = c.originLocal ?? [0, 0];
+      return Math.abs(Math.abs(perpDistanceSigned(origin, line[0], line[1])) - c.value);
     }
     case "perpendicular": {
       const a = segmentsById.get(c.a);

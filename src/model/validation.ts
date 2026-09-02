@@ -340,8 +340,8 @@ function validateMovableLineRef(
  * - distance/distancePointOrigin/distanceEntityEntity: axis:"x"/"y"は符号付きのため有限数であれば
  *   よい(0・負を許可)、axis:"direct"/省略(直線距離)は0以上(点一致を許可、負は不可、寸法値の符号仕様の
  *   明確化Phase 33)
- * - distancePointLine/distanceLineLine/distanceLineRefEdge: valueが0以上の有限数であること
- *   (線上一致を許可、負は不可、Phase 33)
+ * - distancePointLine/distanceLineLine/distanceLineRefEdge/distanceLineOrigin: valueが0以上の
+ *   有限数であること(線上一致を許可、負は不可、Phase 33/48b)
  * - radius: 参照先セグメントがkind:"arc"であること(lineには指定できない)
  * - perpendicular: 参照先セグメントが2本ともkind:"line"であること(Phase 23)
  * - concentric/tangent: 参照先entityがcircleエンティティとして存在すること(Phase 23)
@@ -432,6 +432,15 @@ function validateConstraint(
     case "distancePointLine": {
       errors.push(...validatePointOrVertexRef(constraint.point, segments, entities, constraint.id, "point", featureId));
       // 点↔線距離は0を許可(線上一致として機能、寸法値の符号仕様の明確化、Phase 33)。負は不可。
+      if (!isNonNegativeFiniteNumber(constraint.value)) {
+        errors.push({ featureId, message: `拘束(${constraint.id})の距離は0以上の数である必要があります` });
+      }
+      break;
+    }
+    case "distanceLineOrigin": {
+      // Phase 48b: lineはMovableLineRef(entityEdge/segmentEdge)のみ(refEdgeとの組み合わせは対象外)。
+      errors.push(...validateMovableLineRef(constraint.line, segments, entities, constraint.id, "line", featureId));
+      // 辺↔原点距離もdistancePointLineと同じく0を許可(線上一致)。負は不可。
       if (!isNonNegativeFiniteNumber(constraint.value)) {
         errors.push({ featureId, message: `拘束(${constraint.id})の距離は0以上の数である必要があります` });
       }
