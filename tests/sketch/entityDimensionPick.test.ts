@@ -1,8 +1,9 @@
 // src/sketch/entityDimensionPick.ts の単体テスト(純粋TS、WASM不要)。
 import { describe, expect, it } from "vitest";
 
-import { createCircleEntity, createPolygonEntity, createRectangleEntity } from "../../src/model";
+import { createCircleEntity, createPolygonEntity, createRectangleEntity, createRegularPolygonEntity, createSlotEntity } from "../../src/model";
 import { findEntityDimensionHit } from "../../src/sketch/entityDimensionPick";
+import { regularPolygonVertices } from "../../src/sketch/shapeFromPoints";
 
 describe("findEntityDimensionHit", () => {
   it("円の円周付近をクリックするとentity-radiusがヒットする", () => {
@@ -72,6 +73,44 @@ describe("findEntityDimensionHit", () => {
       ],
     });
     expect(findEntityDimensionHit([0, 0], [polygon])).toBeNull();
+  });
+
+  // ---- Phase 48: 全スケッチ要素の寸法対応(regularPolygon/slotの辺もentity-edgeとしてヒットする) ----
+
+  it("regularPolygon(includePolygon=true)の辺付近をクリックするとentity-edgeがヒットする", () => {
+    const rp = createRegularPolygonEntity({ center: [0, 0], radius: 10, sides: 6 });
+    if (rp.kind !== "regularPolygon") throw new Error("unexpected kind");
+    const verts = regularPolygonVertices(rp.center, rp.radius, rp.sides, rp.rotation ?? 0);
+    // 辺0(頂点0→頂点1)の中点をクリック(必ず辺上、距離ほぼ0)。
+    const mid: [number, number] = [(verts[0][0] + verts[1][0]) / 2, (verts[0][1] + verts[1][1]) / 2];
+    const hit = findEntityDimensionHit(mid, [rp], true);
+    expect(hit).not.toBeNull();
+    expect(hit?.kind).toBe("entity-edge");
+    expect(hit?.entityId).toBe(rp.id);
+    expect(hit?.edgeIndex).toBe(0);
+    expect(hit?.dist).toBeCloseTo(0, 6);
+  });
+
+  it("regularPolygonはincludePolygon省略(false)だと無視される", () => {
+    const rp = createRegularPolygonEntity({ center: [0, 0], radius: 10, sides: 6 });
+    expect(findEntityDimensionHit([10, 0], [rp])).toBeNull();
+  });
+
+  it("slot(includePolygon=true)の直線辺付近をクリックするとentity-edgeがヒットする", () => {
+    const slot = createSlotEntity({ start: [-20, 0], end: [20, 0], width: 10 });
+    // 直線辺(上側、y=+5)の中点付近をクリック。
+    const hit = findEntityDimensionHit([0, 5], [slot], true);
+    expect(hit).not.toBeNull();
+    expect(hit?.kind).toBe("entity-edge");
+    expect(hit?.entityId).toBe(slot.id);
+    expect(hit?.dist).toBeCloseTo(0, 6);
+  });
+
+  it("slotの2本の直線辺はedgeIndex 0/1として区別される", () => {
+    const slot = createSlotEntity({ start: [-20, 0], end: [20, 0], width: 10 });
+    const top = findEntityDimensionHit([0, 5], [slot], true);
+    const bottom = findEntityDimensionHit([0, -5], [slot], true);
+    expect(top?.edgeIndex).not.toBe(bottom?.edgeIndex);
   });
 
   it("円の境界ポリラインは閉じたループ(始点と終点が一致)になる", () => {

@@ -9,10 +9,15 @@ import {
   addTangentSegmentConstraint,
   computeConstraintDimensions,
   distanceBetweenRefs,
+  pointFromRef,
   segmentLength,
   segmentRadius,
   upsertDistanceConstraint,
   upsertDistanceEntityLineConstraint,
+  upsertDistanceLineLineConstraint,
+  upsertDistanceLineRefEdgeConstraint,
+  upsertDistancePointLineConstraint,
+  upsertDistancePointOriginConstraint,
   upsertLengthConstraint,
   upsertRadiusConstraint,
 } from "../../src/sketch/constraintDimensions";
@@ -249,5 +254,120 @@ describe("computeConstraintDimensions", () => {
     expect(dims[0]).toMatchObject({ kind: "seg-length", constraintId: "c1", value: 10, anchor: [5, 0] });
     expect(dims[1].kind).toBe("seg-radius");
     expect(dims[1].value).toBe(5);
+  });
+});
+
+// ---- Phase 48: 全スケッチ要素の寸法対応(EntityVertexRef/MovableLineRef) ----
+describe("pointFromRef(Phase 48: EntityVertexRefにも対応)", () => {
+  const rect: SketchEntity = { kind: "rectangle", id: "r1", center: [10, 20], width: 4, height: 6 };
+  const pointEntity: SketchEntity = { kind: "point", id: "p1", position: [3, 7] };
+
+  it("rectangleの角(vertexIndex0=左下)の座標を返す", () => {
+    const p = pointFromRef([], { entityId: "r1", vertexIndex: 0 }, [rect]);
+    expect(p).toEqual([8, 17]);
+  });
+
+  it("pointエンティティ自体(vertexIndex0)の座標を返す", () => {
+    const p = pointFromRef([], { entityId: "p1", vertexIndex: 0 }, [pointEntity]);
+    expect(p).toEqual([3, 7]);
+  });
+
+  it("従来通りセグメント端点(PointRef)も解決できる(後方互換)", () => {
+    const seg: SketchSegment = { id: "s1", kind: "line", p1: [1, 2], p2: [3, 4] };
+    expect(pointFromRef([seg], { segmentId: "s1", end: "p2" })).toEqual([3, 4]);
+  });
+
+  it("entitiesを渡さない(省略)場合、EntityVertexRefはnullになる(後方互換の既定値)", () => {
+    expect(pointFromRef([], { entityId: "r1", vertexIndex: 0 })).toBeNull();
+  });
+});
+
+describe("upsertDistancePointOriginConstraint/upsertDistancePointLineConstraint(Phase 48: EntityVertexRef)", () => {
+  it("EntityVertexRefに対するdistancePointOrigin拘束を新規作成する", () => {
+    const result = upsertDistancePointOriginConstraint([], { entityId: "r1", vertexIndex: 2 }, 30);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ kind: "distancePointOrigin", point: { entityId: "r1", vertexIndex: 2 }, value: 30 });
+  });
+
+  it("同じEntityVertexRefへの再適用は値だけ差し替える(件数は増えない)", () => {
+    const once = upsertDistancePointOriginConstraint([], { entityId: "r1", vertexIndex: 2 }, 30);
+    const twice = upsertDistancePointOriginConstraint(once, { entityId: "r1", vertexIndex: 2 }, 45);
+    expect(twice).toHaveLength(1);
+    expect(twice[0].value).toBe(45);
+  });
+
+  it("EntityVertexRefに対するdistancePointLine拘束を新規作成する", () => {
+    const line = { kind: "refEdge" as const, p1: [0, 0] as [number, number], p2: [10, 0] as [number, number] };
+    const result = upsertDistancePointLineConstraint([], { entityId: "sl1", vertexIndex: 0 }, line, 15);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ kind: "distancePointLine", point: { entityId: "sl1", vertexIndex: 0 }, line, value: 15 });
+  });
+});
+
+describe("upsertDistanceLineLineConstraint/upsertDistanceLineRefEdgeConstraint(Phase 48: MovableLineRef)", () => {
+  it("entityEdge同士のdistanceLineLine拘束を新規作成する", () => {
+    const a = { kind: "entityEdge" as const, entityId: "r1", edgeIndex: 0 };
+    const b = { kind: "segmentEdge" as const, segmentId: "s1" };
+    const result = upsertDistanceLineLineConstraint([], a, b, 25);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ kind: "distanceLineLine", a, b, value: 25 });
+  });
+
+  it("a/bを逆順で渡しても同じ組み合わせとして値だけ差し替える(既存パターンと同じ対称性)", () => {
+    const a = { kind: "entityEdge" as const, entityId: "r1", edgeIndex: 0 };
+    const b = { kind: "segmentEdge" as const, segmentId: "s1" };
+    const once = upsertDistanceLineLineConstraint([], a, b, 25);
+    const twice = upsertDistanceLineLineConstraint(once, b, a, 40);
+    expect(twice).toHaveLength(1);
+    expect(twice[0].value).toBe(40);
+  });
+
+  it("後方互換: 素の文字列(segmentId)同士でも従来通り動く", () => {
+    const result = upsertDistanceLineLineConstraint([], "s1", "s2", 10);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ kind: "distanceLineLine", a: "s1", b: "s2", value: 10 });
+  });
+
+  it("素の文字列とMovableLineRefの混在も同じ組み合わせとして認識する", () => {
+    const once = upsertDistanceLineLineConstraint([], "s1", { kind: "segmentEdge", segmentId: "s2" }, 10);
+    const twice = upsertDistanceLineLineConstraint(once, { kind: "segmentEdge", segmentId: "s1" }, "s2", 22);
+    expect(twice).toHaveLength(1);
+    expect(twice[0].value).toBe(22);
+  });
+
+  it("entityEdge(rectangle)↔参照エッジのdistanceLineRefEdge拘束を新規作成する", () => {
+    const line = { kind: "refEdge" as const, p1: [0, 0] as [number, number], p2: [10, 0] as [number, number] };
+    const segmentId = { kind: "entityEdge" as const, entityId: "r1", edgeIndex: 2 };
+    const result = upsertDistanceLineRefEdgeConstraint([], segmentId, line, 18);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ kind: "distanceLineRefEdge", segmentId, line, value: 18 });
+  });
+});
+
+describe("computeConstraintDimensions(Phase 48: EntityVertexRef/MovableLineRefを解決する)", () => {
+  it("distancePointOrigin(EntityVertexRef)のアンカーを、entitiesを渡した場合のみ解決する", () => {
+    const rect: SketchEntity = { kind: "rectangle", id: "r1", center: [0, 0], width: 10, height: 10 };
+    const constraints = [{ id: "c1", kind: "distancePointOrigin" as const, point: { entityId: "r1", vertexIndex: 0 }, value: 20 }];
+    expect(computeConstraintDimensions([], constraints, [])).toHaveLength(0); // entitiesが無ければ解決できず無視される。
+    const dims = computeConstraintDimensions([], constraints, [rect]);
+    expect(dims).toHaveLength(1);
+    expect(dims[0]).toMatchObject({ kind: "point-distance-origin", value: 20 });
+  });
+
+  it("distanceLineLine(MovableLineRef、entityEdge)のアンカーを解決する", () => {
+    const rect: SketchEntity = { kind: "rectangle", id: "r1", center: [0, 0], width: 10, height: 10 };
+    const seg: SketchSegment = { id: "s1", kind: "line", p1: [100, 100], p2: [100, 110] };
+    const constraints = [
+      {
+        id: "c1",
+        kind: "distanceLineLine" as const,
+        a: { kind: "entityEdge" as const, entityId: "r1", edgeIndex: 0 },
+        b: { kind: "segmentEdge" as const, segmentId: "s1" },
+        value: 5,
+      },
+    ];
+    const dims = computeConstraintDimensions([seg], constraints, [rect]);
+    expect(dims).toHaveLength(1);
+    expect(dims[0].kind).toBe("seg-distance-line-line");
   });
 });
