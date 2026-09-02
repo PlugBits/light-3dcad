@@ -113,6 +113,21 @@ export type PointRef = { segmentId: string; end: "p1" | "p2" };
 export type EntityRef = { entityId: string };
 
 /**
+ * entities配列内の1エンティティの「頂点」(角/端点)を指す参照(Phase 48、全スケッチ要素の
+ * 寸法対応)。vertexIndexの意味はエンティティのkind次第(src/sketch/entityEdges.tsの
+ * entityVertexPoint()が実際の解決を担う。このファイルはドキュメントの型定義のみ):
+ * - rectangle: 0=左下/1=右下/2=右上/3=左上(entityEdgeのcorners配列と同じ順序)
+ * - polygon/regularPolygon: points[i]/頂点i(0始まり)
+ * - slot: 0=中心線の始点(始端キャップの中心)/1=中心線の終点(終端キャップの中心)
+ * - point: 0=そのpositionそのもの(1点しか無いが、EntityRefと構造的に区別するためvertexIndex:0を必須にする)
+ * - circle: 対象外(中心はEntityRefで直接指せるため頂点の概念を持たない)
+ * PointRef(セグメント端点)と同様、"distance"・"distancePointOrigin"・"distancePointLine"・
+ * "coincidentOrigin"のpoint/a/bフィールドがこの型も受け付けるようになった(後方互換: 既存データは
+ * 全てPointRefのみなので影響なし)。EntityRef(entityIdのみ)との判別は"vertexIndex"の有無で行う。
+ */
+export type EntityVertexRef = { entityId: string; vertexIndex: number };
+
+/**
  * segments内の円弧セグメント(kind:"arc"かつbulgeが非0)を指す参照(Phase 42b、円弧の一級化)。
  * EntityRef({entityId})と構造的に区別できるよう、あえてsegmentIdのみを持つ最小形にする
  * (`"entityId" in ref`で判別する既存の慣習[coincidentOriginのpoint等]と同じ設計)。
@@ -140,6 +155,14 @@ export type LineRef =
   | { kind: "refEdge"; p1: [number, number]; p2: [number, number] };
 
 /**
+ * LineRefのうち「動きうる」2種(entityEdge/segmentEdge、refEdgeを除く、Phase 48)。
+ * distanceLineLine/angleLineLine/distanceLineRefEdge/angleLineRefEdgeのa/segmentIdフィールドが、
+ * 従来の「自由な線分のsegmentIdのみ」から「rectangle/polygon/regularPolygon/slotの辺(entityEdge)も
+ * 指定できる」ように拡張された(矩形の辺を基準エッジ/他の線から選べない、というユーザー報告対応)。
+ */
+export type MovableLineRef = Extract<LineRef, { kind: "entityEdge" | "segmentEdge" }>;
+
+/**
  * スケッチ拘束(Phase 20a、寸法ドリブン編集[Phase 20b]の土台)。座標系はSketchSegmentと同じく
  * スケッチのローカル2D(mm)。src/sketch/solver.ts の solveSketch() がこの配列を解として満たす
  * segments(端点座標)・circleエンティティの中心座標を求める(coincidentでの端点マージは行わず、
@@ -162,7 +185,11 @@ export type SketchConstraint =
    * 絶対値(常に非負のvalueを維持する挙動)のまま解釈する。axis:"direct"のときはsignedの影響を受けない
    * (直線距離は常に非負)。
    */
-  | { id: string; kind: "distance"; a: PointRef; b: PointRef; value: number; axis?: "direct" | "x" | "y"; signed?: boolean; labelOffset?: [number, number] }
+  /**
+   * a/b(Phase 48拡張): PointRef(セグメント端点)に加え、EntityVertexRef(rectangle/polygon/
+   * regularPolygon/slot/pointエンティティの頂点)も指定できる(後方互換: 既存データは全てPointRef)。
+   */
+  | { id: string; kind: "distance"; a: PointRef | EntityVertexRef; b: PointRef | EntityVertexRef; value: number; axis?: "direct" | "x" | "y"; signed?: boolean; labelOffset?: [number, number] }
   /**
    * kind:"arc" のセグメントにのみ指定できる半径拘束(mm)。Phase 42bで円弧がPlaneGCSの
    * ネイティブarcプリミティ(中心・半径・start/end角が実変数)になったため、この拘束は
@@ -211,7 +238,8 @@ export type SketchConstraint =
   | {
       id: string;
       kind: "distancePointOrigin";
-      point: PointRef;
+      /** Phase 48拡張: PointRefに加えEntityVertexRef(entityの頂点)も指定できる(後方互換)。 */
+      point: PointRef | EntityVertexRef;
       value: number;
       originLocal?: [number, number];
       axis?: "direct" | "x" | "y";
@@ -225,7 +253,7 @@ export type SketchConstraint =
    * (x,y、fix/fixEntityと似るが目標値が「作成時点の位置」ではなく常に原点である点が異なる)。
    * 原点の定義・originLocalスナップショットの扱いはdistanceEntityOriginと同一。
    */
-  | { id: string; kind: "coincidentOrigin"; point: PointRef | EntityRef; originLocal?: [number, number] }
+  | { id: string; kind: "coincidentOrigin"; point: PointRef | EntityRef | EntityVertexRef; originLocal?: [number, number] }
   /**
    * circleエンティティの中心↔中心の距離(mm、Phase 22)。axis(UI改善対応、省略=direct・後方互換)は
    * "x"/"y"のときそれぞれcx_b-cx_a/cy_b-cy_aのみを距離として扱う(中心間の直線距離ではなく、
@@ -253,7 +281,8 @@ export type SketchConstraint =
    * 挙動の要: 端点に接続する線分に長さ拘束が無ければ線分が伸びて距離を満たし、長さ拘束があれば
    * (端点間距離が固定されるため)線分ごと平行移動する(ソルバの自然な帰結、特別な実装は無い)。
    */
-  | { id: string; kind: "distancePointLine"; point: PointRef; line: LineRef; value: number; labelOffset?: [number, number] }
+  /** point(Phase 48拡張): PointRefに加えEntityVertexRef(entityの頂点)も指定できる(後方互換)。 */
+  | { id: string; kind: "distancePointLine"; point: PointRef | EntityVertexRef; line: LineRef; value: number; labelOffset?: [number, number] }
   /** circleエンティティの中心を(拘束追加時点の)現在位置に固定する(Phase 22、固定トグル)。 */
   | { id: string; kind: "fixEntity"; entity: EntityRef }
   /**
@@ -304,25 +333,37 @@ export type SketchConstraint =
    * 残差は線分aの両端点それぞれから線分bの無限直線への符号付き垂直距離−value(2残差)。
    * これにより平行(両端点が同じ距離になる)と距離が同時に拘束される。
    */
-  | { id: string; kind: "distanceLineLine"; a: string; b: string; value: number; labelOffset?: [number, number] }
+  /**
+   * a/b(Phase 48拡張): 自由な線分のsegmentId(旧データ、後方互換の素の文字列)に加え、
+   * MovableLineRef(entityEdge/segmentEdge)も指定できる。素の文字列は`{kind:"segmentEdge",segmentId:a}`
+   * と同じ意味として扱う(src/sketch/entityEdges.tsのnormalizeMovableLineRef参照)。
+   */
+  | { id: string; kind: "distanceLineLine"; a: string | MovableLineRef; b: string | MovableLineRef; value: number; labelOffset?: [number, number] }
   /**
    * 2本の直線セグメント(kind:"line"のみ対象)が非平行なときの、方向のなす角拘束(度、Phase 24)。
    * 残差は方向ベクトルのなす角(atan2ベース、0〜180度)−value。
    */
-  | { id: string; kind: "angleLineLine"; a: string; b: string; value: number; labelOffset?: [number, number] }
+  /** a/b(Phase 48拡張): distanceLineLineのa/bと同じ意味(素の文字列=segmentEdgeの後方互換)。 */
+  | { id: string; kind: "angleLineLine"; a: string | MovableLineRef; b: string | MovableLineRef; value: number; labelOffset?: [number, number] }
   /**
    * 直線セグメント(kind:"line")↔参照エッジ(既存ボディの辺、動かない)の平行距離拘束(Phase 24)。
    * distanceLineLineと同形だが、b側がsegmentIdではなくLineRef(常に"refEdge"、ピック時点の
    * スナップショット)である点のみが異なる。残差はsegmentの両端点それぞれからlineへの
    * 符号付き垂直距離−value(2残差、平行化と距離を同時に拘束する)。
    */
-  | { id: string; kind: "distanceLineRefEdge"; segmentId: string; line: LineRef; value: number }
+  /**
+   * segmentId(Phase 48拡張): 従来の自由な線分のsegmentId(素の文字列、後方互換)に加え、
+   * MovableLineRef(rectangle/polygon/regularPolygon/slotの辺)も指定できる(フィールド名は
+   * 既存データとの後方互換のためsegmentIdのまま維持。値がstringなら`{kind:"segmentEdge",segmentId}`
+   * と同じ意味)。
+   */
+  | { id: string; kind: "distanceLineRefEdge"; segmentId: string | MovableLineRef; line: LineRef; value: number }
   /**
    * 直線セグメント(kind:"line")↔参照エッジの、方向のなす角拘束(度、Phase 24)。angleLineLineと
    * 同形だが、b側がLineRef(固定)である点のみが異なる。残差はsegmentの方向ベクトルとlineの
-   * 方向ベクトルのなす角(0〜180度)−value。
+   * 方向ベクトルのなす角(0〜180度)−value。segmentId(Phase 48拡張)はdistanceLineRefEdgeと同じ意味。
    */
-  | { id: string; kind: "angleLineRefEdge"; segmentId: string; line: LineRef; value: number };
+  | { id: string; kind: "angleLineRefEdge"; segmentId: string | MovableLineRef; line: LineRef; value: number };
 
 /**
  * 2Dスケッチフィーチャー。
