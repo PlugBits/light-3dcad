@@ -15,6 +15,7 @@ import {
   upsertDistanceConstraint,
   upsertDistanceEntityLineConstraint,
   upsertDistanceLineLineConstraint,
+  upsertDistanceLineOriginConstraint,
   upsertDistanceLineRefEdgeConstraint,
   upsertDistancePointLineConstraint,
   upsertDistancePointOriginConstraint,
@@ -344,6 +345,33 @@ describe("upsertDistanceLineLineConstraint/upsertDistanceLineRefEdgeConstraint(P
   });
 });
 
+describe("upsertDistanceLineOriginConstraint(Phase 48b: 辺↔原点の寸法)", () => {
+  it("entityEdgeに対するdistanceLineOrigin拘束を新規作成する", () => {
+    const line = { kind: "entityEdge" as const, entityId: "r1", edgeIndex: 0 };
+    const result = upsertDistanceLineOriginConstraint([], line, 12, [0, 0]);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ kind: "distanceLineOrigin", line, value: 12, originLocal: [0, 0] });
+  });
+
+  it("同じ辺への再適用は値だけ差し替える(件数は増えない、辺→原点/原点→辺どちらの選択順でも同じ結果になる)", () => {
+    const line = { kind: "segmentEdge" as const, segmentId: "s1" };
+    // 原点→辺の順でクリックしても、辺→原点の順でクリックしても、CadViewer側は同じ
+    // {kind:"line-distance-origin", line}ターゲットを発行する(原点は動かないため対称)。
+    // ここではupsert呼び出しの冪等性(同じlineへの2回目適用は更新のみ)としてそれを検証する。
+    const once = upsertDistanceLineOriginConstraint([], line, 12);
+    const twice = upsertDistanceLineOriginConstraint(once, line, 30);
+    expect(twice).toHaveLength(1);
+    expect(twice[0].value).toBe(30);
+  });
+
+  it("後方互換の無いMovableLineRef同士でも辺の種別(entityEdge/segmentEdge)が違えば別の拘束として追加する", () => {
+    const a = { kind: "entityEdge" as const, entityId: "r1", edgeIndex: 0 };
+    const b = { kind: "segmentEdge" as const, segmentId: "s1" };
+    const result = upsertDistanceLineOriginConstraint(upsertDistanceLineOriginConstraint([], a, 10), b, 20);
+    expect(result).toHaveLength(2);
+  });
+});
+
 describe("computeConstraintDimensions(Phase 48: EntityVertexRef/MovableLineRefを解決する)", () => {
   it("distancePointOrigin(EntityVertexRef)のアンカーを、entitiesを渡した場合のみ解決する", () => {
     const rect: SketchEntity = { kind: "rectangle", id: "r1", center: [0, 0], width: 10, height: 10 };
@@ -369,5 +397,15 @@ describe("computeConstraintDimensions(Phase 48: EntityVertexRef/MovableLineRef�
     const dims = computeConstraintDimensions([seg], constraints, [rect]);
     expect(dims).toHaveLength(1);
     expect(dims[0].kind).toBe("seg-distance-line-line");
+  });
+
+  it("distanceLineOrigin(entityEdge、Phase 48b)のアンカー・origin座標を解決する", () => {
+    const rect: SketchEntity = { kind: "rectangle", id: "r1", center: [0, 0], width: 10, height: 10 };
+    const constraints = [
+      { id: "c1", kind: "distanceLineOrigin" as const, line: { kind: "entityEdge" as const, entityId: "r1", edgeIndex: 0 }, value: 5 },
+    ];
+    const dims = computeConstraintDimensions([], constraints, [rect]);
+    expect(dims).toHaveLength(1);
+    expect(dims[0]).toMatchObject({ kind: "line-distance-origin", value: 5, origin: [0, 0] });
   });
 });

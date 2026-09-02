@@ -2021,3 +2021,77 @@ describe("solveSketch 全スケッチ要素の寸法対応(entityVertex/MovableL
     expect(result.conflicting).toBe(true);
   });
 });
+
+describe("solveSketch 辺↔原点の寸法(distanceLineOrigin、Phase 48b)", () => {
+  function rectangle(id: string, center: [number, number], width: number, height: number): Extract<SketchEntity, { kind: "rectangle" }> {
+    return { kind: "rectangle", id, center, width, height };
+  }
+  function slot(id: string, start: [number, number], end: [number, number], width: number): Extract<SketchEntity, { kind: "slot" }> {
+    return { kind: "slot", id, start, end, width };
+  }
+
+  it("① rectangle: 下辺(entityEdge)↔原点のdistanceLineOriginで中心が動く(width/heightは不変)", () => {
+    const r = rectangle("r1", [0, 0], 20, 10);
+    // edgeIndex0=下辺(y=center-height/2=-5)。原点[0,0]からの垂直距離を30に指定。
+    const constraints: SketchConstraint[] = [
+      { id: "d1", kind: "distanceLineOrigin", line: { kind: "entityEdge", entityId: "r1", edgeIndex: 0 }, value: 30 },
+    ];
+    const result = solveSketch([], constraints, [r]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.entities[0];
+    if (out.kind !== "rectangle") throw new Error("unexpected kind");
+    expect(out.width).toBe(20);
+    expect(out.height).toBe(10);
+    const bottomY = out.center[1] - out.height / 2;
+    expect(Math.abs(bottomY)).toBeCloseTo(30, 3);
+  });
+
+  it("② slot: 直線辺(edgeIndex 0)↔原点のdistanceLineOriginでスロット全体が並進する(幅・向きは不変)", () => {
+    const s = slot("sl1", [0, 0], [30, 0], 8);
+    // edgeIndex0の直線辺はcenterline法線方向+width/2側(始点[0,0]でy=+4)。原点からの垂直距離を50に指定。
+    // slotは代表点が並進オフセットのみ(回転DOF無し)なので、辺は解いた後も中心線と平行(水平)のまま。
+    const constraints: SketchConstraint[] = [
+      { id: "d1", kind: "distanceLineOrigin", line: { kind: "entityEdge", entityId: "sl1", edgeIndex: 0 }, value: 50 },
+    ];
+    const result = solveSketch([], constraints, [s]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.entities[0];
+    if (out.kind !== "slot") throw new Error("unexpected kind");
+    expect(dist(out.start, out.end)).toBeCloseTo(30, 3);
+    expect(out.width).toBe(8);
+    expect(Math.abs(out.start[1] - out.end[1])).toBeCloseTo(0, 3); // 水平のまま(回転していない)
+    const edgeY = out.start[1] + out.width / 2; // edgeIndex0の直線辺のy座標(法線[0,1]方向)
+    expect(Math.abs(edgeY)).toBeCloseTo(50, 3);
+  });
+
+  it("③ segmentEdge: 自由な線分(vertical拘束付き)↔原点のdistanceLineOriginで線分が平行移動する", () => {
+    // vertical拘束(自由な線分は元々2端点とも自由変数のため、無ければ回転しつつ解けてしまい
+    // 位置が一意に定まらない。③dのdistanceEntityLine[segmentEdge]と同じ理由でvertical拘束を添える)。
+    const seg: SketchSegment = { id: "s1", kind: "line", p1: [10, -10], p2: [10, 10] };
+    const constraints: SketchConstraint[] = [
+      { id: "vert", kind: "vertical", segmentId: "s1" },
+      { id: "d1", kind: "distanceLineOrigin", line: { kind: "segmentEdge", segmentId: "s1" }, value: 40 },
+    ];
+    const result = solveSketch([seg], constraints, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.segments[0];
+    expect(Math.abs(out.p1[0])).toBeCloseTo(40, 3);
+    expect(Math.abs(out.p2[0])).toBeCloseTo(40, 3);
+    expect(Math.abs(out.p1[1] - out.p2[1])).toBeCloseTo(20, 3);
+  });
+
+  it("④ 矛盾検出: rectangleを固定した状態でdistanceLineOriginが矛盾すれば検出する", () => {
+    const r = rectangle("r1", [0, 0], 20, 10);
+    const constraints: SketchConstraint[] = [
+      { id: "fixr", kind: "fixEntity", entity: { entityId: "r1" } },
+      { id: "d1", kind: "distanceLineOrigin", line: { kind: "entityEdge", entityId: "r1", edgeIndex: 0 }, value: 12345 },
+    ];
+    const result = solveSketch([], constraints, [r]);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.conflicting).toBe(true);
+  });
+});

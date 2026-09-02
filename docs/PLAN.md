@@ -1211,3 +1211,7 @@ slot/pointの頂点・辺(regularPolygon/slotはentityEdge自体が未対応だ�
 一貫対応させた。constraint tool(垂直/同心/接線)は今回スコープ外(セグメント/circleのまま)。
 gate結果: tsc(app/e2e両方)エラーなし、Vitest 728→768件通過+1skip、UIバンドルgzip266.4KB
 (+1.3KB、上限350KB内)、E2E 56→58件全通過(3分割でBash実行、entity-dimension.spec.ts新設)。
+
+## Phase 48b: 辺↔原点の寸法+文言修正
+
+distanceLineOrigin拘束(MovableLineRef↔原点のp2l_distance、distanceEntityOriginの原点スナップショットとdistanceEntityLine/distancePointLineのline解決を組み合わせ)を新設して寸法ツールの原点との組み合わせを円/端点に加え辺(rectangle/polygon/regularPolygon/slotの辺・自由な線分)にも拡張し、寸法ツールの各pending状態ステータス文言をPhase 48/48bの対象拡大に合わせて修正した。gate結果: tsc(app/e2e両方)エラーなし、Vitest 768→782件通過+1skip、UIバンドルgzip266.8KB(+0.4KB、上限350KB内)、E2E 58→59件全通過(3分割でBash実行)。

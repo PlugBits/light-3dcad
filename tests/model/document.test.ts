@@ -702,6 +702,38 @@ describe("validateFeature / validateDocument", () => {
       const errors = validateFeature(feature, [feature]);
       expect(errors.some((e) => e.message.includes("見つかりません"))).toBe(true);
     });
+
+    it("distanceLineOrigin(Phase 48b)は正しいsegmentEdge参照・0以上の値ならエラーなし", () => {
+      const feature = sketchWithSegmentsAndConstraints([
+        { id: "c1", kind: "distanceLineOrigin", line: { kind: "segmentEdge", segmentId: "line1" }, value: 0 },
+      ]);
+      expect(validateFeature(feature, [feature])).toEqual([]);
+    });
+
+    it("distanceLineOriginの参照先segmentIdが存在しないとエラー", () => {
+      const feature = sketchWithSegmentsAndConstraints([
+        { id: "c1", kind: "distanceLineOrigin", line: { kind: "segmentEdge", segmentId: "missing" }, value: 10 },
+      ]);
+      const errors = validateFeature(feature, [feature]);
+      expect(errors.some((e) => e.message.includes("見つかりません"))).toBe(true);
+    });
+
+    it("distanceLineOriginの値が負だとエラー", () => {
+      const feature = sketchWithSegmentsAndConstraints([
+        { id: "c1", kind: "distanceLineOrigin", line: { kind: "segmentEdge", segmentId: "line1" }, value: -1 },
+      ]);
+      const errors = validateFeature(feature, [feature]);
+      expect(errors.some((e) => e.message.includes("距離は0以上"))).toBe(true);
+    });
+
+    it("distanceLineOriginは.l3dcadのJSON往復(シリアライズ/デシリアライズ)後も値を保つ", () => {
+      const feature = sketchWithSegmentsAndConstraints([
+        { id: "c1", kind: "distanceLineOrigin", line: { kind: "segmentEdge", segmentId: "line1" }, value: 12.5, originLocal: [1, 2] },
+      ]);
+      const roundTripped = JSON.parse(JSON.stringify(feature)) as SketchFeature;
+      expect(roundTripped.constraints).toEqual(feature.constraints);
+      expect(validateFeature(roundTripped, [roundTripped])).toEqual([]);
+    });
   });
 
   describe("多角形の頂点コーナー(fillet/chamfer、Phase 11)", () => {

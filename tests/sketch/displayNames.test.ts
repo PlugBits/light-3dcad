@@ -68,6 +68,22 @@ describe("describeConstraint(Phase 48: entityの頂点・辺の表示名)", () =
     expect(describeConstraint([], [rect], c)).toContain("矩形1の下辺");
   });
 
+  it("矩形の辺↔原点はdistanceLineOrigin(Phase 48b)で「原点 ↔ 矩形1の下辺 = 12mm」と表示される", () => {
+    const c: SketchConstraint = {
+      id: "c1",
+      kind: "distanceLineOrigin",
+      line: { kind: "entityEdge", entityId: "r1", edgeIndex: 0 },
+      value: 12,
+    };
+    expect(describeConstraint([], [rect], c)).toBe("原点 ↔ 矩形1の下辺 = 12mm");
+  });
+
+  it("自由な線分↔原点のdistanceLineOrigin(segmentEdge)は線分名で表示される", () => {
+    const seg: SketchSegment = { id: "s1", kind: "line", p1: [0, 0], p2: [10, 0] };
+    const c: SketchConstraint = { id: "c1", kind: "distanceLineOrigin", line: { kind: "segmentEdge", segmentId: "s1" }, value: 8 };
+    expect(describeConstraint([seg], [], c)).toContain("原点 ↔ 線分1");
+  });
+
   it("矩形の辺同士のdistanceLineLine(MovableLineRef)は両辺の名前を表示する", () => {
     const other: SketchEntity = { kind: "rectangle", id: "r2", center: [100, 100], width: 5, height: 5 };
     const c: SketchConstraint = {
