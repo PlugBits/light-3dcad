@@ -8,14 +8,15 @@
 //    作るcomputeConstraintDimensions()(src/sketch/dimensions.tsのcomputeSketchDimensions()と対になる、
 //    entities由来ではなくconstraints/segments由来のラベル一覧)。
 import { generateId } from "../model/id";
-import type { ArcRef, EntityRef, LineRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
+import type { ArcRef, EntityRef, EntityVertexRef, LineRef, MovableLineRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
 import { arcGeometryFromBulge } from "./bulge";
-import { resolveLineRefPoints, sameLineRef } from "./entityEdges";
+import { normalizeMovableLineRef, resolveLineRefPoints, resolvePointOrVertexRefPoint, sameLineRef, sameMovableLineRef, samePointOrVertexRef } from "./entityEdges";
 
 /** point(PointRef)とentity(EntityRef)を判別するタイプガード(coincidentOrigin拘束のpointフィールド、追加項目)。 */
 function isPointRef(ref: PointRef | EntityRef): ref is PointRef {
   return "segmentId" in ref;
 }
+
 
 /** EntityRef(circleエンティティ)とArcRef(円弧セグメント)を判別するタイプガード(Phase 42b、concentric/tangent)。 */
 function isArcCurveRef(ref: EntityRef | ArcRef): ref is ArcRef {
@@ -37,11 +38,16 @@ function findSegment(segments: readonly SketchSegment[], segmentId: string): Ske
   return segments.find((s) => s.id === segmentId);
 }
 
-/** PointRefの現在座標を返す(参照先セグメントが見つからなければnull)。 */
-export function pointFromRef(segments: readonly SketchSegment[], ref: PointRef): Point2 | null {
-  const seg = findSegment(segments, ref.segmentId);
-  if (!seg) return null;
-  return ref.end === "p1" ? seg.p1 : seg.p2;
+/**
+ * PointRef、またはEntityVertexRef(entityの頂点、Phase 48)の現在座標を返す(参照先が見つからなければnull)。
+ * entities(Phase 48で追加、省略可・後方互換=[])はEntityVertexRefの解決にのみ使う。
+ */
+export function pointFromRef(
+  segments: readonly SketchSegment[],
+  ref: PointRef | EntityVertexRef,
+  entities: readonly SketchEntity[] = [],
+): Point2 | null {
+  return resolvePointOrVertexRefPoint(ref, entities, segments);
 }
 
 /** セグメントの端点間ユークリッド距離(mm、寸法ツールの初期値・length拘束の値と同じ定義)。 */
@@ -56,10 +62,18 @@ export function segmentRadius(segment: SketchSegment): number | null {
   return geo ? geo.radius : null;
 }
 
-/** 2つのPointRef間の現在の距離(mm)。参照先セグメントが見つからない場合はnull。 */
-export function distanceBetweenRefs(segments: readonly SketchSegment[], a: PointRef, b: PointRef): number | null {
-  const pa = pointFromRef(segments, a);
-  const pb = pointFromRef(segments, b);
+/**
+ * 2つのPointRef|EntityVertexRef間の現在の距離(mm、Phase 48でEntityVertexRefにも対応)。
+ * 参照先が見つからない場合はnull。
+ */
+export function distanceBetweenRefs(
+  segments: readonly SketchSegment[],
+  a: PointRef | EntityVertexRef,
+  b: PointRef | EntityVertexRef,
+  entities: readonly SketchEntity[] = [],
+): number | null {
+  const pa = pointFromRef(segments, a, entities);
+  const pb = pointFromRef(segments, b, entities);
   if (!pa || !pb) return null;
   return Math.hypot(pb[0] - pa[0], pb[1] - pa[1]);
 }
@@ -86,13 +100,16 @@ export function describeAxisDistanceConflict(a: Point2, b: Point2, value: number
   return `${axisLabel}方向の位置が${required.toFixed(1)}mmに拘束されているため直線距離は${required.toFixed(1)}mm以上が必要です。${otherLabel}距離指定も使えます`;
 }
 
-function samePointRef(a: PointRef, b: PointRef): boolean {
-  return a.segmentId === b.segmentId && a.end === b.end;
-}
-
-function sameDistancePair(constraint: SketchConstraint, a: PointRef, b: PointRef): constraint is Extract<SketchConstraint, { kind: "distance" }> {
+function sameDistancePair(
+  constraint: SketchConstraint,
+  a: PointRef | EntityVertexRef,
+  b: PointRef | EntityVertexRef,
+): constraint is Extract<SketchConstraint, { kind: "distance" }> {
   if (constraint.kind !== "distance") return false;
-  return (samePointRef(constraint.a, a) && samePointRef(constraint.b, b)) || (samePointRef(constraint.a, b) && samePointRef(constraint.b, a));
+  return (
+    (samePointOrVertexRef(constraint.a, a) && samePointOrVertexRef(constraint.b, b)) ||
+    (samePointOrVertexRef(constraint.a, b) && samePointOrVertexRef(constraint.b, a))
+  );
 }
 
 /** segmentIdへのlength拘束を追加/更新する(既存があれば値だけ差し替え、無ければ新規作成)。 */
@@ -127,8 +144,8 @@ export function upsertRadiusConstraint(constraints: readonly SketchConstraint[],
  */
 export function upsertDistanceConstraint(
   constraints: readonly SketchConstraint[],
-  a: PointRef,
-  b: PointRef,
+  a: PointRef | EntityVertexRef,
+  b: PointRef | EntityVertexRef,
   value: number,
   axis?: "direct" | "x" | "y",
 ): SketchConstraint[] {
@@ -184,12 +201,12 @@ export function upsertDistanceEntityOriginConstraint(
  */
 export function upsertDistancePointOriginConstraint(
   constraints: readonly SketchConstraint[],
-  point: PointRef,
+  point: PointRef | EntityVertexRef,
   value: number,
   originLocal?: [number, number],
   axis?: "direct" | "x" | "y",
 ): SketchConstraint[] {
-  const idx = constraints.findIndex((c) => c.kind === "distancePointOrigin" && samePointRef(c.point, point));
+  const idx = constraints.findIndex((c) => c.kind === "distancePointOrigin" && samePointOrVertexRef(c.point, point));
   if (idx >= 0) {
     const next = constraints.slice();
     next[idx] = { ...next[idx], value, axis, ...(originLocal ? { originLocal } : {}) } as SketchConstraint;
@@ -204,13 +221,19 @@ export function upsertDistancePointOriginConstraint(
  */
 export function addCoincidentOriginConstraint(
   constraints: readonly SketchConstraint[],
-  point: PointRef | EntityRef,
+  point: PointRef | EntityRef | EntityVertexRef,
   originLocal?: [number, number],
 ): SketchConstraint[] {
+  // Phase 48: pointはPointRef|EntityRef(既存)に加えEntityVertexRef(entityの頂点)も指定できる。
+  // EntityRef・EntityVertexRefはどちらも"entityId"を持つため"vertexIndex"の有無で判別する。
+  const kindOf = (p: PointRef | EntityRef | EntityVertexRef): "point" | "vertex" | "entity" =>
+    isPointRef(p as PointRef | EntityRef) ? "point" : "vertexIndex" in p ? "vertex" : "entity";
+  const pointKind = kindOf(point);
   const exists = constraints.some((c) => {
     if (c.kind !== "coincidentOrigin") return false;
-    if (isPointRef(point) !== isPointRef(c.point)) return false;
-    return isPointRef(point) && isPointRef(c.point) ? samePointRef(c.point, point) : (c.point as EntityRef).entityId === (point as EntityRef).entityId;
+    if (kindOf(c.point) !== pointKind) return false;
+    if (pointKind === "entity") return (c.point as EntityRef).entityId === (point as EntityRef).entityId;
+    return samePointOrVertexRef(c.point as PointRef | EntityVertexRef, point as PointRef | EntityVertexRef);
   });
   if (exists) return constraints.slice();
   return [...constraints, { id: generateId("constraint"), kind: "coincidentOrigin", point, originLocal }];
@@ -273,12 +296,12 @@ export function upsertDistanceEntityLineConstraint(
  */
 export function upsertDistancePointLineConstraint(
   constraints: readonly SketchConstraint[],
-  point: PointRef,
+  point: PointRef | EntityVertexRef,
   line: LineRef,
   value: number,
 ): SketchConstraint[] {
   const idx = constraints.findIndex(
-    (c) => c.kind === "distancePointLine" && samePointRef(c.point, point) && sameLineRef(c.line, line),
+    (c) => c.kind === "distancePointLine" && samePointOrVertexRef(c.point, point) && sameLineRef(c.line, line),
   );
   if (idx >= 0) {
     const next = constraints.slice();
@@ -466,41 +489,49 @@ export function addTangentEntityConstraint(
 // どちらのkindになるかは呼び出し側(CadViewer/App)が方向ベクトルから判定して選ぶ想定で、
 // このモジュールはkindに応じたupsertのみを提供する(既存があれば値だけ差し替え)。
 
-function sameSegmentPair(constraint: SketchConstraint, kind: "distanceLineLine" | "angleLineLine", a: string, b: string): boolean {
+function sameSegmentPair(
+  constraint: SketchConstraint,
+  kind: "distanceLineLine" | "angleLineLine",
+  a: string | MovableLineRef,
+  b: string | MovableLineRef,
+): boolean {
   if (constraint.kind !== kind) return false;
-  return (constraint.a === a && constraint.b === b) || (constraint.a === b && constraint.b === a);
+  return (sameMovableLineRef(constraint.a, a) && sameMovableLineRef(constraint.b, b)) || (sameMovableLineRef(constraint.a, b) && sameMovableLineRef(constraint.b, a));
 }
 
-/** 2直線セグメントのdistanceLineLine拘束(平行距離)を追加/更新する。 */
+/**
+ * 2直線(自由な線分のsegmentId、またはrectangle/polygon/regularPolygon/slotの辺=MovableLineRef、
+ * Phase 48拡張)のdistanceLineLine拘束(平行距離)を追加/更新する。
+ */
 export function upsertDistanceLineLineConstraint(
   constraints: readonly SketchConstraint[],
-  segmentIdA: string,
-  segmentIdB: string,
+  a: string | MovableLineRef,
+  b: string | MovableLineRef,
   value: number,
 ): SketchConstraint[] {
-  const idx = constraints.findIndex((c) => sameSegmentPair(c, "distanceLineLine", segmentIdA, segmentIdB));
+  const idx = constraints.findIndex((c) => sameSegmentPair(c, "distanceLineLine", a, b));
   if (idx >= 0) {
     const next = constraints.slice();
     next[idx] = { ...next[idx], value } as SketchConstraint;
     return next;
   }
-  return [...constraints, { id: generateId("constraint"), kind: "distanceLineLine", a: segmentIdA, b: segmentIdB, value }];
+  return [...constraints, { id: generateId("constraint"), kind: "distanceLineLine", a, b, value }];
 }
 
-/** 2直線セグメントのangleLineLine拘束(方向のなす角、度)を追加/更新する。 */
+/** 2直線(Phase 48拡張、upsertDistanceLineLineConstraintと同じ対象)のangleLineLine拘束(方向のなす角、度)を追加/更新する。 */
 export function upsertAngleLineLineConstraint(
   constraints: readonly SketchConstraint[],
-  segmentIdA: string,
-  segmentIdB: string,
+  a: string | MovableLineRef,
+  b: string | MovableLineRef,
   value: number,
 ): SketchConstraint[] {
-  const idx = constraints.findIndex((c) => sameSegmentPair(c, "angleLineLine", segmentIdA, segmentIdB));
+  const idx = constraints.findIndex((c) => sameSegmentPair(c, "angleLineLine", a, b));
   if (idx >= 0) {
     const next = constraints.slice();
     next[idx] = { ...next[idx], value } as SketchConstraint;
     return next;
   }
-  return [...constraints, { id: generateId("constraint"), kind: "angleLineLine", a: segmentIdA, b: segmentIdB, value }];
+  return [...constraints, { id: generateId("constraint"), kind: "angleLineLine", a, b, value }];
 }
 
 // ---- 線分↔参照エッジの寸法(Phase 24項目2: 寸法ツールの2点目として参照エッジも選べるように) ----
@@ -509,17 +540,20 @@ export function upsertAngleLineLineConstraint(
 function sameSegmentLinePair(
   constraint: SketchConstraint,
   kind: "distanceLineRefEdge" | "angleLineRefEdge",
-  segmentId: string,
+  segmentId: string | MovableLineRef,
   line: LineRef,
 ): boolean {
   if (constraint.kind !== kind) return false;
-  return constraint.segmentId === segmentId && sameLineRef(constraint.line, line);
+  return sameMovableLineRef(constraint.segmentId, segmentId) && sameLineRef(constraint.line, line);
 }
 
-/** 直線セグメント↔参照エッジのdistanceLineRefEdge拘束(平行距離)を追加/更新する。 */
+/**
+ * 直線(自由な線分のsegmentId、またはrectangle/polygon/regularPolygon/slotの辺=MovableLineRef、
+ * Phase 48拡張)↔参照エッジのdistanceLineRefEdge拘束(平行距離)を追加/更新する。
+ */
 export function upsertDistanceLineRefEdgeConstraint(
   constraints: readonly SketchConstraint[],
-  segmentId: string,
+  segmentId: string | MovableLineRef,
   line: LineRef,
   value: number,
 ): SketchConstraint[] {
@@ -532,10 +566,10 @@ export function upsertDistanceLineRefEdgeConstraint(
   return [...constraints, { id: generateId("constraint"), kind: "distanceLineRefEdge", segmentId, line, value }];
 }
 
-/** 直線セグメント↔参照エッジのangleLineRefEdge拘束(方向のなす角、度)を追加/更新する。 */
+/** 直線(Phase 48拡張、upsertDistanceLineRefEdgeConstraintと同じ対象)↔参照エッジのangleLineRefEdge拘束(方向のなす角、度)を追加/更新する。 */
 export function upsertAngleLineRefEdgeConstraint(
   constraints: readonly SketchConstraint[],
-  segmentId: string,
+  segmentId: string | MovableLineRef,
   line: LineRef,
   value: number,
 ): SketchConstraint[] {
@@ -571,10 +605,19 @@ export function angleBetweenSegments(a: SketchSegment, b: SketchSegment): number
  * (line-refedgeターゲットの初期値計算、Phase 24)。
  */
 export function angleBetweenSegmentAndLine(seg: SketchSegment, lineP1: Point2, lineP2: Point2): number | null {
-  const dax = seg.p2[0] - seg.p1[0];
-  const day = seg.p2[1] - seg.p1[1];
-  const dbx = lineP2[0] - lineP1[0];
-  const dby = lineP2[1] - lineP1[1];
+  return angleBetweenLines(seg.p1, seg.p2, lineP1, lineP2);
+}
+
+/**
+ * 2直線(それぞれ2点、Phase 48)の方向ベクトルのなす角(度、0〜180)。angleBetweenSegments/
+ * angleBetweenSegmentAndLineの共通実装(rectangle/polygon/regularPolygon/slotの辺=entityEdgeの
+ * ように、SketchSegmentを持たない線同士のなす角も計算できるようにする)。
+ */
+export function angleBetweenLines(aP1: Point2, aP2: Point2, bP1: Point2, bP2: Point2): number | null {
+  const dax = aP2[0] - aP1[0];
+  const day = aP2[1] - aP1[1];
+  const dbx = bP2[0] - bP1[0];
+  const dby = bP2[1] - bP1[1];
   const la = Math.hypot(dax, day);
   const lb = Math.hypot(dbx, dby);
   if (la < 1e-9 || lb < 1e-9) return null;
@@ -623,8 +666,8 @@ export interface SegRadiusDimension {
 export interface SegDistanceDimension {
   kind: "seg-distance";
   constraintId: string;
-  a: PointRef;
-  b: PointRef;
+  a: PointRef | EntityVertexRef;
+  b: PointRef | EntityVertexRef;
   /** 省略/"direct"は2点間の直線距離、"x"/"y"は片方の軸成分のみ(頂点ベースの寸法指定、Phase 30)。 */
   axis?: "direct" | "x" | "y";
   value: number;
@@ -647,7 +690,7 @@ export interface EntityOriginDimension {
 export interface PointOriginDimension {
   kind: "point-distance-origin";
   constraintId: string;
-  point: PointRef;
+  point: PointRef | EntityVertexRef;
   /** 省略/"direct"は原点までの直線距離、"x"/"y"は片方の軸成分のみ(頂点ベースの寸法指定、Phase 30)。 */
   axis?: "direct" | "x" | "y";
   value: number;
@@ -680,7 +723,7 @@ export interface EntityLineDimension {
 export interface PointLineDimension {
   kind: "point-distance-line";
   constraintId: string;
-  point: PointRef;
+  point: PointRef | EntityVertexRef;
   line: LineRef;
   value: number;
   anchor: Point2;
@@ -690,8 +733,8 @@ export interface PointLineDimension {
 export interface SegDistanceLineLineDimension {
   kind: "seg-distance-line-line";
   constraintId: string;
-  a: string;
-  b: string;
+  a: string | MovableLineRef;
+  b: string | MovableLineRef;
   value: number;
   anchor: Point2;
   labelOffset?: Point2;
@@ -700,8 +743,8 @@ export interface SegDistanceLineLineDimension {
 export interface SegAngleLineLineDimension {
   kind: "seg-angle-line-line";
   constraintId: string;
-  a: string;
-  b: string;
+  a: string | MovableLineRef;
+  b: string | MovableLineRef;
   value: number;
   anchor: Point2;
   labelOffset?: Point2;
@@ -745,7 +788,7 @@ export function computeConstraintDimensions(
       continue;
     }
     if (c.kind === "distancePointOrigin") {
-      const p = pointFromRef(segments, c.point);
+      const p = pointFromRef(segments, c.point, entities);
       if (!p) continue;
       const origin: Point2 = c.originLocal ?? [0, 0];
       const anchor: Point2 = [(p[0] + origin[0]) / 2, (p[1] + origin[1]) / 2];
@@ -753,7 +796,7 @@ export function computeConstraintDimensions(
       continue;
     }
     if (c.kind === "distancePointLine") {
-      const p = pointFromRef(segments, c.point);
+      const p = pointFromRef(segments, c.point, entities);
       const line = resolveLineRefPoints(c.line, entities, segments);
       if (!p || !line) continue;
       const [a, b] = line;
@@ -798,11 +841,12 @@ export function computeConstraintDimensions(
       continue;
     }
     if (c.kind === "distanceLineLine" || c.kind === "angleLineLine") {
-      const segA = findSegment(segments, c.a);
-      const segB = findSegment(segments, c.b);
-      if (!segA || !segB) continue;
-      const midA: Point2 = [(segA.p1[0] + segA.p2[0]) / 2, (segA.p1[1] + segA.p2[1]) / 2];
-      const midB: Point2 = [(segB.p1[0] + segB.p2[0]) / 2, (segB.p1[1] + segB.p2[1]) / 2];
+      // Phase 48: a/bは自由な線分のsegmentId(素の文字列)に加えMovableLineRef(entityEdge)も指定できる。
+      const lineA = resolveLineRefPoints(normalizeMovableLineRef(c.a), entities, segments);
+      const lineB = resolveLineRefPoints(normalizeMovableLineRef(c.b), entities, segments);
+      if (!lineA || !lineB) continue;
+      const midA: Point2 = [(lineA[0][0] + lineA[1][0]) / 2, (lineA[0][1] + lineA[1][1]) / 2];
+      const midB: Point2 = [(lineB[0][0] + lineB[1][0]) / 2, (lineB[0][1] + lineB[1][1]) / 2];
       const anchor: Point2 = [(midA[0] + midB[0]) / 2, (midA[1] + midB[1]) / 2];
       if (c.kind === "distanceLineLine") {
         dims.push({ kind: "seg-distance-line-line", constraintId: c.id, a: c.a, b: c.b, value: c.value, anchor, labelOffset: c.labelOffset });
@@ -828,8 +872,8 @@ export function computeConstraintDimensions(
         : [(seg.p1[0] + seg.p2[0]) / 2, (seg.p1[1] + seg.p2[1]) / 2];
       dims.push({ kind: "seg-radius", constraintId: c.id, segmentId: c.segmentId, value: c.value, anchor, labelOffset: c.labelOffset });
     } else if (c.kind === "distance") {
-      const pa = pointFromRef(segments, c.a);
-      const pb = pointFromRef(segments, c.b);
+      const pa = pointFromRef(segments, c.a, entities);
+      const pb = pointFromRef(segments, c.b, entities);
       if (!pa || !pb) continue;
       const anchor: Point2 = [(pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2];
       dims.push({ kind: "seg-distance", constraintId: c.id, a: c.a, b: c.b, axis: c.axis, value: c.value, anchor, labelOffset: c.labelOffset });

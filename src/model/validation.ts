@@ -1,4 +1,18 @@
-import type { ArcRef, CadDocument, EntityRef, Feature, FeatureId, PointRef, PolygonCorner, SketchConstraint, SketchEntity, SketchSegment } from "./types";
+import type {
+  ArcRef,
+  CadDocument,
+  EntityRef,
+  EntityVertexRef,
+  Feature,
+  FeatureId,
+  MovableLineRef,
+  PointRef,
+  PolygonCorner,
+  SketchConstraint,
+  SketchEntity,
+  SketchSegment,
+} from "./types";
+import { entityVertexCount } from "../sketch/entityEdges";
 
 /** ドキュメント/フィーチャーのバリデーションエラー。featureId が特定できる場合のみ付与する。 */
 export interface ValidationError {
@@ -266,6 +280,59 @@ function validatePointRef(
 }
 
 /**
+ * 拘束が指す点参照(PointRef、またはEntityVertexRef=entityの頂点、Phase 48)の参照先が
+ * 存在するかを検証する。distance.a/b・distancePointOrigin/distancePointLine.pointが対象
+ * (validatePointRefのPointRef|EntityVertexRef版)。
+ */
+function validatePointOrVertexRef(
+  ref: PointRef | EntityVertexRef,
+  segments: readonly SketchSegment[],
+  entities: readonly SketchEntity[],
+  constraintId: string,
+  label: string,
+  featureId: FeatureId,
+): ValidationError[] {
+  if ("segmentId" in ref) return validatePointRef(ref, segments, constraintId, label, featureId);
+  const entity = entities.find((e) => e.id === ref.entityId);
+  if (!entity) {
+    return [{ featureId, message: `拘束(${constraintId})の参照先スケッチ要素(${ref.entityId}、${label})が見つかりません` }];
+  }
+  const count = entityVertexCount(entity);
+  if (!Number.isInteger(ref.vertexIndex) || ref.vertexIndex < 0 || ref.vertexIndex >= count) {
+    return [{ featureId, message: `拘束(${constraintId})の頂点番号(${ref.vertexIndex}、${label})が範囲外です` }];
+  }
+  return [];
+}
+
+/**
+ * distanceLineLine/angleLineLine(a/b)・distanceLineRefEdge/angleLineRefEdge(segmentId)が
+ * 指す線参照(素の文字列=自由な線分のsegmentId、またはMovableLineRef=entityEdge、Phase 48)の
+ * 参照先が存在するかを検証する。
+ */
+function validateMovableLineRef(
+  ref: string | MovableLineRef,
+  segments: readonly SketchSegment[],
+  entities: readonly SketchEntity[],
+  constraintId: string,
+  label: string,
+  featureId: FeatureId,
+): ValidationError[] {
+  if (typeof ref === "string" || ref.kind === "segmentEdge") {
+    const segmentId = typeof ref === "string" ? ref : ref.segmentId;
+    const seg = findSegmentById(segments, segmentId);
+    if (!seg) return [{ featureId, message: `拘束(${constraintId})の参照先スケッチ要素(${segmentId}、${label})が見つかりません` }];
+    if (seg.kind !== "line") return [{ featureId, message: `拘束(${constraintId})は線分にのみ指定できます(${segmentId})` }];
+    return [];
+  }
+  const entity = entities.find((e) => e.id === ref.entityId);
+  if (!entity) return [{ featureId, message: `拘束(${constraintId})の参照先スケッチ要素(${ref.entityId}、${label})が見つかりません` }];
+  if (entity.kind !== "rectangle" && entity.kind !== "polygon" && entity.kind !== "regularPolygon" && entity.kind !== "slot") {
+    return [{ featureId, message: `拘束(${constraintId})は矩形/多角形/正多角形/スロットの辺にのみ指定できます(${ref.entityId})` }];
+  }
+  return [];
+}
+
+/**
  * スケッチ拘束(Phase 20a)のバリデーション。
  * - coincident/distance/fix: 参照するPointRefのsegmentIdがsegments内に存在すること
  * - horizontal/vertical/length/radius: segmentIdがsegments内に存在すること
@@ -315,8 +382,8 @@ function validateConstraint(
       break;
     }
     case "distance": {
-      errors.push(...validatePointRef(constraint.a, segments, constraint.id, "a", featureId));
-      errors.push(...validatePointRef(constraint.b, segments, constraint.id, "b", featureId));
+      errors.push(...validatePointOrVertexRef(constraint.a, segments, entities, constraint.id, "a", featureId));
+      errors.push(...validatePointOrVertexRef(constraint.b, segments, entities, constraint.id, "b", featureId));
       // 0を許可(整列)。axis:"x"/"y"は符号付き(寸法値の符号仕様の明確化、Phase 33)のため負も許可、
       // axis:"direct"/省略(直線距離)は0以上(点一致)のみ許可(負は不可)。
       if (!isValidAxisDistanceValue(constraint.value, constraint.axis)) {
@@ -331,7 +398,7 @@ function validateConstraint(
       break;
     }
     case "distancePointOrigin": {
-      errors.push(...validatePointRef(constraint.point, segments, constraint.id, "point", featureId));
+      errors.push(...validatePointOrVertexRef(constraint.point, segments, entities, constraint.id, "point", featureId));
       if (!isValidAxisDistanceValue(constraint.value, constraint.axis)) {
         errors.push({
           featureId,
@@ -363,7 +430,7 @@ function validateConstraint(
       break;
     }
     case "distancePointLine": {
-      errors.push(...validatePointRef(constraint.point, segments, constraint.id, "point", featureId));
+      errors.push(...validatePointOrVertexRef(constraint.point, segments, entities, constraint.id, "point", featureId));
       // 点↔線距離は0を許可(線上一致として機能、寸法値の符号仕様の明確化、Phase 33)。負は不可。
       if (!isNonNegativeFiniteNumber(constraint.value)) {
         errors.push({ featureId, message: `拘束(${constraint.id})の距離は0以上の数である必要があります` });
@@ -411,12 +478,9 @@ function validateConstraint(
       break;
     }
     case "distanceLineLine": {
-      const a = findSegmentById(segments, constraint.a);
-      const b = findSegmentById(segments, constraint.b);
-      if (!a) errors.push({ featureId, message: `拘束(${constraint.id})の参照先スケッチ要素(${constraint.a})が見つかりません` });
-      else if (a.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は線分にのみ指定できます(${constraint.a})` });
-      if (!b) errors.push({ featureId, message: `拘束(${constraint.id})の参照先スケッチ要素(${constraint.b})が見つかりません` });
-      else if (b.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は線分にのみ指定できます(${constraint.b})` });
+      // Phase 48: a/bは自由な線分のsegmentId(素の文字列)に加えMovableLineRef(entityEdge)も指定できる。
+      errors.push(...validateMovableLineRef(constraint.a, segments, entities, constraint.id, "a", featureId));
+      errors.push(...validateMovableLineRef(constraint.b, segments, entities, constraint.id, "b", featureId));
       // 線↔線距離は0を許可(平行かつ線上一致として機能、寸法値の符号仕様の明確化、Phase 33)。負は不可。
       if (!isNonNegativeFiniteNumber(constraint.value)) {
         errors.push({ featureId, message: `拘束(${constraint.id})の距離は0以上の数である必要があります` });
@@ -424,21 +488,16 @@ function validateConstraint(
       break;
     }
     case "angleLineLine": {
-      const a = findSegmentById(segments, constraint.a);
-      const b = findSegmentById(segments, constraint.b);
-      if (!a) errors.push({ featureId, message: `拘束(${constraint.id})の参照先スケッチ要素(${constraint.a})が見つかりません` });
-      else if (a.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は線分にのみ指定できます(${constraint.a})` });
-      if (!b) errors.push({ featureId, message: `拘束(${constraint.id})の参照先スケッチ要素(${constraint.b})が見つかりません` });
-      else if (b.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は線分にのみ指定できます(${constraint.b})` });
+      errors.push(...validateMovableLineRef(constraint.a, segments, entities, constraint.id, "a", featureId));
+      errors.push(...validateMovableLineRef(constraint.b, segments, entities, constraint.id, "b", featureId));
       if (!isPositiveFiniteNumber(constraint.value)) {
         errors.push({ featureId, message: `拘束(${constraint.id})の角度は正の数である必要があります` });
       }
       break;
     }
     case "distanceLineRefEdge": {
-      const seg = findSegmentById(segments, constraint.segmentId);
-      if (!seg) errors.push({ featureId, message: `拘束(${constraint.id})の参照先スケッチ要素(${constraint.segmentId})が見つかりません` });
-      else if (seg.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は線分にのみ指定できます(${constraint.segmentId})` });
+      // Phase 48: segmentId(フィールド名は後方互換)は素の文字列に加えMovableLineRef(entityEdge)も指定できる。
+      errors.push(...validateMovableLineRef(constraint.segmentId, segments, entities, constraint.id, "segmentId", featureId));
       // 線↔参照エッジ距離も線↔線距離と同じく0を許可(Phase 33)。負は不可。
       if (!isNonNegativeFiniteNumber(constraint.value)) {
         errors.push({ featureId, message: `拘束(${constraint.id})の距離は0以上の数である必要があります` });
@@ -446,9 +505,7 @@ function validateConstraint(
       break;
     }
     case "angleLineRefEdge": {
-      const seg = findSegmentById(segments, constraint.segmentId);
-      if (!seg) errors.push({ featureId, message: `拘束(${constraint.id})の参照先スケッチ要素(${constraint.segmentId})が見つかりません` });
-      else if (seg.kind !== "line") errors.push({ featureId, message: `拘束(${constraint.id})は線分にのみ指定できます(${constraint.segmentId})` });
+      errors.push(...validateMovableLineRef(constraint.segmentId, segments, entities, constraint.id, "segmentId", featureId));
       if (!isPositiveFiniteNumber(constraint.value)) {
         errors.push({ featureId, message: `拘束(${constraint.id})の角度は正の数である必要があります` });
       }

@@ -7,7 +7,8 @@
 // SketchEditor(セグメント一覧・拘束一覧パネル)・gcsAdapter.ts(拘束矛盾時のトーストメッセージ)の
 // 両方から使う(solver.ts自体はReact非依存の純粋TSでなければならないため、この切り出しは従来通り
 // 維持する)。
-import type { ArcRef, EntityRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
+import type { ArcRef, EntityRef, EntityVertexRef, LineRef, MovableLineRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
+import { normalizeMovableLineRef } from "./entityEdges";
 import { formatMm } from "./format";
 
 /** EntityRef|ArcRef判別(Phase 42b、concentric/tangentの円弧対応)。"entityId"の有無で判定する。 */
@@ -54,6 +55,75 @@ export function pointDisplayName(segmentLabel: string, end: "p1" | "p2"): string
 
 function pointRefDisplayName(segments: readonly SketchSegment[] | undefined, ref: PointRef): string {
   return pointDisplayName(segmentDisplayNameById(segments, ref.segmentId), ref.end);
+}
+
+/**
+ * entityの頂点(EntityVertexRef、Phase 48)の表示名。rectangleの角は位置(左下/右下/右上/左上、
+ * types.tsのEntityVertexRefコメントと同じ順序)、slotは始点/終点、point自体は頂点接尾辞を付けず
+ * entity名そのもの(例:「点1」)、その他(polygon/regularPolygon)は「頂点N」(1始まり)。
+ * 例:「矩形1の左下」「スロット1の始点」「点1」「多角形1の頂点2」。
+ */
+function entityVertexDisplayName(entities: readonly SketchEntity[], entityId: string, vertexIndex: number): string {
+  const entity = entities.find((e) => e.id === entityId);
+  const name = entityDisplayNameById(entities, entityId);
+  if (!entity) return name;
+  if (entity.kind === "point") return name;
+  if (entity.kind === "rectangle") {
+    const labels = ["左下", "右下", "右上", "左上"];
+    return `${name}の${labels[((vertexIndex % 4) + 4) % 4]}`;
+  }
+  if (entity.kind === "slot") {
+    return `${name}の${vertexIndex === 0 ? "始点" : "終点"}`;
+  }
+  return `${name}の頂点${vertexIndex + 1}`;
+}
+
+/** PointRef(セグメント端点)、またはEntityVertexRef(entityの頂点、Phase 48)の表示名。 */
+function pointOrVertexRefDisplayName(
+  segments: readonly SketchSegment[] | undefined,
+  entities: readonly SketchEntity[],
+  ref: PointRef | EntityVertexRef,
+): string {
+  if ("segmentId" in ref) return pointRefDisplayName(segments, ref);
+  return entityVertexDisplayName(entities, ref.entityId, ref.vertexIndex);
+}
+
+/**
+ * entityの辺(LineRef.entityEdge、Phase 48)の表示名。rectangleは向き(下辺/右辺/上辺/左辺、
+ * types.tsのLineRefコメントの並びと同じ)、slotは直線辺のみ2本(直線辺1/直線辺2)、
+ * その他(polygon/regularPolygon)は「辺N」(1始まり)。例:「矩形1の左辺」「スロット1の直線辺1」。
+ */
+function entityEdgeDisplayName(entities: readonly SketchEntity[], entityId: string, edgeIndex: number): string {
+  const entity = entities.find((e) => e.id === entityId);
+  const name = entityDisplayNameById(entities, entityId);
+  if (!entity) return name;
+  if (entity.kind === "rectangle") {
+    const labels = ["下辺", "右辺", "上辺", "左辺"];
+    return `${name}の${labels[((edgeIndex % 4) + 4) % 4]}`;
+  }
+  if (entity.kind === "slot") {
+    return `${name}の直線辺${(((edgeIndex % 2) + 2) % 2) + 1}`;
+  }
+  return `${name}の辺${edgeIndex + 1}`;
+}
+
+/** LineRef(entityEdge/segmentEdge/refEdge)の表示名(Phase 48でentityEdgeを具体的な辺名に改善)。 */
+function lineRefDisplayName(segments: readonly SketchSegment[] | undefined, entities: readonly SketchEntity[], line: LineRef): string {
+  if (line.kind === "refEdge") return "参照エッジ";
+  if (line.kind === "segmentEdge") return segmentDisplayNameById(segments, line.segmentId);
+  return entityEdgeDisplayName(entities, line.entityId, line.edgeIndex);
+}
+
+/**
+ * distanceLineLine/angleLineLine(a/b)・distanceLineRefEdge/angleLineRefEdge(segmentId)の表示名
+ * (Phase 48拡張: 素の文字列=自由な線分のsegmentId、またはMovableLineRef=entityEdgeのどちらも扱う)。
+ */
+function movableLineRefDisplayName(
+  segments: readonly SketchSegment[] | undefined,
+  entities: readonly SketchEntity[],
+  ref: string | MovableLineRef,
+): string {
+  return lineRefDisplayName(segments, entities, normalizeMovableLineRef(ref));
 }
 
 /**
@@ -118,7 +188,7 @@ export function describeConstraint(
       return `${segmentDisplayNameById(segments, constraint.segmentId)} = R${formatMm(constraint.value)}mm`;
     case "distance": {
       const axisPrefix = constraint.axis === "x" ? "X:" : constraint.axis === "y" ? "Y:" : "";
-      return `${pointRefDisplayName(segments, constraint.a)} ↔ ${pointRefDisplayName(segments, constraint.b)} = ${axisPrefix}${formatMm(constraint.value)}mm`;
+      return `${pointOrVertexRefDisplayName(segments, entities, constraint.a)} ↔ ${pointOrVertexRefDisplayName(segments, entities, constraint.b)} = ${axisPrefix}${formatMm(constraint.value)}mm`;
     }
     case "fix":
       return pointRefDisplayName(segments, constraint.point);
@@ -128,20 +198,20 @@ export function describeConstraint(
     }
     case "distancePointOrigin": {
       const axisPrefix = constraint.axis === "x" ? "X:" : constraint.axis === "y" ? "Y:" : "";
-      return `${pointRefDisplayName(segments, constraint.point)} ↔ 原点 = ${axisPrefix}${formatMm(constraint.value)}mm`;
+      return `${pointOrVertexRefDisplayName(segments, entities, constraint.point)} ↔ 原点 = ${axisPrefix}${formatMm(constraint.value)}mm`;
     }
     case "coincidentOrigin":
-      return "segmentId" in constraint.point
-        ? `${pointRefDisplayName(segments, constraint.point)} = 原点`
+      return "segmentId" in constraint.point || "vertexIndex" in constraint.point
+        ? `${pointOrVertexRefDisplayName(segments, entities, constraint.point)} = 原点`
         : `${entityDisplayNameById(entities, constraint.point.entityId)} = 原点`;
     case "distanceEntityEntity": {
       const axisPrefix = constraint.axis === "x" ? "X:" : constraint.axis === "y" ? "Y:" : "";
       return `${entityDisplayNameById(entities, constraint.a.entityId)} ↔ ${entityDisplayNameById(entities, constraint.b.entityId)} = ${axisPrefix}${formatMm(constraint.value)}mm`;
     }
     case "distanceEntityLine":
-      return `${entityDisplayNameById(entities, constraint.entity.entityId)} ↔ 辺 = ${formatMm(constraint.value)}mm`;
+      return `${entityDisplayNameById(entities, constraint.entity.entityId)} ↔ ${lineRefDisplayName(segments, entities, constraint.line)} = ${formatMm(constraint.value)}mm`;
     case "distancePointLine":
-      return `${pointRefDisplayName(segments, constraint.point)} ↔ 辺 = ${formatMm(constraint.value)}mm`;
+      return `${pointOrVertexRefDisplayName(segments, entities, constraint.point)} ↔ ${lineRefDisplayName(segments, entities, constraint.line)} = ${formatMm(constraint.value)}mm`;
     case "fixEntity":
       return entityDisplayNameById(entities, constraint.entity.entityId);
     case "fixArc":
@@ -149,13 +219,13 @@ export function describeConstraint(
     case "perpendicular":
       return `${segmentDisplayNameById(segments, constraint.a)} ⊥ ${segmentDisplayNameById(segments, constraint.b)}`;
     case "distanceLineLine":
-      return `${segmentDisplayNameById(segments, constraint.a)} // ${segmentDisplayNameById(segments, constraint.b)} = ${formatMm(constraint.value)}mm`;
+      return `${movableLineRefDisplayName(segments, entities, constraint.a)} // ${movableLineRefDisplayName(segments, entities, constraint.b)} = ${formatMm(constraint.value)}mm`;
     case "angleLineLine":
-      return `${segmentDisplayNameById(segments, constraint.a)} ∠ ${segmentDisplayNameById(segments, constraint.b)} = ${formatMm(constraint.value)}°`;
+      return `${movableLineRefDisplayName(segments, entities, constraint.a)} ∠ ${movableLineRefDisplayName(segments, entities, constraint.b)} = ${formatMm(constraint.value)}°`;
     case "distanceLineRefEdge":
-      return `${segmentDisplayNameById(segments, constraint.segmentId)} // 参照エッジ = ${formatMm(constraint.value)}mm`;
+      return `${movableLineRefDisplayName(segments, entities, constraint.segmentId)} // 参照エッジ = ${formatMm(constraint.value)}mm`;
     case "angleLineRefEdge":
-      return `${segmentDisplayNameById(segments, constraint.segmentId)} ∠ 参照エッジ = ${formatMm(constraint.value)}°`;
+      return `${movableLineRefDisplayName(segments, entities, constraint.segmentId)} ∠ 参照エッジ = ${formatMm(constraint.value)}°`;
     case "concentric":
       return `${curveRefDisplayName(segments, entities, constraint.a)} = ${curveRefDisplayName(segments, entities, constraint.b)}`;
     case "tangent": {

@@ -7,7 +7,7 @@
 // で「区間」に分割し、クリック/ホバー位置に最も近い区間を求める(削除候補として提示・実削除する)。
 // 区間が1つしかできない(=他セグメントとの有効な交点が無い)場合は、区間全体=セグメント全体を削除する。
 import { generateId } from "../model/id";
-import type { ArcRef, EntityRef, LineRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
+import type { ArcRef, EntityRef, EntityVertexRef, LineRef, MovableLineRef, PointRef, SketchConstraint, SketchEntity, SketchSegment } from "../model/types";
 import { bulgeArcPoints } from "./bulge";
 import { explodeEntity } from "./explode";
 import {
@@ -290,16 +290,16 @@ export function collectReferencedIds(c: SketchConstraint): string[] {
       return [c.segmentId];
     case "distanceLineRefEdge":
     case "angleLineRefEdge":
-      return [c.segmentId, ...lineRefReferencedIds(c.line)];
+      return [movableLineRefReferencedId(c.segmentId), ...lineRefReferencedIds(c.line)];
     case "distance":
-      return [c.a.segmentId, c.b.segmentId];
+      return [pointOrVertexRefReferencedId(c.a), pointOrVertexRefReferencedId(c.b)];
     case "fix":
       return [c.point.segmentId];
     case "distanceEntityOrigin":
     case "fixEntity":
       return [c.entity.entityId];
     case "distancePointOrigin":
-      return [c.point.segmentId];
+      return [pointOrVertexRefReferencedId(c.point)];
     case "coincidentOrigin":
       return ["segmentId" in c.point ? c.point.segmentId : c.point.entityId];
     case "distanceEntityEntity":
@@ -309,11 +309,12 @@ export function collectReferencedIds(c: SketchConstraint): string[] {
     case "distanceEntityLine":
       return [c.entity.entityId, ...lineRefReferencedIds(c.line)];
     case "distancePointLine":
-      return [c.point.segmentId, ...lineRefReferencedIds(c.line)];
+      return [pointOrVertexRefReferencedId(c.point), ...lineRefReferencedIds(c.line)];
     case "perpendicular":
+      return [c.a, c.b];
     case "distanceLineLine":
     case "angleLineLine":
-      return [c.a, c.b];
+      return [movableLineRefReferencedId(c.a), movableLineRefReferencedId(c.b)];
     case "tangent":
       return [curveRefReferencedId(c.entity), c.target.kind === "segment" ? c.target.segmentId : c.target.entityId];
     default: {
@@ -326,6 +327,17 @@ export function collectReferencedIds(c: SketchConstraint): string[] {
 /** EntityRef|ArcRef(concentric.a/b・tangent.entity、Phase 42b)が参照する生きたid(entityIdまたはsegmentId)。 */
 function curveRefReferencedId(ref: EntityRef | ArcRef): string {
   return "segmentId" in ref ? ref.segmentId : ref.entityId;
+}
+
+/** PointRef|EntityVertexRef(distance.a/b・distancePointOrigin/distancePointLine.point、Phase 48)が参照する生きたid。 */
+function pointOrVertexRefReferencedId(ref: PointRef | EntityVertexRef): string {
+  return "segmentId" in ref ? ref.segmentId : ref.entityId;
+}
+
+/** string|MovableLineRef(distanceLineLine/angleLineLine/distanceLineRefEdge/angleLineRefEdge、Phase 48)が参照する生きたid。 */
+function movableLineRefReferencedId(ref: string | MovableLineRef): string {
+  if (typeof ref === "string") return ref;
+  return ref.kind === "entityEdge" ? ref.entityId : ref.segmentId;
 }
 
 /** LineRefが参照するid一覧(collectReferencedIds()のヘルパー、refEdgeは空配列)。 */
@@ -489,8 +501,17 @@ export function trimSegmentWithConstraints(
   const keptPieces = assignPieceIds(target, pieces, removeIndex);
   const nextSegments = [...others, ...keptPieces];
 
-  /** targetIdの旧端点を参照するPointRefを、座標一致(1e-6mm)する新しい区間へ付け替える。一致無しはnull。 */
-  const reassignPoint = (ref: PointRef): PointRef | null => {
+  /**
+   * targetIdの旧端点を参照するPointRefを、座標一致(1e-6mm)する新しい区間へ付け替える。一致無しはnull。
+   * EntityVertexRef(entityの頂点、Phase 48)はセグメントのトリムでは対象外なのでそのまま通す
+   * (セグメントtargetIdを参照しないため)。オーバーロード: PointRef入力は必ずPointRef|nullを返す
+   * (coincident/fixのような純PointRefフィールドへそのまま代入できるようにするための型上の宣言。
+   * 実装は共通[EntityVertexRefが混じる呼び出し元では自動的に広い型で推論される])。
+   */
+  function reassignPoint(ref: PointRef): PointRef | null;
+  function reassignPoint(ref: PointRef | EntityVertexRef): PointRef | EntityVertexRef | null;
+  function reassignPoint(ref: PointRef | EntityVertexRef): PointRef | EntityVertexRef | null {
+    if (!("segmentId" in ref)) return ref;
     if (ref.segmentId !== targetId) return ref;
     const oldPoint = ref.end === "p1" ? target.p1 : target.p2;
     for (const piece of keptPieces) {
