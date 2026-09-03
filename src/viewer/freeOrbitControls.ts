@@ -15,7 +15,18 @@
 //
 // OrbitControlsのAPIのうち本アプリが実際に使っている部分(target/enabled/update()/dispose())
 // のみを最小実装する(ダンピングやタッチ操作は元々未使用だったため実装しない)。
+//
+// マウス操作マッピング(Phase 49で中ボタン系を追加、既存の左/右ボタンの挙動はそのまま):
+//   左ボタンドラッグ           = 回転(既存)
+//   右ボタンドラッグ           = パン(既存、右クリックの既定コンテキストメニューは抑止)
+//   中ボタンドラッグ           = 回転(SolidWorks標準、Phase 49で追加。ブラウザの中クリック
+//                                 自動スクロールUIが出ないようmousedown時にpreventDefaultする)
+//   Shift+中ボタンドラッグ     = パン(SolidWorks標準、Phase 49で追加)
+//   ホイール                   = カーソル位置中心のズーム(Phase 49、handleWheel参照。
+//                                 従来は常に注視点中心のズームだった)
 import * as THREE from "three";
+
+import { computeZoomToCursor } from "./zoomToCursor";
 
 const EPS = 1e-6;
 /** マウスドラッグでの回転感度(domElementの高さ全体の移動でおよそ半回転になる係数)。 */
@@ -71,9 +82,18 @@ export class FreeOrbitControls {
 
   private handleMouseDown = (event: MouseEvent) => {
     if (!this.enabled) return;
-    if (event.button === 0) this.dragMode = "rotate";
-    else if (event.button === 2) this.dragMode = "pan";
-    else return;
+    if (event.button === 0) {
+      this.dragMode = "rotate";
+    } else if (event.button === 2) {
+      this.dragMode = "pan";
+    } else if (event.button === 1) {
+      // 中ボタン(Phase 49): SolidWorks標準の回転、Shift併用でパン。ブラウザの中クリック
+      // 自動スクロールUI(丸いアイコン)がポップアップしないよう既定動作を止める。
+      event.preventDefault();
+      this.dragMode = event.shiftKey ? "pan" : "rotate";
+    } else {
+      return;
+    }
     this.lastX = event.clientX;
     this.lastY = event.clientY;
     window.addEventListener("mousemove", this.handleMouseMove);
@@ -103,8 +123,43 @@ export class FreeOrbitControls {
     const normalizedDelta = Math.abs(event.deltaY * 0.01);
     const scale = Math.pow(0.95, this.zoomSpeed * normalizedDelta);
     // deltaY > 0 (下スクロール) = ズームアウト、< 0 = ズームイン(標準的なホイール操作感)。
-    this.dolly(event.deltaY > 0 ? 1 / scale : scale);
+    this.dollyToCursor(event.deltaY > 0 ? 1 / scale : scale, event.clientX, event.clientY);
   };
+
+  /**
+   * カーソル位置中心のズーム(Phase 49)。カーソルを通るワールド空間のレイを求め、実際の平行移動+
+   * 距離変更の計算はzoomToCursor.ts(three.js非依存の純粋関数、Vitestで単体テスト済み)に委ねる。
+   * domElementの矩形が取得できない(非表示など)場合はdolly()(注視点中心)にフォールバックする。
+   */
+  private dollyToCursor(scale: number, clientX: number, clientY: number) {
+    const offset = this.camera.position.clone().sub(this.target);
+    const newDistance = THREE.MathUtils.clamp(offset.length() / scale, this.minDistance, this.maxDistance);
+
+    const rect = this.domElement.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      this.dolly(scale);
+      return;
+    }
+
+    const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const ndcY = -((clientY - rect.top) / rect.height) * 2 + 1;
+    // NDC(x,y,0.5)をワールド座標へ逆投影すると、カメラ位置からそのスクリーン位置を通るレイ上の
+    // 1点が得られる(three.jsのRaycaster.setFromCamera()と同じ手法)。
+    const rayPoint = new THREE.Vector3(ndcX, ndcY, 0.5).unproject(this.camera);
+    const rayOrigin = this.camera.position.clone();
+    const rayDir = rayPoint.clone().sub(rayOrigin);
+
+    const result = computeZoomToCursor({
+      cameraPos: [this.camera.position.x, this.camera.position.y, this.camera.position.z],
+      target: [this.target.x, this.target.y, this.target.z],
+      rayOrigin: [rayOrigin.x, rayOrigin.y, rayOrigin.z],
+      rayDir: [rayDir.x, rayDir.y, rayDir.z],
+      newDistance,
+    });
+    this.camera.position.set(result.cameraPos[0], result.cameraPos[1], result.cameraPos[2]);
+    this.target.set(result.target[0], result.target[1], result.target[2]);
+    this.camera.lookAt(this.target);
+  }
 
   /**
    * トラックボール式回転。offset(target→camera)とcamera.upを、水平方向はup軸まわり(yaw)、
