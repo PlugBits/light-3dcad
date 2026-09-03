@@ -1,0 +1,64 @@
+{
+  "format": "l3dcad",
+  "schemaVersion": 1,
+  "document": {
+    "version": 1,
+    "features": [
+      {
+        "type": "sketch",
+        "id": "sketch-coaster-1",
+        "name": "Sketch1",
+        "plane": { "kind": "world", "plane": "XY" },
+        "entities": [
+          {
+            "kind": "regularPolygon",
+            "id": "entity-coaster-outer",
+            "center": [0, 0],
+            "radius": 45,
+            "sides": 6
+          }
+        ]
+      },
+      {
+        "type": "extrude",
+        "id": "extrude-coaster-1",
+        "name": "Extrude1",
+        "sketchId": "sketch-coaster-1",
+        "distance": 6,
+        "direction": 1,
+        "operation": "newBody"
+      },
+      {
+        "type": "sketch",
+        "id": "sketch-coaster-2",
+        "name": "Sketch2",
+        "plane": {
+          "kind": "face",
+          "featureId": "extrude-coaster-1",
+          "faceId": 1,
+          "center": [0, 0, 6],
+          "normal": [0, 0, 1]
+        },
+        "entities": [
+          {
+            "kind": "regularPolygon",
+            "id": "entity-coaster-pocket",
+            "center": [0, 0],
+            "radius": 40,
+            "sides": 6
+          }
+        ]
+      },
+      {
+        "type": "extrude",
+        "id": "extrude-coaster-2",
+        "name": "Cut1",
+        "sketchId": "sketch-coaster-2",
+        "distance": 4,
+        "direction": -1,
+        "operation": "cut",
+        "targetBodyId": "extrude-coaster-1"
+      }
+    ]
+  }
+}

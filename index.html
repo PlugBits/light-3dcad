@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/light-3dcad/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>light-3dcad</title>
+    <script type="module" crossorigin src="/light-3dcad/assets/index-BBxzI3Vw.js"></script>
+    <link rel="modulepreload" crossorigin href="/light-3dcad/assets/rolldown-runtime-hePW80VL.js">
+    <link rel="stylesheet" crossorigin href="/light-3dcad/assets/index-D110zMzA.css">
+  </head>
+  <body>
+    <div id="root"><div id="boot-message" style="font-family: sans-serif; padding: 16px; color: #555;">読み込み中...</div></div>
+    <script>
+      // 起動前エラーの可視化: 白画面の代わりにエラー内容を表示する(アプリ描画後は何もしない)
+      (function () {
+        function show(kind, message) {
+          var boot = document.getElementById("boot-message");
+          if (!boot) return; // アプリが描画済みなら何もしない
+          var box = document.createElement("pre");
+          box.style.cssText =
+            "font-family: monospace; font-size: 12px; color: #b00020; background: #fff3f3; border: 1px solid #f0c0c0; padding: 12px; margin: 16px; white-space: pre-wrap; word-break: break-all;";
+          box.textContent = "起動エラー (" + kind + "):\n" + message + "\n\nブラウザ: " + navigator.userAgent;
+          boot.textContent = "アプリの起動に失敗しました。";
+          boot.appendChild(box);
+        }
+        window.addEventListener("error", function (e) {
+          show("error", (e.message || "") + (e.filename ? "\n" + e.filename + ":" + e.lineno : ""));
+        });
+        window.addEventListener("unhandledrejection", function (e) {
+          var r = e.reason;
+          show("unhandledrejection", r && r.stack ? r.stack : String(r));
+        });
+      })();
+    </script>
+  </body>
+</html>

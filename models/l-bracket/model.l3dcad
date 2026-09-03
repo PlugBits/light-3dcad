@@ -1,0 +1,38 @@
+{
+  "format": "l3dcad",
+  "schemaVersion": 1,
+  "document": {
+    "version": 1,
+    "features": [
+      {
+        "type": "sketch",
+        "id": "sketch-bracket-1",
+        "name": "Sketch1",
+        "plane": { "kind": "world", "plane": "XY" },
+        "entities": [
+          {
+            "kind": "polygon",
+            "id": "entity-bracket-l",
+            "points": [
+              [0, 0],
+              [60, 0],
+              [60, 20],
+              [20, 20],
+              [20, 50],
+              [0, 50]
+            ]
+          }
+        ]
+      },
+      {
+        "type": "extrude",
+        "id": "extrude-bracket-1",
+        "name": "Extrude1",
+        "sketchId": "sketch-bracket-1",
+        "distance": 15,
+        "direction": 1,
+        "operation": "newBody"
+      }
+    ]
+  }
+}

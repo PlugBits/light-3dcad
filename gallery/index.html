@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>モデルギャラリー | light-3dcad</title>
+<meta name="description" content="light-3dcadのコミュニティモデルギャラリー。ユーザーが投稿したパラメトリックCADモデルを閲覧・オープンできます。" />
+<style>
+  :root {
+    --cad-bg: #f4f5f7;
+    --cad-panel: #ffffff;
+    --cad-panel-alt: #fafbfc;
+    --cad-border: #d8dbe0;
+    --cad-border-strong: #c2c6cd;
+    --cad-text: #1f2328;
+    --cad-text-muted: #5b6270;
+    --cad-text-faint: #8a909c;
+    --cad-hover: #eef1f5;
+    --cad-accent: #2563eb;
+    --cad-accent-hover: #1d4ed8;
+    --cad-accent-soft: #dbe6fd;
+    --cad-radius-sm: 4px;
+    --cad-radius-md: 6px;
+    --cad-radius-lg: 10px;
+    --cad-shadow-sm: 0 1px 2px rgba(20, 24, 32, 0.06);
+    --cad-shadow-md: 0 2px 8px rgba(20, 24, 32, 0.08);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: "Segoe UI", system-ui, Roboto, "Hiragino Sans", "Yu Gothic", sans-serif;
+    background: var(--cad-bg);
+    color: var(--cad-text);
+  }
+  header.page-header {
+    background: var(--cad-panel);
+    border-bottom: 1px solid var(--cad-border);
+    box-shadow: var(--cad-shadow-sm);
+    padding: 20px 24px;
+  }
+  .page-header-inner {
+    max-width: 1080px;
+    margin: 0 auto;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  h1.page-title {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 700;
+  }
+  .page-subtitle {
+    margin: 4px 0 0;
+    color: var(--cad-text-muted);
+    font-size: 13px;
+  }
+  a.back-link {
+    color: var(--cad-accent);
+    text-decoration: none;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  a.back-link:hover {
+    color: var(--cad-accent-hover);
+    text-decoration: underline;
+  }
+  main {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 24px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 20px;
+  }
+  .card {
+    background: var(--cad-panel);
+    border: 1px solid var(--cad-border);
+    border-radius: var(--cad-radius-lg);
+    box-shadow: var(--cad-shadow-sm);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    transition: box-shadow 0.15s ease, border-color 0.15s ease;
+  }
+  .card:hover {
+    box-shadow: var(--cad-shadow-md);
+    border-color: var(--cad-border-strong);
+  }
+  .card-thumb-link {
+    display: block;
+    background: var(--cad-panel-alt);
+    border-bottom: 1px solid var(--cad-border);
+  }
+  .card-thumb {
+    display: block;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    object-fit: contain;
+    background: var(--cad-panel-alt);
+  }
+  .card-body {
+    padding: 14px 16px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 1;
+  }
+  .card-title {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 700;
+  }
+  .card-author {
+    margin: 0;
+    font-size: 12px;
+    color: var(--cad-text-faint);
+  }
+  .card-description {
+    margin: 4px 0 0;
+    font-size: 12.5px;
+    color: var(--cad-text-muted);
+    line-height: 1.5;
+    flex: 1;
+  }
+  .card-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 4px;
+  }
+  .tag {
+    font-size: 10.5px;
+    color: var(--cad-text-muted);
+    background: var(--cad-panel-alt);
+    border: 1px solid var(--cad-border);
+    border-radius: 999px;
+    padding: 2px 8px;
+  }
+  .card-open-link {
+    display: inline-block;
+    margin-top: 8px;
+    align-self: flex-start;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--cad-accent);
+    text-decoration: none;
+    padding: 5px 10px;
+    border-radius: var(--cad-radius-sm);
+    background: var(--cad-accent-soft);
+  }
+  .card-open-link:hover {
+    color: #ffffff;
+    background: var(--cad-accent-hover);
+  }
+  .empty-state {
+    color: var(--cad-text-muted);
+    font-size: 13px;
+    padding: 40px 0;
+    text-align: center;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --cad-bg: #1b1d21;
+      --cad-panel: #24262b;
+      --cad-panel-alt: #2c2f35;
+      --cad-border: #3a3d44;
+      --cad-border-strong: #4a4e57;
+      --cad-text: #e7e9ec;
+      --cad-text-muted: #a7acb6;
+      --cad-text-faint: #7c828d;
+      --cad-hover: #2c2f35;
+      --cad-accent: #5b8dfa;
+      --cad-accent-hover: #7ba3fb;
+      --cad-accent-soft: #26314f;
+    }
+  }
+</style>
+</head>
+<body>
+<header class="page-header">
+  <div class="page-header-inner">
+    <div>
+      <h1 class="page-title">モデルギャラリー</h1>
+      <p class="page-subtitle">light-3dcadのコミュニティモデル一覧(9件)</p>
+    </div>
+    <a class="back-link" href="../">&larr; light-3dcad アプリに戻る</a>
+  </div>
+</header>
+<main>
+  <div class="grid">
+      <article class="card">
+        <a class="card-thumb-link" href="../?g=3">
+          <img class="card-thumb" src="thumbs/3.png" alt="3号プラ鉢のサムネイル" loading="lazy" />
+        </a>
+        <div class="card-body">
+          <h2 class="card-title">3号プラ鉢</h2>
+          <p class="card-author">by PlugBits</p>
+          <p class="card-description">上端φ90 × 底φ65 × 高さ80mm</p>
+          <div class="card-tags"></div>
+          <a class="card-open-link" href="../?g=3">開く &rarr;</a>
+        </div>
+      </article>
+
+      <article class="card">
+        <a class="card-thumb-link" href="../?g=coaster">
+          <img class="card-thumb" src="thumbs/coaster.png" alt="コースターのサムネイル" loading="lazy" />
+        </a>
+        <div class="card-body">
+          <h2 class="card-title">コースター</h2>
+          <p class="card-author">by PlugBits</p>
+          <p class="card-description">外接円半径45mmの六角形コースター(厚さ6mm)。上面に半径40mmの六角形ポケットを深さ4mmで彫り込み、グラスの底を軽く受け止める浅い皿状に仕上げています。</p>
+          <div class="card-tags"><span class="tag">コースター</span><span class="tag">六角形</span><span class="tag">初級</span></div>
+          <a class="card-open-link" href="../?g=coaster">開く &rarr;</a>
+        </div>
+      </article>
+
+      <article class="card">
+        <a class="card-thumb-link" href="../?g=l-bracket">
+          <img class="card-thumb" src="thumbs/l-bracket.png" alt="L字ブラケットのサムネイル" loading="lazy" />
+        </a>
+        <div class="card-body">
+          <h2 class="card-title">L字ブラケット</h2>
+          <p class="card-author">by PlugBits</p>
+          <p class="card-description">60×50mm・厚さ15mmのL字形状ブラケット。多角形スケッチで外形を定義したシンプルな取り付け金具です。</p>
+          <div class="card-tags"><span class="tag">ブラケット</span><span class="tag">L字</span><span class="tag">構造材</span></div>
+          <a class="card-open-link" href="../?g=l-bracket">開く &rarr;</a>
+        </div>
+      </article>
+
+      <article class="card">
+        <a class="card-thumb-link" href="../?g=name-plate">
+          <img class="card-thumb" src="thumbs/name-plate.png" alt="名札プレートのサムネイル" loading="lazy" />
+        </a>
+        <div class="card-body">
+          <h2 class="card-title">名札プレート</h2>
+          <p class="card-author">by PlugBits</p>
+          <p class="card-description">80×30mm・厚さ3mmの角丸(R5)名札プレート。左端寄りにΦ5mmのストラップ穴を1つ設けており、ネックストラップやキーリングを通してIDカード代わりに使えます。</p>
+          <div class="card-tags"><span class="tag">名札</span><span class="tag">プレート</span><span class="tag">初級</span></div>
+          <a class="card-open-link" href="../?g=name-plate">開く &rarr;</a>
+        </div>
+      </article>
+
+      <article class="card">
+        <a class="card-thumb-link" href="../?g=phone-stand">
+          <img class="card-thumb" src="thumbs/phone-stand.png" alt="スマホスタンドのサムネイル" loading="lazy" />
+        </a>
+        <div class="card-body">
+          <h2 class="card-title">スマホスタンド</h2>
+          <p class="card-author">by PlugBits</p>
+          <p class="card-description">奥行き90mm・幅70mm・高さ約90mmのスマートフォン用スタンド。背面サポートを約70°で立て、前面に高さ12mmのリップを設けてスマホの滑り落ちを防ぎます。壁厚8mmで印刷しやすい薄肉断面形状です。</p>
+          <div class="card-tags"><span class="tag">スマホスタンド</span><span class="tag">生活雑貨</span><span class="tag">中級</span></div>
+          <a class="card-open-link" href="../?g=phone-stand">開く &rarr;</a>
+        </div>
+      </article>
+
+      <article class="card">
+        <a class="card-thumb-link" href="../?g=plate-with-hole">
+          <img class="card-thumb" src="thumbs/plate-with-hole.png" alt="穴あきプレートのサムネイル" loading="lazy" />
+        </a>
+        <div class="card-body">
+          <h2 class="card-title">穴あきプレート</h2>
+          <p class="card-author">by PlugBits</p>
+          <p class="card-description">80×50mmの矩形プレート(厚さ6mm)の中心にΦ16mmの穴を1つ開けたシンプルな板部品です。</p>
+          <div class="card-tags"><span class="tag">プレート</span><span class="tag">穴</span><span class="tag">初級</span></div>
+          <a class="card-open-link" href="../?g=plate-with-hole">開く &rarr;</a>
+        </div>
+      </article>
+
+      <article class="card">
+        <a class="card-thumb-link" href="../?g=ring">
+          <img class="card-thumb" src="thumbs/ring.png" alt="リングのサムネイル" loading="lazy" />
+        </a>
+        <div class="card-body">
+          <h2 class="card-title">リング</h2>
+          <p class="card-author">by PlugBits</p>
+          <p class="card-description">外径40mm・内径20mm・厚さ8mmのドーナツ形状のリング部品です。同心円2つから穴を自動判定しています。</p>
+          <div class="card-tags"><span class="tag">リング</span><span class="tag">円形</span><span class="tag">初級</span></div>
+          <a class="card-open-link" href="../?g=ring">開く &rarr;</a>
+        </div>
+      </article>
+
+      <article class="card">
+        <a class="card-thumb-link" href="../?g=wall-hook">
+          <img class="card-thumb" src="thumbs/wall-hook.png" alt="壁掛けフックのサムネイル" loading="lazy" />
+        </a>
+        <div class="card-body">
+          <h2 class="card-title">壁掛けフック</h2>
+          <p class="card-author">by PlugBits</p>
+          <p class="card-description">高さ60mmの取付け背板とJ字形のフック腕を組み合わせた壁掛けフック(奥行き20mm)。背板にはΦ4.5mmのねじ穴を2箇所配置し、フック先端は大きめの丸みでバッグや衣類を傷めにくい形状にしています。</p>
+          <div class="card-tags"><span class="tag">フック</span><span class="tag">壁掛け</span><span class="tag">収納</span><span class="tag">中級</span></div>
+          <a class="card-open-link" href="../?g=wall-hook">開く &rarr;</a>
+        </div>
+      </article>
+
+      <article class="card">
+        <a class="card-thumb-link" href="../?g=washer-m8">
+          <img class="card-thumb" src="thumbs/washer-m8.png" alt="ワッシャー M8のサムネイル" loading="lazy" />
+        </a>
+        <div class="card-body">
+          <h2 class="card-title">ワッシャー M8</h2>
+          <p class="card-author">by PlugBits</p>
+          <p class="card-description">M8ボルト用ワッシャー(外径Φ16mm・内径Φ8.5mm・厚さ1.6mm)。ボルト頭と締結面の間に挟んで面圧を分散させる、寸法通りのシンプルな薄板部品です。</p>
+          <div class="card-tags"><span class="tag">ワッシャー</span><span class="tag">M8</span><span class="tag">締結部品</span><span class="tag">初級</span></div>
+          <a class="card-open-link" href="../?g=washer-m8">開く &rarr;</a>
+        </div>
+      </article>
+  </div>
+</main>
+</body>
+</html>

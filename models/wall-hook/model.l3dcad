@@ -1,0 +1,70 @@
+{
+  "format": "l3dcad",
+  "schemaVersion": 1,
+  "document": {
+    "version": 1,
+    "features": [
+      {
+        "type": "sketch",
+        "id": "sketch-wallhook-1",
+        "name": "Sketch1",
+        "plane": { "kind": "world", "plane": "XZ" },
+        "entities": [
+          {
+            "kind": "polygon",
+            "id": "entity-wallhook-profile",
+            "points": [
+              [0, 0],
+              [0, 60],
+              [8, 60],
+              [8, 24],
+              [30, 24],
+              [37.92, 22.04],
+              [44.02, 16.62],
+              [46.89, 8.97],
+              [45.86, 0.88],
+              [41.18, -5.81],
+              [33.92, -9.54],
+              [25.76, -9.46],
+              [18.58, -5.59],
+              [14.03, 1.19],
+              [21.54, 3.92],
+              [23.95, 0.34],
+              [27.76, -1.72],
+              [32.08, -1.76],
+              [35.92, 0.22],
+              [38.4, 3.76],
+              [38.94, 8.04],
+              [37.42, 12.09],
+              [34.19, 14.96],
+              [30, 16],
+              [8, 16],
+              [8, 0]
+            ]
+          },
+          {
+            "kind": "circle",
+            "id": "entity-wallhook-hole1",
+            "center": [4, 12],
+            "radius": 2.25
+          },
+          {
+            "kind": "circle",
+            "id": "entity-wallhook-hole2",
+            "center": [4, 48],
+            "radius": 2.25
+          }
+        ]
+      },
+      {
+        "type": "extrude",
+        "id": "extrude-wallhook-1",
+        "name": "Extrude1",
+        "sketchId": "sketch-wallhook-1",
+        "distance": 20,
+        "direction": 1,
+        "operation": "newBody"
+      }
+    ]
+  }
+}

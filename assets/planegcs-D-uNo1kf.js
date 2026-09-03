@@ -1,0 +1,1 @@
+var e=`/light-3dcad/assets/planegcs-r8EUavAY.wasm`;export{e as default};
