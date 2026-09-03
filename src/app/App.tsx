@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 
+import { ContextMenu, type ContextMenuItem } from "../components/ContextMenu";
 import { DimensionOverlay } from "../components/DimensionOverlay";
 import { DimensionToolPopup } from "../components/DimensionToolPopup";
 import { ExtrudeEditor } from "../components/ExtrudeEditor";
@@ -9,10 +10,12 @@ import { MateEditor } from "../components/MateEditor";
 import { PartInstanceEditor } from "../components/PartInstanceEditor";
 import { RevolveEditor } from "../components/RevolveEditor";
 import { ShellEditor } from "../components/ShellEditor";
+import { ShortcutHelpOverlay } from "../components/ShortcutHelpOverlay";
 import { SketchEditor } from "../components/SketchEditor";
 import { ThreadEditor } from "../components/ThreadEditor";
 import { ToolIcon, type ToolIconName } from "../components/ToolIcon";
 import { worldDirectionToLocal, worldPointToLocal } from "../assembly/mateSolver";
+import { isEditableTarget, resolveShortcut, type ShortcutAction } from "./shortcuts";
 
 // AIモデル生成パネル(Phase 37)。@anthropic-ai/sdkを含む重い依存(src/ai/generate.ts経由で
 // さらに動的import)をメインバンドルから分離するため、React.lazy()で遅延読み込みする。
@@ -80,6 +83,7 @@ import {
   describeAxisDistanceConflict,
   distanceBetweenRefs,
   foldToAcuteAngle,
+  isEntityFixed,
   isNearlyParallelAngle,
   pointFromRef,
   segmentLength,
@@ -97,6 +101,7 @@ import {
   upsertDistancePointOriginConstraint,
   upsertLengthConstraint,
   upsertRadiusConstraint,
+  setEntityFixed,
 } from "../sketch/constraintDimensions";
 import { deserializeProject, serializeProject } from "../project/serialization";
 import { runBootLoad } from "../project/bootLoad";
@@ -270,6 +275,13 @@ export default function App() {
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
   // 「ギャラリーに投稿」ダイアログ(Phase 40d)の開閉状態。
   const [gallerySubmitOpen, setGallerySubmitOpen] = useState(false);
+  // 右クリックコンテキストメニュー(Phase 49)。開いていなければnull。
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
+  // フィーチャーツリー行の右クリックメニュー「名前を変更」からFeatureTreeのインライン改名を
+  // 外部起動するためのリクエスト対象id(Phase 49、消費後はnullに戻す)。
+  const [renameRequestId, setRenameRequestId] = useState<string | null>(null);
+  // ショートカット一覧オーバーレイ(Phase 49)の開閉状態。
+  const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
   // 「スケッチ追加」ボタンで使う平面選択(Phase 13)。基準平面クリックと同等の機能をUIからも操作できるようにする。
   const [newSketchPlane, setNewSketchPlane] = useState<"XY" | "XZ" | "YZ">("XY");
   // 現在アクティブなフィレット/面取りツール(未選択はnull、Phase 18)。
@@ -533,6 +545,85 @@ export default function App() {
         useCadStore.getState().undo();
       },
     });
+    // 右クリックコンテキストメニュー(Phase 49)。クリック位置の対象(ContextMenuTarget)ごとに
+    // メニュー項目を組み立てる。ここもマウント時に一度だけ登録するコールバックのため、
+    // 常にuseCadStore.getState()/findFeature()で最新のドキュメントを読む(stale closure対策、
+    // 上のonFaceSelect等と同じ方針)。各アクション自体は既存のハンドラ・store操作の呼び出しのみで、
+    // 新しい業務ロジックは持たない。
+    viewer.setContextMenuCallback((clientX, clientY, target) => {
+      if (target.kind === "face") {
+        const face = target.face;
+        const items: ContextMenuItem[] = [
+          {
+            key: "sketch-on-face",
+            label: "この面にスケッチ",
+            disabled: !face.isPlanar,
+            onSelect: () => {
+              useCadStore.getState().selectFace(face);
+              useCadStore.getState().addFaceSketch();
+            },
+          },
+          {
+            key: "align-to-face",
+            label: "この面に正対",
+            disabled: !face.isPlanar,
+            onSelect: () => viewerRef.current?.lookAtFace(face),
+          },
+          { key: "fit-face", label: "フィット", onSelect: () => viewerRef.current?.fitToView() },
+        ];
+        setContextMenu({ x: clientX, y: clientY, items });
+        return;
+      }
+
+      if (target.kind === "sketchEntity") {
+        const { sketchId, targetId, isEntity } = target;
+        const items: ContextMenuItem[] = [
+          {
+            key: "delete-sketch-entity",
+            label: "削除",
+            onSelect: () => {
+              const state = useCadStore.getState();
+              const { doc: nextDoc, removedConstraintCount } = removeSketchElementCascade(state.doc, sketchId, targetId);
+              if (nextDoc === state.doc) return;
+              state.updateDocument(() => nextDoc);
+              if (useCadStore.getState().selectedEntityId === targetId) useCadStore.setState({ selectedEntityId: null });
+              if (removedConstraintCount > 0) {
+                showTransientMessage(`関連する拘束${removedConstraintCount}件も削除しました`);
+              }
+            },
+          },
+        ];
+        if (isEntity) {
+          const feature = findFeature(useCadStore.getState().doc, sketchId);
+          const fixed = feature?.type === "sketch" ? isEntityFixed(feature.constraints ?? [], targetId) : false;
+          items.push({
+            key: "toggle-fixed",
+            label: fixed ? "固定解除" : "固定",
+            onSelect: () => {
+              const f = findFeature(useCadStore.getState().doc, sketchId);
+              if (!f || f.type !== "sketch") return;
+              updateDocumentWithConflictRollback(
+                sketchId,
+                (d) => setSketchConstraints(d, sketchId, setEntityFixed(f.constraints ?? [], targetId, !fixed)),
+                (message) => window.alert(message),
+              );
+            },
+          });
+        }
+        setContextMenu({ x: clientX, y: clientY, items });
+        return;
+      }
+
+      setContextMenu({
+        x: clientX,
+        y: clientY,
+        items: [
+          { key: "fit-empty", label: "フィット", onSelect: () => viewerRef.current?.fitToView() },
+          { key: "view-iso", label: "等角", onSelect: () => viewerRef.current?.setStandardView("iso") },
+          { key: "view-front", label: "正面", onSelect: () => viewerRef.current?.setStandardView("front") },
+        ],
+      });
+    });
     viewerRef.current = viewer;
     return () => {
       viewer.dispose();
@@ -774,20 +865,72 @@ export default function App() {
     viewerRef.current?.setReferenceEdges(plane, edges);
   }, [doc, selectedFeatureId, sketchPlanes, referenceEdges]);
 
-  // Ctrl+Z(Mac: Cmd+Z)でアンドゥ、Ctrl+Shift+Z(Mac: Cmd+Shift+Z)でリドゥ(Phase 14)。
-  // Delete/Backspaceでビューア直接選択中のスケッチセグメント/エンティティを削除する(実機報告対応、
-  // Phase 32②)。テキスト入力欄にフォーカスがある間はブラウザ標準の編集動作(Undo/文字削除)を
-  // 優先し、何もしない。selectedFeatureId/selectedEntityId/docは常に最新のstoreから読む(このeffect
-  // 自体は初回のみ登録するリスナーのため、useCadStore.getState()で都度取得することで古いクロージャの
-  // 値を参照しないようにする)。
+  /**
+   * ショートカット(delete以外)の実処理レジストリ(Phase 49)。レンダーのたびに最新のクロージャで
+   * 丸ごと差し替える(useEffectではなくレンダー本体で直接代入する「最新値を持つref」パターン)ことで、
+   * 下のkeydownリスナー自体はマウント時に一度だけ登録したまま、常に最新のselectedSketchPlane・
+   * 各ツールの有効状態を見て判定するhandleStartXxx/isXxxDisabledを呼べるようにする。
+   */
+  const shortcutActionsRef = useRef<Record<ShortcutAction, () => void>>({
+    undo: () => {},
+    redo: () => {},
+    delete: () => {},
+    fit: () => {},
+    save: () => {},
+    help: () => {},
+    "sketch-line": () => {},
+    "sketch-rect": () => {},
+    "sketch-circle": () => {},
+    "sketch-point": () => {},
+    "sketch-dimension": () => {},
+    "sketch-constraint": () => {},
+    "sketch-trim": () => {},
+  });
+  shortcutActionsRef.current = {
+    undo: () => useCadStore.getState().undo(),
+    redo: () => useCadStore.getState().redo(),
+    delete: () => {}, // 実処理はhandleKeyDown内で直接行う(store由来の値のみで完結するため)。
+    fit: () => viewerRef.current?.fitToView(),
+    save: () => handleSaveProject(),
+    help: () => setShortcutHelpOpen(true),
+    "sketch-line": () => {
+      if (!isToolDisabled("segment")) handleStartSegmentDrawing();
+    },
+    "sketch-rect": () => {
+      if (!isToolDisabled("rect")) handleStartRectDrawing();
+    },
+    "sketch-circle": () => {
+      if (!isToolDisabled("circle")) handleStartCircleDrawing();
+    },
+    "sketch-point": () => {
+      if (!isToolDisabled("point")) handleStartPointDrawing();
+    },
+    "sketch-dimension": () => {
+      if (!isDimensionToolDisabled()) handleStartDimensionTool();
+    },
+    "sketch-constraint": () => {
+      if (!isConstraintToolDisabled()) handleStartConstraintTool();
+    },
+    "sketch-trim": () => {
+      if (!isTrimToolDisabled()) handleStartTrimTool();
+    },
+  };
+
+  // キーボードショートカット一式(Phase 14でCtrl+Z/Shift+Z、Phase 32②でDelete/Backspaceを追加、
+  // Phase 49でsrc/app/shortcuts.tsのキー→アクション純粋対応表を使う形に一本化してCtrl+Y/F/Ctrl+S/
+  // スケッチツール単キー(L/R/C/P/D/K/T)/ヘルプ(?)を追加)。テキスト入力欄にフォーカスがある間は
+  // ブラウザ標準の編集動作(Undo/文字削除等)を優先し、isEditableTarget()で何もしない。
+  // delete以外の各アクションの実処理はshortcutActionsRef(下記、レンダーのたびに最新のクロージャへ
+  // 更新する)経由で呼ぶことで、このeffect自体は初回のみ登録する1本のリスナーのまま、常に最新の
+  // selectedSketchPlane・各ツールの有効状態を参照できるようにする(deleteはstore由来の値のみで
+  // 完結するため、従来どおりuseCadStore.getState()で直接読む)。
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      const target = event.target as HTMLElement | null;
-      const isEditable =
-        !!target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
-      if (isEditable) return;
+      if (isEditableTarget(event.target as HTMLElement | null)) return;
+      const action = resolveShortcut(event);
+      if (!action) return;
 
-      if (event.key === "Delete" || event.key === "Backspace") {
+      if (action === "delete") {
         const state = useCadStore.getState();
         if (!state.selectedFeatureId || !state.selectedEntityId) return;
         const feature = findFeature(state.doc, state.selectedFeatureId);
@@ -807,14 +950,8 @@ export default function App() {
         return;
       }
 
-      const meta = event.ctrlKey || event.metaKey;
-      if (!meta || event.key.toLowerCase() !== "z") return;
       event.preventDefault();
-      if (event.shiftKey) {
-        useCadStore.getState().redo();
-      } else {
-        useCadStore.getState().undo();
-      }
+      shortcutActionsRef.current[action]();
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
@@ -869,6 +1006,20 @@ export default function App() {
       if (!ok) return;
     }
     removeFeature(featureId);
+  }
+
+  /**
+   * フィーチャーツリー行の右クリックメニュー(Phase 49)。「編集(選択)」「名前を変更」はisActive
+   * (ロールバックバー以前かどうか)がfalseなら無効化する(左クリック選択・ダブルクリック改名の
+   * 既存ガードと同じ基準)。「削除」は既存のhandleDelete()(依存フィーチャーの確認込み)をそのまま使う。
+   */
+  function handleFeatureTreeContextMenu(featureId: string, isActive: boolean, clientX: number, clientY: number) {
+    const items: ContextMenuItem[] = [
+      { key: "edit-select", label: "編集(選択)", disabled: !isActive, onSelect: () => selectFeature(featureId) },
+      { key: "rename", label: "名前を変更", disabled: !isActive, onSelect: () => setRenameRequestId(featureId) },
+      { key: "delete", label: "削除", onSelect: () => handleDelete(featureId) },
+    ];
+    setContextMenu({ x: clientX, y: clientY, items });
   }
 
   function handleAddExtrude() {
@@ -2550,6 +2701,16 @@ export default function App() {
             {status === "initializing" && " (WASM初期化中…)"}
             {status === "evaluating" && " (形状計算中…)"}
           </span>
+
+          <button
+            type="button"
+            className="ribbon-icon-btn"
+            data-testid="btn-shortcut-help"
+            onClick={() => setShortcutHelpOpen(true)}
+            title="ショートカット一覧を表示します (Shift+?)"
+          >
+            ?
+          </button>
         </div>
 
         {/* 第2行: タブストリップ(スケッチ/フィーチャー/アセンブリ/表示)。
@@ -3246,6 +3407,9 @@ export default function App() {
             onDelete={handleDelete}
             onSetRollback={setRollbackIndex}
             onRename={(featureId, name) => updateDocument((d) => renameFeature(d, featureId, name))}
+            onContextMenu={handleFeatureTreeContextMenu}
+            renameRequestId={renameRequestId}
+            onRenameRequestHandled={() => setRenameRequestId(null)}
           />
 
           {selectedFace && (
@@ -3691,6 +3855,10 @@ export default function App() {
           />
         </Suspense>
       )}
+      {contextMenu && (
+        <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />
+      )}
+      {shortcutHelpOpen && <ShortcutHelpOverlay onClose={() => setShortcutHelpOpen(false)} />}
     </div>
   );
 }

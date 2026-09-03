@@ -240,6 +240,109 @@ a.ribbon-file-btn:active {
   white-space: nowrap;
 }
 
+/* ------------------------------------------------------------
+   右クリックコンテキストメニュー(Phase 49)。
+   ------------------------------------------------------------ */
+.context-menu {
+  position: fixed;
+  min-width: 190px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px;
+  background: var(--cad-panel);
+  border: 1px solid var(--cad-border);
+  border-radius: var(--cad-radius-md);
+  box-shadow: var(--cad-shadow-md);
+  z-index: 2000;
+}
+.context-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  padding: 6px 10px;
+  border-radius: var(--cad-radius-sm);
+  font-size: var(--cad-fs-md);
+  color: var(--cad-text);
+}
+.context-menu-item:hover:not(:disabled) {
+  background: var(--cad-hover);
+}
+.context-menu-item:active:not(:disabled) {
+  background: var(--cad-active);
+}
+.context-menu-item:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ------------------------------------------------------------
+   ショートカット一覧オーバーレイ(Phase 49)。
+   ------------------------------------------------------------ */
+.shortcut-help-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 24, 32, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2100;
+}
+.shortcut-help-panel {
+  background: var(--cad-panel);
+  border: 1px solid var(--cad-border);
+  border-radius: var(--cad-radius-lg);
+  box-shadow: var(--cad-shadow-md);
+  padding: var(--cad-space-6);
+  width: 480px;
+  max-width: 90vw;
+  max-height: 85vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--cad-space-5);
+}
+.shortcut-help-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.shortcut-help-header h2 {
+  margin: 0;
+  font-size: var(--cad-fs-xl);
+}
+.shortcut-help-section h3 {
+  margin: 0 0 var(--cad-space-3);
+  font-size: var(--cad-fs-md);
+  color: var(--cad-text-muted);
+}
+.shortcut-help-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--cad-space-2);
+}
+.shortcut-help-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--cad-space-5);
+  font-size: var(--cad-fs-sm);
+}
+.shortcut-help-row span:first-child {
+  color: var(--cad-text-muted);
+}
+.shortcut-help-key {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--cad-panel-alt);
+  border: 1px solid var(--cad-border);
+  border-radius: var(--cad-radius-sm);
+  padding: 1px 6px;
+  font-size: var(--cad-fs-xs);
+  white-space: nowrap;
+}
+
 /* 第2行: タブストリップ + 常設ビュークラスタ(ヘッズアップ表示、SolidWorks同様タブを跨いで常時表示)。 */
 .ribbon-tabstrip-row {
   display: flex;

@@ -1215,3 +1215,7 @@ gate結果: tsc(app/e2e両方)エラーなし、Vitest 728→768件通過+1skip�
 ## Phase 48b: 辺↔原点の寸法+文言修正
 
 distanceLineOrigin拘束(MovableLineRef↔原点のp2l_distance、distanceEntityOriginの原点スナップショットとdistanceEntityLine/distancePointLineのline解決を組み合わせ)を新設して寸法ツールの原点との組み合わせを円/端点に加え辺(rectangle/polygon/regularPolygon/slotの辺・自由な線分)にも拡張し、寸法ツールの各pending状態ステータス文言をPhase 48/48bの対象拡大に合わせて修正した。gate結果: tsc(app/e2e両方)エラーなし、Vitest 768→782件通過+1skip、UIバンドルgzip266.8KB(+0.4KB、上限350KB内)、E2E 58→59件全通過(3分割でBash実行)。
+
+## Phase 49: 操作感パック(SolidWorks風マウス/右クリックメニュー/ショートカット)
+
+中ボタンドラッグ=回転・Shift+中ドラッグ=パンをFreeOrbitControlsに追加(既存の左回転/右パンは維持、中クリック時はブラウザの自動スクロールUIをpreventDefaultで抑止)し、ホイールズームをカーソル位置中心(zoomToCursor.tsの純粋関数、レイと注視点平面の交点を求めてカメラ・注視点を同時に平行移動)に変更した。CadViewerに右クリックコンテキストメニュー判定(getContextMenuTarget、右ボタンmousedownからの移動量5px未満のみ発火、他ツール使用中は非表示)を追加し、3D面(この面にスケッチ/正対/フィット)・フィーチャーツリー行(編集/名前を変更[既存インライン改名を外部起動]/削除)・スケッチ要素(削除/固定切替)・キャンバス空クリック(フィット/等角/正面)の4コンテキストをContextMenuコンポーネントで表示する(全アクションは既存ハンドラ呼び出しのみ)。キーボードショートカットはsrc/app/shortcuts.tsのキー→アクション純粋対応表(isEditableTargetで入力欄フォーカス中は無効化)に一本化し、Ctrl+Z/Y/Shift+Z・F(フィット)・Ctrl+S(保存)・スケッチ編集中のL/R/C/P/D/K/Tを追加、トップバー右端の「?」ボタン(Shift+?でも開く)からShortcutHelpOverlayで一覧表示する。gate結果: tsc(app/e2e両方)エラーなし、Vitest 782→799件通過+1skip(zoomToCursor/shortcuts純粋関数のテスト17件を追加)、UIバンドルgzip266.8KB→269.7KB(+2.9KB、上限350KB内)、E2E 59→63件全通過(3分割でBash実行、interaction-shortcuts.spec.ts新設)。
