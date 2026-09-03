@@ -81,6 +81,18 @@ interface FeatureTreeProps {
   onSetRollback: (index: number | null) => void;
   /** インライン改名(名前ダブルクリック→編集確定、Phase 38b)。 */
   onRename: (featureId: FeatureId, name: string) => void;
+  /**
+   * 行の右クリック(Phase 49、右クリックコンテキストメニュー)。isActiveはロールバックバー以前かどうか
+   * (「編集(選択)」「名前を変更」の有効/無効判定にApp.tsx側で使う。「削除」は常に有効)。
+   */
+  onContextMenu?: (featureId: FeatureId, isActive: boolean, clientX: number, clientY: number) => void;
+  /**
+   * 右クリックメニューの「名前を変更」から既存のインライン改名(FeatureRow内部状態)を外部起動する
+   * ためのリクエストID(Phase 49)。一致するfeature.idの行がこれを検知するとstartEdit()し、
+   * onRenameRequestHandled()を呼んで消費済みにする。
+   */
+  renameRequestId?: FeatureId | null;
+  onRenameRequestHandled?: () => void;
 }
 
 /**
@@ -130,6 +142,9 @@ function FeatureRow({
   onSelect,
   onDelete,
   onRename,
+  onContextMenu,
+  forceEdit,
+  onForceEditHandled,
 }: {
   feature: Feature;
   isActive: boolean;
@@ -139,6 +154,9 @@ function FeatureRow({
   onSelect: () => void;
   onDelete: () => void;
   onRename: (name: string) => void;
+  onContextMenu?: (clientX: number, clientY: number) => void;
+  forceEdit?: boolean;
+  onForceEditHandled?: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(feature.name);
@@ -157,6 +175,15 @@ function FeatureRow({
     setEditing(true);
   }
 
+  // 右クリックメニューの「名前を変更」からの外部起動(Phase 49)。startEdit()自体はisActiveでない
+  // 場合は何もしない(App.tsx側のメニュー項目自体もisActive=falseなら無効化される)。
+  useEffect(() => {
+    if (forceEdit) {
+      startEdit();
+      onForceEditHandled?.();
+    }
+  }, [forceEdit]);
+
   function commit() {
     const trimmed = draft.trim();
     if (trimmed && trimmed !== feature.name) onRename(trimmed);
@@ -174,6 +201,12 @@ function FeatureRow({
     <div
       data-testid={`feature-item-${feature.name}`}
       onClick={isActive ? onSelect : undefined}
+      onContextMenu={(e) => {
+        if (!onContextMenu) return;
+        e.preventDefault();
+        e.stopPropagation();
+        onContextMenu(e.clientX, e.clientY);
+      }}
       className={`feature-row${isActive ? "" : " is-suppressed"}${selected ? " is-selected" : ""}${hasError ? " has-error" : ""}`}
     >
       <span className="feature-row-icon" aria-hidden="true">
@@ -237,7 +270,18 @@ function FeatureRow({
   );
 }
 
-export function FeatureTree({ doc, selectedFeatureId, errorFeatureId, onSelect, onDelete, onSetRollback, onRename }: FeatureTreeProps) {
+export function FeatureTree({
+  doc,
+  selectedFeatureId,
+  errorFeatureId,
+  onSelect,
+  onDelete,
+  onSetRollback,
+  onRename,
+  onContextMenu,
+  renameRequestId,
+  onRenameRequestHandled,
+}: FeatureTreeProps) {
   const total = doc.features.length;
   const activeCount = effectiveFeatureCount(doc);
 
@@ -269,6 +313,9 @@ export function FeatureTree({ doc, selectedFeatureId, errorFeatureId, onSelect, 
                   onSelect={() => onSelect(feature.id)}
                   onDelete={() => onDelete(feature.id)}
                   onRename={(name) => onRename(feature.id, name)}
+                  onContextMenu={onContextMenu ? (clientX, clientY) => onContextMenu(feature.id, isActive, clientX, clientY) : undefined}
+                  forceEdit={renameRequestId === feature.id}
+                  onForceEditHandled={onRenameRequestHandled}
                 />
               </li>
             );

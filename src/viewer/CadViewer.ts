@@ -291,6 +291,15 @@ export interface PlaneBasis {
   normal: Tuple3;
 }
 
+/**
+ * 右クリックコンテキストメニュー(Phase 49)がクリック位置に何を見つけたか。
+ * getContextMenuTarget()の戻り値で、App.tsx側がこれを見てメニュー項目を組み立てる。
+ */
+export type ContextMenuTarget =
+  | { kind: "face"; face: FaceInfo }
+  | { kind: "sketchEntity"; sketchId: FeatureId; targetId: string; isEntity: boolean }
+  | { kind: "empty" };
+
 /** 線描画モードの完了/キャンセル時に呼ばれるコールバック。 */
 export interface PolygonDrawingCallbacks {
   /**
@@ -1218,6 +1227,14 @@ export class CadViewer {
    * 指しているかどうか)。面ピックより優先して呼ばれる(handleClick参照)。
    */
   private onSketchEntityPick?: (sketchId: FeatureId, targetId: string, isEntity: boolean) => void;
+  /**
+   * 右クリックコンテキストメニュー(Phase 49)。右ボタンmousedown位置を記録しておき、
+   * contextmenuイベント発火時にmousedownからの移動量がCONTEXT_MENU_MOVE_THRESHOLD_PX未満
+   * (=ドラッグではなく静止クリック)だった場合のみonContextMenuRequestを呼ぶ。ドラッグだった
+   * 場合は右ボタンドラッグ=パンという既存のカメラ操作をそのまま活かし、メニューは開かない。
+   */
+  private rightMouseDownPos: { x: number; y: number } | null = null;
+  private onContextMenuRequest: ((clientX: number, clientY: number, target: ContextMenuTarget) => void) | null = null;
   /** 基準平面(ボディなし時に表示する半透明の3枚)を乗せるグループ。visibleで表示/非表示を切り替える。 */
   private referencePlaneGroup: THREE.Group;
   private referencePlaneEntries: {
@@ -1798,6 +1815,8 @@ export class CadViewer {
     this.renderer.domElement.addEventListener("mouseleave", this.handleMouseLeave);
     this.renderer.domElement.addEventListener("mousedown", this.handlePartDragCanvasMouseDown);
     this.renderer.domElement.addEventListener("mousedown", this.handleSketchDragCanvasMouseDown);
+    this.renderer.domElement.addEventListener("mousedown", this.handleContextMenuTrackMouseDown);
+    this.renderer.domElement.addEventListener("contextmenu", this.handleContextMenuEvent);
     window.addEventListener("keydown", this.handleKeyDown);
 
     this.resizeObserver = new ResizeObserver(() => this.handleResize());
@@ -2240,6 +2259,118 @@ export class CadViewer {
       this.selectedGroupIndex = null;
       this.onFaceSelect?.(null);
     }
+  }
+
+  /**
+   * 右クリックコンテキストメニュー(Phase 49)のコールバックを登録する。nullで解除。
+   * ドラッグでない(移動量5px未満の)右クリックのたびに、クリック位置で見つかった対象
+   * (ContextMenuTarget)とともに呼ばれる。App.tsx側がメニューの位置・項目を組み立てる。
+   */
+  setContextMenuCallback(callback: ((clientX: number, clientY: number, target: ContextMenuTarget) => void) | null) {
+    this.onContextMenuRequest = callback;
+  }
+
+  /** 右ボタンmousedown位置を記録する(handleContextMenuEvent()のドラッグ判定に使う)。 */
+  private handleContextMenuTrackMouseDown = (event: MouseEvent) => {
+    if (event.button === 2) {
+      this.rightMouseDownPos = { x: event.clientX, y: event.clientY };
+    }
+  };
+
+  private static readonly CONTEXT_MENU_MOVE_THRESHOLD_PX = 5;
+
+  /**
+   * 右クリックの既定コンテキストメニューは常に抑止する(右ドラッグ=パンという既存挙動と共存させる
+   * ため、FreeOrbitControls側のpreventDefaultとは独立にここでも呼ぶ。二重に呼んでも副作用は無い)。
+   * mousedownからの移動量がCONTEXT_MENU_MOVE_THRESHOLD_PX未満(=実質その場でのクリック)の場合のみ、
+   * getContextMenuTarget()でクリック位置の対象を判定してonContextMenuRequestを呼ぶ。
+   */
+  private handleContextMenuEvent = (event: MouseEvent) => {
+    event.preventDefault();
+    const down = this.rightMouseDownPos;
+    this.rightMouseDownPos = null;
+    if (!this.onContextMenuRequest) return;
+    if (down) {
+      const dx = event.clientX - down.x;
+      const dy = event.clientY - down.y;
+      if (Math.hypot(dx, dy) >= CadViewer.CONTEXT_MENU_MOVE_THRESHOLD_PX) return;
+    }
+    const target = this.getContextMenuTarget(event.clientX, event.clientY);
+    if (!target) return;
+    this.onContextMenuRequest(event.clientX, event.clientY, target);
+  };
+
+  /**
+   * clientX/clientY(ページ座標)でのコンテキストメニュー対象を判定する。優先順位はhandleClick()の
+   * 通常クリックと同じく「スケッチ線オーバーレイ(ボディに隠れていなければ) > 3D面 > 何もない」。
+   * 他のツール(描画・寸法・拘束・トリム・延長・面/エッジ選択・部品移動・合致・ねじ配置・
+   * フィレット/面取り頂点選択・基準平面表示中)が使用中の場合はnullを返し、メニューを開かない
+   * (それぞれのツール固有の右クリック挙動を新設するのはPhase 49のスコープ外)。
+   */
+  private getContextMenuTarget(clientX: number, clientY: number): ContextMenuTarget | null {
+    if (
+      this.mateToolActive ||
+      this.partDragToolActive ||
+      this.trimActive ||
+      this.extendActive ||
+      this.cornerToolActive ||
+      this.dimensionToolActive ||
+      this.constraintToolActive ||
+      this.edgeSelectActive ||
+      this.faceSelectActive ||
+      this.threadPlaceActive ||
+      this.drawingActive ||
+      this.referencePlaneGroup.visible
+    ) {
+      return null;
+    }
+
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = clientX - rect.left;
+    const py = clientY - rect.top;
+    const entityPick = this.pickSketchOverlayAt(px, py);
+    if (entityPick && !this.isSketchOverlayOccludedByMesh(entityPick.sketchId, px, py, rect)) {
+      return { kind: "sketchEntity", sketchId: entityPick.sketchId, targetId: entityPick.targetId, isEntity: entityPick.isEntity };
+    }
+
+    const face = this.raycastFaceInfoAt(clientX, clientY);
+    if (face) return { kind: "face", face };
+
+    return { kind: "empty" };
+  }
+
+  /**
+   * clientX/clientY(ページ座標)でレイキャストしたB-Rep面情報を返す(ヒットなしはnull)。
+   * handleClick()の面ピック部分と同じロジックだが、選択状態を一切変更しない読み取り専用版
+   * (getContextMenuTarget()から使う、Phase 49)。
+   */
+  private raycastFaceInfoAt(clientX: number, clientY: number): FaceInfo | null {
+    if (!this.mesh) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const pointer = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(pointer, this.camera);
+    const intersections = this.raycaster.intersectObject(this.mesh, false);
+    if (intersections.length === 0) return null;
+    const triangleIndex = intersections[0].faceIndex;
+    if (triangleIndex == null) return null;
+    const triangleOffset = triangleIndex * 3;
+    const groupIndex = this.faceGroups.findIndex((g) => triangleOffset >= g.start && triangleOffset < g.start + g.count);
+    if (groupIndex === -1) return null;
+    const faceId = this.faceGroups[groupIndex].faceId;
+    return this.faceInfo.find((f) => f.faceId === faceId) ?? null;
+  }
+
+  /**
+   * 指定した面(中心・法線)に正対する視点へカメラを移動する(右クリックメニュー「この面に正対」、
+   * Phase 49)。lookAtPlane()と異なりPlaneBasisを要求せず、面の中心・法線だけから
+   * computeFacePlaneBasis()(face上スケッチのplane基底と同じ決定的な計算)でyDirを求める。
+   */
+  lookAtFace(face: Pick<FaceInfo, "center" | "normal">) {
+    const basis = computeFacePlaneBasis(face.center, face.normal);
+    this.lookAtPlane(basis);
   }
 
   /**
@@ -6821,6 +6952,8 @@ export class CadViewer {
     this.renderer.domElement.removeEventListener("mouseleave", this.handleMouseLeave);
     this.renderer.domElement.removeEventListener("mousedown", this.handlePartDragCanvasMouseDown);
     this.renderer.domElement.removeEventListener("mousedown", this.handleSketchDragCanvasMouseDown);
+    this.renderer.domElement.removeEventListener("mousedown", this.handleContextMenuTrackMouseDown);
+    this.renderer.domElement.removeEventListener("contextmenu", this.handleContextMenuEvent);
     window.removeEventListener("mousemove", this.handlePartDragWindowMouseMove);
     window.removeEventListener("mouseup", this.handlePartDragWindowMouseUp);
     window.removeEventListener("mousemove", this.handleSketchDragWindowMouseMove);
